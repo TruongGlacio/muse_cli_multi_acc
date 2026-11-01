@@ -1191,52 +1191,91 @@ public sealed class BrowserDriver : IMuseDriver
         // ---- Các bước trình duyệt (trang tạm, đúng context) ----
         var context = await GetContext(account);
         var page = await context.NewPageAsync();
+        // v0.8.4: PHÁT HIỆN API (chỉ chẩn đoán, chưa dùng API mới nào
+        // để lấy hồ sơ). Lắng nghe request của chính trang này trong
+        // suốt quá trình fetch (trang chủ, menu, cài đặt) và ghi lại
+        // đường dẫn /api/* tới host muse.ai — CHỈ path đã bỏ query
+        // string, KHÔNG body, KHÔNG header, KHÔNG cookie, KHÔNG nội
+        // dung response. Danh sách này in vào dòng profile_detail để
+        // lần sau biết chính trang web Muse gọi API nào khi tải trang
+        // hồ sơ/cài đặt, từ đó mới chọn API nào để dùng tiếp.
+        var apiPaths = new List<string>();
+        var apiSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var apiLock = new object();
+        EventHandler<IRequest> onRequest = (_, req) =>
+        {
+            try
+            {
+                var path = ApiPathOfRequest(req.Url);
+                if (path is null) return;
+                lock (apiLock)
+                {
+                    // Giới hạn để dòng log không dài vô hạn.
+                    if (apiPaths.Count < 50 && apiSeen.Add(path)) apiPaths.Add(path);
+                }
+            }
+            catch { /* lắng nghe chẩn đoán không được làm hỏng fetch */ }
+        };
+        page.Request += onRequest;
         var finalUrl = Upstream.Site;
         var menuOpened = false;
         var settingsOpened = false;
         var homeUsable = false;
+        // v0.8.4: trang đã tải đúng host muse.ai thì vẫn dùng được cho
+        // menu/localStorage dù khâu đọc trang chủ lỗi (read null hay
+        // gợi ý đăng nhập trong đầu trang khi API phiên vẫn xác thực
+        // được); chỉ Goto thất bại hoặc host sai mới bỏ qua các bước
+        // sau. homeError ghi rõ lý do để log 0.8.4 chẩn đoán được.
+        var pageUsable = false;
+        string? homeError = null;
         try
         {
-            // ---- Bước 2: trang chủ (+ outerHTML) ----
+            // ---- Bước 2: trang chủ (+ outerHTML), thử lại 1 lần ----
+            // Lỗi tải trang thoáng qua khá thường gặp nên Goto + đọc
+            // được thử tối đa 2 lần trước khi kết luận home thất bại.
             attempted.Add("home");
-            try
+            for (var attempt = 0; attempt < 2 && !homeUsable; attempt++)
             {
-                await page.GotoAsync(Upstream.Site,
-                    new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-                await Task.Delay(TimeSpan.FromSeconds(2.5), cancel);
-                finalUrl = page.Url;
-                var read = await ReadProfilePage(page, cancel);
-                if (read is null) { failed.Add("home"); }
-                else
+                try
                 {
-                    if (!Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
-                        || !pageUri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase))
+                    await page.GotoAsync(Upstream.Site,
+                        new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                    await Task.Delay(TimeSpan.FromSeconds(2.5), cancel);
+                    finalUrl = page.Url;
+                    var read = await ReadProfilePage(page, cancel);
+                    var hostOk = Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
+                        && pageUri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase);
+                    var head = read is null ? ""
+                        : (read.Text.Length > 2000 ? read.Text[..2000] : read.Text).ToLowerInvariant();
+                    var loginHint = read is not null && Dom.LoginHints.Any(h => head.Contains(h));
+                    var (usable, error, throwAuth) = DecideHomeOutcome(read is null, hostOk, loginHint, sessionApiOk);
+                    pageUsable = usable;
+                    homeError = error;
+                    if (throwAuth)
+                        throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+                    if (error is null && read is not null)
                     {
-                        if (!sessionApiOk)
-                            throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
-                        failed.Add("home");
-                    }
-                    else
-                    {
-                        var head = (read.Text.Length > 2000 ? read.Text[..2000] : read.Text).ToLowerInvariant();
-                        if (Dom.LoginHints.Any(h => head.Contains(h)) && !sessionApiOk)
-                            throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
-                        if (Dom.LoginHints.Any(h => head.Contains(h))) { failed.Add("home"); }
-                        else
-                        {
-                            MergeProfilePage(read, "home", scan);
-                            homeUsable = true;
-                            succeeded.Add("home");
-                        }
+                        MergeProfilePage(read, "home", scan);
+                        homeUsable = true;
+                        succeeded.Add("home");
                     }
                 }
+                catch (UpstreamException) { throw; }
+                catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    // Chỉ ghi tên loại exception, không ghi thông điệp
+                    // (có thể chứa nội dung trang) hay nội dung trang.
+                    homeError = "goto_error:" + ex.GetType().Name;
+                    pageUsable = false;
+                }
             }
-            catch (UpstreamException) { throw; }
-            catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
-            catch { if (!failed.Contains("home") && !succeeded.Contains("home")) failed.Add("home"); }
+            if (!homeUsable && !failed.Contains("home")) failed.Add("home");
 
             // ---- Bước 3: bấm mở menu hồ sơ ----
-            if (homeUsable)
+            // v0.8.4: chỉ cần trang đã tải đúng host là thử, không cần
+            // khâu đọc trang chủ thành công.
+            if (pageUsable)
             {
                 attempted.Add("menu");
                 try
@@ -1331,7 +1370,8 @@ public sealed class BrowserDriver : IMuseDriver
             }
 
             // ---- Bước 5: quét localStorage (bước cuối) ----
-            if (homeUsable)
+            // v0.8.4: như bước menu — chỉ cần trang đã tải đúng host.
+            if (pageUsable)
             {
                 attempted.Add("local_storage");
                 try
@@ -1378,9 +1418,13 @@ public sealed class BrowserDriver : IMuseDriver
                 catch { failed.Add("local_storage"); }
             }
         }
-        finally { try { await page.CloseAsync(); } catch { } }
+        finally
+        {
+            try { page.Request -= onRequest; } catch { }
+            try { await page.CloseAsync(); } catch { }
+        }
 
-        var debug = new ProfileDebug(attempted, succeeded, failed, finalUrl, menuOpened, settingsOpened, scan.CandidateCount, scan.EmailSource, scan.UsernameSource);
+        var debug = new ProfileDebug(attempted, succeeded, failed, finalUrl, menuOpened, settingsOpened, scan.CandidateCount, scan.EmailSource, scan.UsernameSource, homeError);
         // v0.8.3: dòng chi tiết mapping — CÓ chứa giá trị khớp được thật
         // (kể cả rác bị loại, kèm nguồn bước:trường), chỉ in ra stdout
         // gateway cục bộ (Output > Muse Gateway) theo yêu cầu chẩn đoán
@@ -1390,9 +1434,41 @@ public sealed class BrowserDriver : IMuseDriver
         Diagnostic?.Invoke(DiagnosticLines.ProfileDetailLine(account.Id,
             scan.Email, scan.EmailDetail, scan.EmailRejectedSource, scan.EmailRejectedValue,
             scan.Username, scan.UsernameDetail, scan.UsernameRejectedSource, scan.UsernameRejectedValue,
-            scan.Phone, scan.PhoneDetail));
+            scan.Phone, scan.PhoneDetail, homeError, apiPaths));
         if (scan.Email is null && scan.Username is null && scan.Phone is null) return (null, debug);
         return (new ProfileInfo(scan.Email, scan.Username, scan.Phone), debug);
+    }
+
+    // v0.8.4: phân loại kết quả một lần đọc trang chủ thành
+    // (pageUsable, homeError, throwAuth), để kiểm chứng được bằng
+    // test đơn vị mà không cần trình duyệt thật. pageUsable=true khi
+    // trang đã tải đúng host muse.ai — kể cả khi đọc trả null hay đầu
+    // trang có gợi ý đăng nhập — vì menu/localStorage vẫn thử được
+    // trên cùng trang đó; chỉ host sai mới coi là trang không dùng
+    // được. throwAuth=true giữ đúng hành vi cũ: phiên hết hạn thật
+    // (API phiên cũng không xác thực được) thì báo Auth thay vì im
+    // lặng coi là home thất bại.
+    public static (bool PageUsable, string? HomeError, bool ThrowAuth) DecideHomeOutcome(
+        bool readNull, bool hostIsMuseAi, bool loginHint, bool sessionApiOk)
+    {
+        if (!hostIsMuseAi) return (false, "wrong_host", !sessionApiOk);
+        if (readNull) return (true, "read_null", false);
+        if (loginHint) return (true, "login_hint", !sessionApiOk);
+        return (true, null, false);
+    }
+
+    // v0.8.4: trích đường dẫn /api/* từ URL request của trang để PHÁT
+    // HIỆN API (chỉ chẩn đoán). Trả null khi không phải request tới
+    // host muse.ai hoặc không bắt đầu bằng /api/. CHỈ lấy AbsolutePath
+    // (đã bỏ query string — query có thể chứa token) và không bao giờ
+    // đọc body/header/cookie/response của request.
+    public static string? ApiPathOfRequest(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return null;
+        if (!uri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase)) return null;
+        var path = uri.AbsolutePath;
+        if (!path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)) return null;
+        return path;
     }
 
     // Một lần đọc trang cho profile: text + tiêu đề + candidates +

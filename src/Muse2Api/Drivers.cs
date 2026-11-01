@@ -28,7 +28,13 @@ public sealed record ProfileInfo(string? Email, string? Username, string? Phone)
 // bước nào sinh ra giá trị sai.
 public sealed record ProfileDebug(List<string> Attempted, List<string> Succeeded, List<string> Failed,
     string FinalUrl, bool MenuOpened, bool SettingsOpened, int CandidateCount,
-    string? EmailSource = null, string? UsernameSource = null);
+    string? EmailSource = null, string? UsernameSource = null,
+    // v0.8.4: lý do bước home thất bại (null khi home thành công):
+    // "read_null" (đọc trang trả null), "wrong_host" (trang không ở
+    // host muse.ai), "login_hint" (đầu trang có gợi ý đăng nhập),
+    // "goto_error:<TênLoạiException>" (Goto/Eval ném exception, chỉ
+    // ghi tên loại, không ghi nội dung trang hay thông điệp lỗi).
+    string? HomeError = null);
 // Kết quả quét thread web (v0.7.0, điểm 4): danh sách + chẩn đoán chỉ
 // gồm số lượng (pageUrl, linkCount, threadCount), không nội dung trang.
 public sealed record WebThreadsScan(List<(string Url, string Title)> Threads, string PageUrl, int LinkCount, bool LoginHint = false);

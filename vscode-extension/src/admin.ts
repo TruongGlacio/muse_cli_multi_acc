@@ -214,6 +214,8 @@ export interface ProfileRefreshDebug {
   // v0.8.3: tên bước nguồn của giá trị (không chứa giá trị).
   emailSource?: string;
   usernameSource?: string;
+  // v0.8.4: lý do bước home thất bại (chỉ tên loại, không giá trị).
+  homeError?: string;
 }
 
 function asProfileDebug(obj: unknown): ProfileRefreshDebug | undefined {
@@ -230,6 +232,7 @@ function asProfileDebug(obj: unknown): ProfileRefreshDebug | undefined {
     candidateCount: typeof d.candidate_count === 'number' ? d.candidate_count : 0,
     emailSource: typeof d.email_source === 'string' ? d.email_source : undefined,
     usernameSource: typeof d.username_source === 'string' ? d.username_source : undefined,
+    homeError: typeof d.home_error === 'string' ? d.home_error : undefined,
   };
 }
 

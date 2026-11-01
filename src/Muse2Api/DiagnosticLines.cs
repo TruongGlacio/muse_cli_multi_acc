@@ -34,7 +34,9 @@ public static class DiagnosticLines
             + $" failed={string.Join(",", debug.Failed)}"
             + $" menu_opened={Bool(debug.MenuOpened)}"
             + $" settings_opened={Bool(debug.SettingsOpened)}"
-            + $" candidates={debug.CandidateCount}";
+            + $" candidates={debug.CandidateCount}"
+            // v0.8.4: lý do bước home thất bại (chỉ tên loại, không giá trị).
+            + $" home_error={debug.HomeError ?? "-"}";
 
     // Nguồn/giá trị hiển thị cho một trường trong dòng profile_detail:
     // giá trị chấp nhận thì nguồn là bước:trường của nó; chỉ có rác bị
@@ -52,11 +54,14 @@ public static class DiagnosticLines
     /// Dòng chi tiết mapping hồ sơ (v0.8.3): trường nào map vào
     /// email/username/phone, từ bước và trường nguồn nào, với giá trị
     /// khớp được nào. Chỉ dùng cho chẩn đoán ở log Output cục bộ.
+    /// v0.8.4 thêm home_error và api_calls (các path /api/* quan sát
+    /// được từ request của trang — chỉ path, không query/body/header/
+    /// cookie/response — để phát hiện API, chưa dùng API mới nào).
     /// </summary>
     public static string ProfileDetailLine(string accountId,
         string? email, string? emailDetail, string? emailRejectedSource, string? emailRejectedValue,
         string? username, string? usernameDetail, string? usernameRejectedSource, string? usernameRejectedValue,
-        string? phone, string? phoneDetail)
+        string? phone, string? phoneDetail, string? homeError, IReadOnlyList<string>? apiCalls)
         => $"profile_detail account={accountId}"
             + $" email={(email is null ? "not_found" : "found")}"
             + $" email_source={DetailSource(emailDetail, emailRejectedSource)}"
@@ -66,5 +71,12 @@ public static class DiagnosticLines
             + $" username_value={DetailValue(username, usernameRejectedValue)}"
             + $" phone={(phone is null ? "not_found" : "found")}"
             + $" phone_source={phoneDetail ?? "-"}"
-            + $" phone_value={phone ?? "-"}";
+            + $" phone_value={phone ?? "-"}"
+            // v0.8.4: lý do bước home thất bại (chỉ tên loại, không giá trị).
+            + $" home_error={homeError ?? "-"}"
+            // v0.8.4: các đường dẫn /api/* quan sát được từ request của
+            // trang trong lúc fetch (chỉ path đã bỏ query, đã khử trùng,
+            // theo thứ tự quan sát; không có thì "none"). Chỉ phục vụ
+            // phát hiện API, không phải dữ liệu hồ sơ.
+            + $" api_calls={(apiCalls is null || apiCalls.Count == 0 ? "none" : string.Join(",", apiCalls))}";
 }

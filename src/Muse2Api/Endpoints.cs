@@ -919,6 +919,8 @@ public static class Endpoints
                 // v0.8.3: tên bước nguồn của giá trị (không chứa giá trị).
                 ["email_source"] = debug.EmailSource is null ? null : JsonValue.Create(debug.EmailSource),
                 ["username_source"] = debug.UsernameSource is null ? null : JsonValue.Create(debug.UsernameSource),
+                // v0.8.4: lý do bước home thất bại (chỉ tên loại, không giá trị).
+                ["home_error"] = debug.HomeError is null ? null : JsonValue.Create(debug.HomeError),
             };
             return Results.Json(new JsonObject { ["account"] = acc.Public(), ["profile_found"] = found, ["debug"] = debugJson });
         });
