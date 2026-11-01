@@ -1,0 +1,173 @@
+{
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:muse.chat",
+    "onCommand:muse.openChat",
+    "onCommand:muse.explainProject",
+    "onCommand:muse.findAndFix",
+    "onCommand:muse.addFeature",
+    "onCommand:muse.checkQuality",
+    "onCommand:muse.stop",
+    "onCommand:muse.startGateway",
+    "onCommand:muse.stopGateway",
+    "onCommand:muse.restartGateway",
+    "onCommand:muse.importDesktopLogin",
+    "onCommand:muse.installGatewayBrowser",
+    "onCommand:muse.showGatewayLog",
+    "onCommand:muse.openGatewayDashboard"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "muse.openChat",
+        "title": "Muse: Mở chat"
+      },
+      {
+        "command": "muse.explainProject",
+        "title": "Muse: Tìm hiểu dự án"
+      },
+      {
+        "command": "muse.findAndFix",
+        "title": "Muse: Tìm và sửa lỗi"
+      },
+      {
+        "command": "muse.addFeature",
+        "title": "Muse: Thêm tính năng"
+      },
+      {
+        "command": "muse.checkQuality",
+        "title": "Muse: Kiểm tra chất lượng"
+      },
+      {
+        "command": "muse.stop",
+        "title": "Muse: Dừng yêu cầu đang chạy"
+      },
+      {
+        "command": "muse.startGateway",
+        "title": "Muse: Khởi động gateway"
+      },
+      {
+        "command": "muse.stopGateway",
+        "title": "Muse: Dừng gateway kèm theo"
+      },
+      {
+        "command": "muse.restartGateway",
+        "title": "Muse: Khởi động lại gateway"
+      },
+      {
+        "command": "muse.importDesktopLogin",
+        "title": "Muse: Nhập đăng nhập từ app desktop"
+      },
+      {
+        "command": "muse.installGatewayBrowser",
+        "title": "Muse: Cài Chromium cho gateway"
+      },
+      {
+        "command": "muse.showGatewayLog",
+        "title": "Muse: Xem log gateway"
+      },
+      {
+        "command": "muse.openGatewayDashboard",
+        "title": "Muse: Mở dashboard gateway"
+      }
+    ],
+    "configuration": {
+      "properties": {
+        "muse.apiKey": {
+          "default": "",
+          "description": "API key của gateway. Để trống: extension tự sinh và lưu key riêng cho gateway kèm theo trong SecretStorage của VS Code; chỉ cần dán key khi dùng gateway ngoài chạy sẵn mà key không khớp.",
+          "type": "string"
+        },
+        "muse.autoApprove": {
+          "default": false,
+          "description": "Bật để tự duyệt mọi thao tác ghi tệp và chạy lệnh. Mặc định là tắt: mỗi thao tác ghi/chạy đều hỏi duyệt, và thao tác sửa tệp có nút Xem diff.",
+          "type": "boolean"
+        },
+        "muse.baseUrl": {
+          "default": "http://127.0.0.1:18610/v1",
+          "description": "Địa chỉ gateway Muse2Api, gồm /v1. Mặc định http://127.0.0.1:18610/v1. Ở chế độ auto/bundled, extension tự khởi động gateway kèm theo trên cổng này khi mở VS Code nếu chưa có gateway nào chạy.",
+          "type": "string"
+        },
+        "muse.commandTimeoutSeconds": {
+          "default": 120,
+          "description": "Thời gian chờ tối đa cho mỗi lệnh chạy trong workspace.",
+          "type": "number"
+        },
+        "muse.maxSteps": {
+          "default": 30,
+          "description": "Số bước tool tối đa trong một yêu cầu.",
+          "type": "number"
+        },
+        "muse.model": {
+          "default": "muse-chat",
+          "description": "Tên model gửi tới gateway.",
+          "type": "string"
+        },
+        "muse.gatewayMode": {
+          "default": "auto",
+          "description": "Cách extension lấy gateway. auto (mặc định): dùng gateway sẵn có nếu đã chạy và key khớp, nếu không thì tự chạy gateway kèm theo. bundled: luôn tự chạy gateway kèm theo khi chưa có gateway nào. external: không bao giờ tự chạy, chỉ dùng gateway ngoài.",
+          "enum": [
+            "auto",
+            "bundled",
+            "external"
+          ],
+          "type": "string"
+        },
+        "muse.gatewayPath": {
+          "default": "",
+          "description": "Đường dẫn tới file thực thi gateway Muse2Api tự chọn. Để trống thì dùng binary kèm theo extension (bin/win-x64/Muse2Api.exe trên Windows x64).",
+          "type": "string"
+        }
+      },
+      "title": "Muse"
+    },
+    "views": {
+      "muse": [
+        {
+          "id": "muse.chat",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "muse",
+          "title": "Muse",
+          "icon": "media/icon.svg"
+        }
+      ]
+    }
+  },
+  "description": "Chat, đọc dự án, sửa tệp và chạy kiểm tra trong VS Code qua gateway Muse2Api kèm theo, tự chạy khi mở VS Code (tài khoản Muse).",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.0.0"
+  },
+  "displayName": "Muse",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "main": "./out/extension.js",
+  "name": "muse-vscode",
+  "publisher": "thanhtaiinguyen",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thanhtaiinguyen/muse_cli.git"
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "vscode:prepublish": "npm run compile",
+    "watch": "tsc -watch -p ./"
+  },
+  "version": "0.2.0",
+  "extensionKind": [
+    "ui",
+    "workspace"
+  ]
+}
