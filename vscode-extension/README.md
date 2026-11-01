@@ -1,7 +1,11 @@
-# Muse cho VS Code (v0.8.8)
+# Muse cho VS Code (v0.8.9)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.8.9: title hội thoại qua thăm dò lấy từ text nút sidebar
+
+Bản 0.8.8 lấy title hội thoại qua thăm dò từ `document.title` tại trang thread vừa mở, nhưng tiêu đề tab của muse.ai là tiêu đề chung "Chat - Muse" cho mọi trang (log thật 0.8.6 đã cho thấy trang chủ và `/thread/new` đều mang tiêu đề này) nên title luôn bị loại là chung chung và hội thoại lại hiện id dự phòng. Bản này sửa đúng chỗ đó, chỉ trong luồng thăm dò đồng bộ: bước liệt kê nút trong aside/nav nay trả thêm text hiển thị của nút (đã gộp khoảng trắng, cắt 80 ký tự), và khi một cú bấm mở ra `/thread/<id>` thì title lấy theo thứ tự ưu tiên — text nút đã làm sạch, rồi `document.title` đã làm sạch như cũ, rồi null để extension giữ dự phòng. Làm sạch text nút: gộp khoảng trắng, bỏ hậu tố " - Muse", loại nhãn nút chức năng (chuẩn hóa trùng đúng cụm history/lịch sử/sidebar/menu/new chat), cắt 80 ký tự, loại rỗng/"Chat"/"Muse". Title nút chỉ đi trong kết quả thread trả về extension, tuyệt đối không ghi title, text nút hay URL thread vào log (log vẫn chỉ số lượng). Đường link vẫn lấy title từ innerText anchor như cũ; endpoint thread-messages vẫn lấy title từ `document.title` như cũ (đường đó không có nút để lấy text); đồng bộ cập nhật title cũ của 0.8.8 giữ nguyên và tự hưởng lợi từ title nút mới — hội thoại cũ đang hiện id sẽ được cập nhật title ở lần đồng bộ tới mà không cần mở từng cái. Chưa kiểm chứng được: title thật từ nút sidebar trên trang muse.ai thật vẫn cần user thử (máy build Linux chỉ chạy được driver mock, mock dừng ở 501 cho web-threads nên bước bấm chỉ qua build + test logic).
 
 ## Mới trong v0.8.8: tải lịch sử thread web khi mở hội thoại + lọc hội thoại theo tài khoản
 

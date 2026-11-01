@@ -164,6 +164,43 @@ public static class DiagnosticLines
     }
 
     /// <summary>
+    /// Làm sạch text hiển thị của nút hội thoại trong sidebar mà bước
+    /// thăm dò vừa bấm (v0.8.9): đây mới là nơi title thật nằm, vì
+    /// document.title của muse.ai là tiêu đề chung "Chat - Muse" cho
+    /// mọi trang nên CleanThreadTitle luôn loại nó. Thứ tự xử lý:
+    /// gộp khoảng trắng → bỏ hậu tố " - Muse" → loại nhãn nút chức
+    /// năng (chuẩn hóa trùng ĐÚNG cụm history/lịch sử/sidebar/menu/
+    /// new chat) → cắt 80 ký tự → loại rỗng/"Chat"/"Muse" như
+    /// CleanThreadTitle. Trả null khi không dùng được để caller rơi
+    /// xuống document.title rồi tới dự phòng của extension.
+    /// Lưu ý cố ý: chỉ loại cụm ĐÚNG NGHĨA, không loại kiểu chứa
+    /// chuỗi con như matcher nút điều khiển — nếu không title thật
+    /// như "History of Rome" hay "Chuyến đi lịch sử" sẽ bị loại oan.
+    /// Nút chức năng thật (kể cả dạng "Open Sidebar") vốn đã bị
+    /// probeSkipLabel loại khỏi vòng thăm dò bằng aria-label/title
+    /// nên không tới được hàm này qua đường thăm dò.
+    /// </summary>
+    public static string? CleanProbeButtonTitle(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var t = System.Text.RegularExpressions.Regex.Replace(text.Trim(), @"\s+", " ");
+        const string suffix = " - Muse";
+        if (t.EndsWith(suffix, StringComparison.Ordinal))
+            t = t[..^suffix.Length].Trim();
+        if (t.Length == 0) return null;
+        var norm = " " + System.Text.RegularExpressions.Regex.Replace(
+            t.ToLowerInvariant(), @"[^\p{L}\p{N}]+", " ").Trim() + " ";
+        if (norm == " history " || norm == " lịch sử " || norm == " sidebar "
+            || norm == " menu " || norm == " new chat ")
+            return null;
+        if (t.Length > 80) t = t[..80].Trim();
+        if (t.Length == 0) return null;
+        if (t.Equals("Chat", StringComparison.Ordinal)
+            || t.Equals("Muse", StringComparison.Ordinal)) return null;
+        return t;
+    }
+
+    /// <summary>
     /// Dòng log của endpoint thread-messages (v0.8.8): CHỈ số lượng
     /// tin + id tài khoản, KHÔNG nội dung tin, KHÔNG tiêu đề hội
     /// thoại, KHÔNG URL thread. Caller ghi qua LogLocal nên tiền tố

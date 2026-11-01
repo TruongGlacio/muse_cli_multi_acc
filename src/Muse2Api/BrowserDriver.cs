@@ -1299,9 +1299,9 @@ public sealed class BrowserDriver : IMuseDriver
     // cũ (đã thử ở bước trước); tối đa 30 nút và chung ngân sách 60
     // giây cho cả lần quét một tài khoản (deadline do caller cấp).
     // Sau mỗi lần bấm: URL thành /thread/<id> thì ghi nhận thread đó
-    // (id từ URL + title đã làm sạch từ document.title tại trang đó,
-    // null khi chỉ là tiêu đề chung thì extension tự đặt dự phòng
-    // như cũ, v0.8.8) rồi GoBack; URL thành /thread/new thì GoBack
+    // (id từ URL + title theo thứ tự ưu tiên v0.8.9: text hiển thị
+    // của nút vừa bấm đã làm sạch, rồi document.title đã làm sạch,
+    // rồi null thì extension tự đặt dự phòng như cũ) rồi GoBack; URL thành /thread/new thì GoBack
     // + loại nút (nút tạo
     // mới, không phải lịch sử); URL không đổi thì bấm Escape; URL rời
     // khỏi khu vực chat thì GoBack ngay + loại nút, không ghi nhận gì
@@ -1319,6 +1319,12 @@ public sealed class BrowserDriver : IMuseDriver
         var found = new List<(string Url, string? Title)>(baseline.Threads);
         var seen = new HashSet<string>(found.Select(t => t.Url), StringComparer.OrdinalIgnoreCase);
         var clicked = 0;
+        // v0.8.9: bảng token → text hiển thị của nút, giữ trong vòng
+        // quét hiện tại để khi một cú bấm mở ra thread thì lấy text
+        // của chính nút đó làm title (không lưu text ra ngoài vòng
+        // quét, không ghi text vào log — title chỉ đi trong kết quả
+        // thread trả về extension).
+        var probeTexts = new Dictionary<string, string?>(StringComparer.Ordinal);
         while (clicked < 30 && DateTimeOffset.UtcNow < deadline)
         {
             var tokens = await Eval(page, """
@@ -1345,19 +1351,30 @@ public sealed class BrowserDriver : IMuseDriver
                       if (probeSkipLabel(label)) continue;
                       const token = 'p' + (window.__museProbeNext++);
                       b.dataset.museProbeToken = token;
-                      out.push(token);
+                      // v0.8.9: trả thêm text hiển thị của nút — đây là
+                      // nơi title thật của hội thoại nằm (document.title
+                      // của muse.ai chỉ là "Chat - Muse" chung chung).
+                      const text = (b.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+                      out.push({ token, text });
                     }
-                    return { tokens: out };
+                    return { items: out };
                   };
                   // __PROBE_ENUM_END__
                   return probeEnumerate();
                 })()
                 """);
             if (tokens is not System.Text.Json.Nodes.JsonObject tokObj
-                || tokObj["tokens"] is not System.Text.Json.Nodes.JsonArray tokArr
+                || tokObj["items"] is not System.Text.Json.Nodes.JsonArray tokArr
                 || tokArr.Count == 0)
                 break;
-            var token = tokArr[0]?.GetValue<string>();
+            foreach (var it in tokArr)
+            {
+                if (it is System.Text.Json.Nodes.JsonObject io
+                    && io["token"]?.GetValue<string>() is string tk && tk.Length > 0)
+                    probeTexts[tk] = io["text"]?.GetValue<string>();
+            }
+            var token = tokArr[0] is System.Text.Json.Nodes.JsonObject first
+                ? first["token"]?.GetValue<string>() : null;
             if (string.IsNullOrEmpty(token)) break;
             var beforeUrl = page.Url;
             var clickedResult = await Eval(page, $$"""
@@ -1382,12 +1399,17 @@ public sealed class BrowserDriver : IMuseDriver
                 case DiagnosticLines.ProbeOutcome.RecordThread:
                 {
                     var url = Upstream.Site + "/thread/" + threadId!;
-                    // v0.8.8: đọc document.title tại trang thread vừa
-                    // mở làm title ứng viên, làm sạch bằng cùng quy
-                    // tắc với endpoint thread-messages; null thì
-                    // extension tự đặt dự phòng như cũ. Đường link
-                    // giữ nguyên title từ innerText anchor.
-                    if (seen.Add(url)) found.Add((url, DiagnosticLines.CleanThreadTitle(state.Title)));
+                    // v0.8.9: title lấy theo thứ tự ưu tiên — (a) text
+                    // hiển thị của chính nút vừa bấm (đây mới là nơi
+                    // title thật nằm; document.title của muse.ai chỉ
+                    // là "Chat - Muse" chung chung), (b) document.title
+                    // đã làm sạch như cũ, (c) null để extension giữ dự
+                    // phòng "Hội thoại web <id>" như cũ. Text nút
+                    // không bao giờ ghi vào log.
+                    probeTexts.TryGetValue(token, out var buttonText);
+                    var title = DiagnosticLines.CleanProbeButtonTitle(buttonText)
+                        ?? DiagnosticLines.CleanThreadTitle(state.Title);
+                    if (seen.Add(url)) found.Add((url, title));
                     try { await page.GoBackAsync(); } catch { }
                     await Task.Delay(TimeSpan.FromMilliseconds(800));
                     break;
