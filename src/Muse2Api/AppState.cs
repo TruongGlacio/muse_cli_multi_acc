@@ -7,6 +7,7 @@ public sealed class AppState
     public Settings Settings { get; }
     public IMuseDriver Driver { get; }
     public AccountPool Pool { get; }
+    public BrowserLoginManager Login { get; }
     public Gateway Gateway { get; }
     public TaskManager Tasks { get; }
     public MediaStore Media { get; }
@@ -23,6 +24,7 @@ public sealed class AppState
         Pool = new AccountPool(settings.AccountsFile, settings.PoolStrategy,
             settings.AccountMaxConcurrency, settings.AccountCooldown, settings.PoolAcquireTimeout);
         Pool.Load();
+        Login = new BrowserLoginManager(settings, Pool);
         Gateway = new Gateway(Pool, Driver, settings.MaxFailover);
         Tasks = new TaskManager(settings.TasksFile);
         Tasks.Load();

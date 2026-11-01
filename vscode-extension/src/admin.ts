@@ -19,6 +19,16 @@ export interface GatewayAccountSummary {
   status: string;
   lastError: string;
   cooldownUntil: number;
+  // Các trường an toàn bổ sung cho panel đa tài khoản (v0.5.0). KHÔNG
+  // bao gồm cookies (kể cả dạng đã che) hay meta: asAccount chỉ chọn
+  // đúng các trường dưới đây, không bao giờ chuyển cookies sang webview.
+  createdAt: number;
+  lastUsedAt: number;
+  successCount: number;
+  failCount: number;
+  // Chỉ ngày/giờ hết hạn cookie (unix giây), không tên/giá trị cookie:
+  // settings.ts chỉ gửi mốc sớm nhất + số lượng sang webview.
+  cookieExpires: Record<string, number>;
 }
 
 export interface GatewayStatusSummary {
@@ -52,6 +62,13 @@ async function adminFetch(baseUrl: string, apiKey: string, path: string, init: R
 }
 
 function asAccount(obj: Record<string, unknown>): GatewayAccountSummary {
+  const expires: Record<string, number> = {};
+  const rawExpires = obj.cookie_expires as Record<string, unknown> | undefined;
+  if (rawExpires && typeof rawExpires === 'object') {
+    for (const [k, v] of Object.entries(rawExpires)) {
+      if (typeof v === 'number' && Number.isFinite(v)) { expires[k] = v; }
+    }
+  }
   return {
     id: String(obj.id || ''),
     label: String(obj.label || ''),
@@ -59,6 +76,11 @@ function asAccount(obj: Record<string, unknown>): GatewayAccountSummary {
     status: String(obj.status || ''),
     lastError: String(obj.last_error || obj.lastError || ''),
     cooldownUntil: typeof obj.cooldown_until === 'number' ? obj.cooldown_until : 0,
+    createdAt: typeof obj.created_at === 'number' ? obj.created_at : 0,
+    lastUsedAt: typeof obj.last_used_at === 'number' ? obj.last_used_at : 0,
+    successCount: typeof obj.success_count === 'number' ? obj.success_count : 0,
+    failCount: typeof obj.fail_count === 'number' ? obj.fail_count : 0,
+    cookieExpires: expires,
   };
 }
 
@@ -90,6 +112,50 @@ export async function renewGatewayAccount(baseUrl: string, apiKey: string, id: s
 export async function patchGatewayAccount(baseUrl: string, apiKey: string, id: string, enabled: boolean): Promise<GatewayAccountSummary> {
   const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled }) })) as Record<string, unknown>;
   return asAccount((data.account || {}) as Record<string, unknown>);
+}
+
+export async function patchGatewayAccountLabel(baseUrl: string, apiKey: string, id: string, label: string): Promise<GatewayAccountSummary> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ label }) })) as Record<string, unknown>;
+  return asAccount((data.account || {}) as Record<string, unknown>);
+}
+
+export async function fetchGatewayAccountQuota(baseUrl: string, apiKey: string, id: string): Promise<Record<string, unknown>> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}/quota`)) as Record<string, unknown>;
+  const quota = data.quota;
+  return quota && typeof quota === 'object' && !Array.isArray(quota) ? (quota as Record<string, unknown>) : {};
+}
+
+export interface BrowserLoginResult {
+  loginId: string;
+  status: string;
+  account?: GatewayAccountSummary;
+}
+
+function asBrowserLogin(data: Record<string, unknown>): BrowserLoginResult {
+  const account = data.account as Record<string, unknown> | undefined;
+  return {
+    loginId: String(data.login_id || ''),
+    status: String(data.status || ''),
+    account: account && typeof account === 'object' ? asAccount(account) : undefined,
+  };
+}
+
+export async function startBrowserLogin(baseUrl: string, apiKey: string, label?: string, accountId?: string): Promise<BrowserLoginResult> {
+  const body: Record<string, string> = {};
+  if (label) { body.label = label; }
+  if (accountId) { body.accountId = accountId; }
+  const data = (await adminFetch(baseUrl, apiKey, '/login/browser/start', { method: 'POST', body: JSON.stringify(body) })) as Record<string, unknown>;
+  return asBrowserLogin(data);
+}
+
+export async function getBrowserLoginStatus(baseUrl: string, apiKey: string, id: string): Promise<BrowserLoginResult> {
+  const data = (await adminFetch(baseUrl, apiKey, `/login/browser/${encodeURIComponent(id)}/status`)) as Record<string, unknown>;
+  return asBrowserLogin(data);
+}
+
+export async function cancelBrowserLogin(baseUrl: string, apiKey: string, id: string): Promise<BrowserLoginResult> {
+  const data = (await adminFetch(baseUrl, apiKey, `/login/browser/${encodeURIComponent(id)}/cancel`, { method: 'POST' })) as Record<string, unknown>;
+  return asBrowserLogin(data);
 }
 
 export async function deleteGatewayAccount(baseUrl: string, apiKey: string, id: string): Promise<void> {

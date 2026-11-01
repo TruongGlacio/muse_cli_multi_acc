@@ -3,6 +3,7 @@
     "onStartupFinished",
     "onView:muse.chat",
     "onCommand:muse.openChat",
+    "onCommand:muse.openSettings",
     "onCommand:muse.explainProject",
     "onCommand:muse.findAndFix",
     "onCommand:muse.addFeature",
@@ -33,6 +34,10 @@
       {
         "command": "muse.openChat",
         "title": "Muse: Mở chat"
+      },
+      {
+        "command": "muse.openSettings",
+        "title": "Muse: Cài đặt"
       },
       {
         "command": "muse.explainProject",
@@ -244,7 +249,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.4.0",
+  "version": "0.5.0",
   "extensionKind": [
     "ui",
     "workspace"

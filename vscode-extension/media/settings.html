@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="{{cssUri}}">
+<title>Cài đặt Muse</title>
+</head>
+<body>
+<h1>Cài đặt Muse</h1>
+<p class="note">Panel này quản lý tài khoản Muse và hiển thị cấu hình Muse. Panel không bao giờ hiển thị cookie, token hay key; cấu hình apiKey chỉ báo đã đặt hay chưa.</p>
+
+<section>
+  <h2>Tài khoản Muse</h2>
+  <div id="accountStatus">Đang kiểm tra tài khoản Muse…</div>
+  <div id="accountList"></div>
+  <div class="actions">
+    <button id="refreshAccountsBtn">Kiểm tra lại</button>
+    <button id="importLoginBtn">Nhập đăng nhập từ app desktop</button>
+    <button id="openDashboardBtn">Mở dashboard</button>
+    <button id="restartGatewayBtn">Khởi động lại gateway</button>
+  </div>
+</section>
+
+<section>
+  <h2>Thêm tài khoản Muse — đăng nhập qua trình duyệt</h2>
+  <p>Gateway sẽ mở một <b>cửa sổ trình duyệt Chromium của chính nó</b> (có đầu, 1200×800) để bạn đăng nhập tài khoản Muse trong đó; đăng nhập xong, gateway tự lấy cookie từ cửa sổ đó và lưu thành tài khoản. Mở muse.ai trong trình duyệt ngoài của bạn rồi đăng nhập thì <b>không</b> truyền được session sang gateway, vì gateway dùng context trình duyệt riêng, không đọc profile trình duyệt hệ thống — vì vậy phải đăng nhập trong cửa sổ do gateway mở.</p>
+  <p class="note">Chỉ một phiên đăng nhập chờ tại một thời điểm. Phiên hết hạn sau 10 phút chưa đăng nhập, hoặc bị hủy khi bạn đóng cửa sổ trình duyệt. Đăng nhập qua trình duyệt cần Chromium và cửa sổ có đầu trên Windows.</p>
+  <label>Nhãn cho tài khoản mới: <input id="browserLoginLabel" type="text" placeholder="Tài khoản cá nhân"></label>
+  <div class="actions">
+    <button id="browserLoginBtn">Đăng nhập qua trình duyệt</button>
+    <button id="cancelBrowserLoginBtn" style="display: none;">Hủy phiên đăng nhập</button>
+    <button id="installBrowserBtn">Cài Chromium cho gateway</button>
+  </div>
+  <div id="browserLoginStatus" class="note"></div>
+</section>
+
+<section>
+  <h2>Thêm tài khoản Muse — phương án dự phòng (nhập từ app desktop)</h2>
+  <p>Nếu không dùng được cửa sổ trình duyệt (ví dụ máy chưa cài Chromium), vẫn còn cách nhập từ app desktop. VS Code không có WebView2 nên <b>không đăng nhập trực tiếp trong extension được</b>, và extension không hỏi username/password hay yêu cầu dán cookie. Cách dự phòng gồm 2 bước:</p>
+  <ol>
+    <li>Trong <b>app Muse desktop</b>, dùng nút <b>“Đăng nhập tài khoản khác”</b> để thêm từng tài khoản Muse (mỗi tài khoản sẽ được thêm vào danh sách của app desktop).</li>
+    <li>Quay lại panel này, bấm <b>“Nhập đăng nhập từ app desktop”</b> để đưa toàn bộ danh sách đó vào pool gateway của extension.</li>
+  </ol>
+  <p class="warning"><b>Cảnh báo ghi đè:</b> lệnh nhập sẽ <b>thay thế toàn bộ danh sách tài khoản của gateway</b> bằng danh sách từ app desktop (có sao lưu file cũ dạng .bak-timestamp trước khi ghi). Tài khoản nào đang ở gateway mà không có trong app desktop sẽ mất sau khi nhập.</p>
+  <p class="note">Giới hạn cần biết: mỗi tài khoản có Id ngẫu nhiên (acc_ + chuỗi ngẫu nhiên), không suy ra từ danh tính Muse. Vì vậy nếu bạn xóa một tài khoản rồi nhập lại cùng tài khoản Muse đó, nó sẽ có Id mới và các session cũ ghi Id cũ sẽ <b>không tự nối lại</b> được. Extension không tự nối lại theo nhãn, vì nhãn mặc định (“Tài khoản cá nhân”) không duy nhất.</p>
+</section>
+
+<section>
+  <h2>Cấu hình Muse (chỉ đọc)</h2>
+  <p class="note">Các giá trị dưới đây chỉ để xem. Muốn sửa, bấm nút dưới để mở Settings UI của VS Code (lọc muse.*) và sửa tại đó.</p>
+  <div id="configList"></div>
+  <div class="actions">
+    <button id="openVscodeSettingsBtn">Mở Settings UI của VS Code (muse.*)</button>
+    <button id="refreshConfigBtn">Đọc lại cấu hình</button>
+  </div>
+</section>
+
+<script src="{{jsUri}}"></script>
+</body>
+</html>

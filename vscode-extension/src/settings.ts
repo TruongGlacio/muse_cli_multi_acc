@@ -1,0 +1,318 @@
+// Panel Cài đặt riêng của Muse (v0.5.0).
+//
+// Lý do có panel riêng thay vì nhét danh sách tài khoản vào Settings UI
+// của VS Code: Settings UI chỉ chứa được cấu hình muse.* (chuỗi/số/
+// boolean), không chứa được danh sách tài khoản động hay nút thao tác
+// theo từng tài khoản. Panel này vì thế chứa cả hai: (1) quản lý tài
+// khoản Muse (động, gọi admin API của gateway, kể cả đa tài khoản),
+// và (2) cấu hình muse.* hiển thị CHỈ ĐỌC kèm nút mở Settings UI của
+// VS Code để sửa thật.
+// Panel KHÔNG BAO GIỜ nhận hay hiển thị cookie, token hay apiKey:
+// - Account.Public() có trả cookies dạng đã che, nhưng asAccount trong
+//   admin.ts không chọn trường đó, nên nó không bao giờ tới webview.
+// - Cookie_expires chỉ gửi mốc hết hạn sớm nhất + số lượng, không tên
+//   hay giá trị cookie. Quota được lọc bỏ key nhạy cảm trước khi gửi.
+// - Cấu hình apiKey chỉ hiển thị dạng "Đã đặt"/"Chưa đặt" (boolean).
+// Phụ thuộc một chiều: extension.ts -> settings.ts. File này KHÔNG
+// import extension.ts; nó nhận hai callback: onAccountsChanged (sau
+// thao tác tài khoản, để khung chat làm mới trạng thái session) và
+// getSessions (để chi tiết tài khoản hiện các session đang dùng nó).
+
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import { GatewayManager } from './gateway';
+import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, patchGatewayAccountLabel, deleteGatewayAccount, fetchGatewayAccountQuota, formatCooldown, startBrowserLogin, getBrowserLoginStatus, cancelBrowserLogin } from './admin';
+
+export interface SettingsSessionInfo {
+  id: string;
+  title: string;
+  accountId?: string;
+  accountLabel?: string;
+}
+
+function sanitizeQuota(value: unknown, depth = 0): unknown {
+  if (depth > 3 || value === null || typeof value !== 'object') {
+    return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? value : String(value ?? '');
+  }
+  if (Array.isArray(value)) { return value.slice(0, 20).map((v) => sanitizeQuota(v, depth + 1)); }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (/cookie|token|secret|password|auth|session|key/i.test(k)) { continue; }
+    out[k] = sanitizeQuota(v, depth + 1);
+  }
+  return out;
+}
+
+function formatUnix(seconds: number): string {
+  if (!seconds) { return '—'; }
+  return new Date(seconds * 1000).toLocaleString();
+}
+
+export class MuseSettingsPanel {
+  private static current: MuseSettingsPanel | undefined;
+
+  static createOrShow(
+    context: vscode.ExtensionContext,
+    gateway: GatewayManager,
+    onAccountsChanged: () => void,
+    getSessions: () => SettingsSessionInfo[],
+  ): void {
+    if (MuseSettingsPanel.current) {
+      MuseSettingsPanel.current.panel.reveal(vscode.ViewColumn.Beside);
+      void MuseSettingsPanel.current.refreshAccounts();
+      void MuseSettingsPanel.current.refreshConfig();
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel('muse.settings', 'Cài đặt Muse', vscode.ViewColumn.Beside, {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
+    });
+    MuseSettingsPanel.current = new MuseSettingsPanel(panel, context, gateway, onAccountsChanged, getSessions);
+    panel.onDidDispose(() => {
+      const inst = MuseSettingsPanel.current;
+      if (inst?.browserLoginTimer) { clearInterval(inst.browserLoginTimer); inst.browserLoginTimer = undefined; }
+      MuseSettingsPanel.current = undefined;
+    });
+    void MuseSettingsPanel.current.refreshAccounts();
+    void MuseSettingsPanel.current.refreshConfig();
+  }
+
+  static async refreshCurrent(): Promise<void> {
+    if (MuseSettingsPanel.current) {
+      await MuseSettingsPanel.current.refreshAccounts();
+      await MuseSettingsPanel.current.refreshConfig();
+    }
+  }
+
+  private browserLoginTimer?: NodeJS.Timeout;
+  private activeBrowserLoginId?: string;
+  private activeBrowserLoginRequestedAccountId?: string;
+  private browserLoginBaseUrl = '';
+  private browserLoginApiKey = '';
+  private browserLoginFailures = 0;
+
+  private constructor(
+    private readonly panel: vscode.WebviewPanel,
+    private readonly context: vscode.ExtensionContext,
+    private readonly gateway: GatewayManager,
+    private readonly onAccountsChanged: () => void,
+    private readonly getSessions: () => SettingsSessionInfo[],
+  ) {
+    const base = vscode.Uri.joinPath(context.extensionUri, 'media');
+    const read = (name: string): string => fs.readFileSync(vscode.Uri.joinPath(base, name).fsPath, 'utf8');
+    const css = panel.webview.asWebviewUri(vscode.Uri.joinPath(base, 'settings.css'));
+    const js = panel.webview.asWebviewUri(vscode.Uri.joinPath(base, 'settings.js'));
+    panel.webview.html = read('settings.html').replaceAll('{{cssUri}}', css.toString()).replaceAll('{{jsUri}}', js.toString());
+    panel.webview.onDidReceiveMessage((m: { type?: string; action?: string; id?: string }) => {
+      if (m.type === 'refreshAccounts') { void this.refreshAccounts(); }
+      else if (m.type === 'refreshConfig') { void this.refreshConfig(); }
+      else if (m.type === 'accountAction' && m.action && m.id) { void this.accountAction(m.action, m.id); }
+      else if (m.type === 'accountQuota' && m.id) { void this.accountQuota(m.id); }
+      else if (m.type === 'browserLogin') { void this.startBrowserLoginFlow((m as { label?: string }).label, undefined); }
+      else if (m.type === 'reloginBrowser' && m.id) { void this.startBrowserLoginFlow(undefined, m.id); }
+      else if (m.type === 'cancelBrowserLogin') { void this.cancelBrowserLoginFlow(); }
+      else if (m.type === 'installBrowser') { void vscode.commands.executeCommand('muse.installGatewayBrowser').then(() => { void this.refreshAccounts(); }); }
+      else if (m.type === 'importLogin') { void vscode.commands.executeCommand('muse.importDesktopLogin').then(() => { void this.refreshAccounts(); }); }
+      else if (m.type === 'openDashboard') { void vscode.commands.executeCommand('muse.openGatewayDashboard'); }
+      else if (m.type === 'restartGateway') { void vscode.commands.executeCommand('muse.restartGateway').then(() => { setTimeout(() => { void this.refreshAccounts(); }, 3000); }); }
+      else if (m.type === 'openVscodeSettings') { void vscode.commands.executeCommand('workbench.action.openSettings', 'muse.'); }
+    });
+  }
+
+  private post(type: string, payload: Record<string, unknown> = {}): void {
+    void this.panel.webview.postMessage({ type, ...payload });
+  }
+
+  private async refreshConfig(): Promise<void> {
+    // Chỉ đọc, không gửi giá trị key: apiKey chỉ báo đã đặt hay chưa.
+    const c = vscode.workspace.getConfiguration('muse');
+    this.post('config', {
+      items: [
+        { key: 'muse.apiKey', value: c.get<string>('apiKey') ? 'Đã đặt (không hiển thị giá trị)' : 'Chưa đặt — extension tự sinh key cho gateway kèm theo' },
+        { key: 'muse.autoApprove', value: String(c.get<boolean>('autoApprove') || false) },
+        { key: 'muse.gatewayMode', value: c.get<string>('gatewayMode') || 'auto' },
+        { key: 'muse.baseUrl', value: c.get<string>('baseUrl') || 'http://127.0.0.1:18610/v1' },
+        { key: 'muse.model', value: c.get<string>('model') || 'muse-chat' },
+        { key: 'muse.maxSteps', value: String(c.get<number>('maxSteps') || 30) },
+        { key: 'muse.commandTimeoutSeconds', value: String(c.get<number>('commandTimeoutSeconds') || 120) },
+        { key: 'muse.gatewayPath', value: c.get<string>('gatewayPath') || '(mặc định: binary kèm theo extension)' },
+        { key: 'muse.allowComputerControl', value: String(c.get<boolean>('allowComputerControl') || false) },
+        { key: 'muse.computerHelperPath', value: c.get<string>('computerHelperPath') || '(mặc định: helper kèm theo extension)' },
+      ],
+    });
+  }
+
+  private async refreshAccounts(): Promise<void> {
+    try {
+      const info = await this.gateway.ensureStarted();
+      const status = await fetchGatewayStatus(info.baseUrl, info.apiKey);
+      const accounts = await fetchGatewayAccounts(info.baseUrl, info.apiKey);
+      const available = Number(status.accounts.available ?? 0);
+      const total = Number(status.accounts.total ?? accounts.length);
+      const sessions = this.getSessions();
+      this.post('accounts', {
+        gatewayMode: info.mode === 'bundled' ? 'kèm theo extension' : 'sẵn có',
+        port: info.port,
+        version: status.version || '',
+        total, available,
+        accounts: accounts.map((a) => {
+          const expiries = Object.values(a.cookieExpires).filter((v) => v > 0);
+          return {
+            id: a.id,
+            label: a.label,
+            enabled: a.enabled,
+            status: a.status,
+            lastError: a.lastError.slice(0, 200),
+            cooldown: formatCooldown(a.cooldownUntil),
+            createdAt: formatUnix(a.createdAt),
+            lastUsedAt: formatUnix(a.lastUsedAt),
+            successCount: a.successCount,
+            failCount: a.failCount,
+            cookieExpiresEarliest: expiries.length > 0 ? formatUnix(Math.min(...expiries)) : '—',
+            cookieExpiresCount: expiries.length,
+            sessions: sessions.filter((s) => s.accountId === a.id).map((s) => ({ id: s.id, title: s.title })),
+          };
+        }),
+        error: '',
+      });
+    } catch (e) {
+      this.post('accounts', {
+        gatewayMode: '', port: 0, version: '', total: 0, available: 0, accounts: [],
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  private async accountQuota(id: string): Promise<void> {
+    try {
+      const info = await this.gateway.ensureStarted();
+      const quota = await fetchGatewayAccountQuota(info.baseUrl, info.apiKey, id);
+      this.post('quota', { id, quota: sanitizeQuota(quota), error: '' });
+    } catch (e) {
+      // Quota có thể thất bại khi tài khoản Invalid: báo nhẹ, không vỡ panel.
+      this.post('quota', { id, quota: {}, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  // ---------------- Đăng nhập qua trình duyệt (v0.5.0) ----------------
+  // Gateway mở cửa sổ Chromium có đầu của chính nó; extension chỉ poll
+  // trạng thái mỗi 3 giây. Chỉ một phiên chờ tại một thời điểm (gateway
+  // cũng chặn phiên thứ hai). Đóng panel thì dừng poll, nhưng phiên
+  // gateway vẫn chờ tới 10 phút hoặc tới khi user đóng cửa sổ.
+  private async startBrowserLoginFlow(label: string | undefined, accountId: string | undefined): Promise<void> {
+    if (this.browserLoginTimer && this.activeBrowserLoginId) {
+      this.post('browserLogin', { state: 'waiting', loginId: this.activeBrowserLoginId, message: 'Đã có một phiên đăng nhập đang chờ. Hãy đăng nhập trong cửa sổ trình duyệt đã mở.' });
+      return;
+    }
+    try {
+      const info = await this.gateway.ensureStarted();
+      const started = await startBrowserLogin(info.baseUrl, info.apiKey, label, accountId);
+      this.activeBrowserLoginId = started.loginId;
+      this.activeBrowserLoginRequestedAccountId = accountId;
+      this.browserLoginBaseUrl = info.baseUrl;
+      this.browserLoginApiKey = info.apiKey;
+      this.browserLoginFailures = 0;
+      this.post('browserLogin', { state: 'waiting', loginId: started.loginId, message: 'Đang chờ bạn đăng nhập trong cửa sổ trình duyệt vừa mở. Đăng nhập xong, panel sẽ tự nhận tài khoản (không cần bấm thêm gì).' });
+      this.browserLoginTimer = setInterval(() => { void this.pollBrowserLogin(); }, 3000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.post('browserLogin', { state: 'error', message: msg });
+      if (/browser_not_installed|Chromium/i.test(msg)) {
+        void vscode.window.showWarningMessage('Chưa cài Chromium cho gateway. Hãy bấm "Cài Chromium cho gateway" trong panel Cài đặt rồi thử đăng nhập lại.');
+      }
+    }
+  }
+
+  private stopBrowserLoginPoll(): void {
+    if (this.browserLoginTimer) { clearInterval(this.browserLoginTimer); this.browserLoginTimer = undefined; }
+    this.activeBrowserLoginId = undefined;
+    this.activeBrowserLoginRequestedAccountId = undefined;
+  }
+
+  private async pollBrowserLogin(): Promise<void> {
+    const loginId = this.activeBrowserLoginId;
+    if (!loginId) { this.stopBrowserLoginPoll(); return; }
+    try {
+      const res = await getBrowserLoginStatus(this.browserLoginBaseUrl, this.browserLoginApiKey, loginId);
+      this.browserLoginFailures = 0;
+      if (res.status === 'waiting') { return; } // vẫn chờ, không spam webview
+      if (res.status === 'authenticated' && res.account) {
+        const requested = this.activeBrowserLoginRequestedAccountId;
+        const accountLabel = res.account.label || res.account.id;
+        const accountId = res.account.id;
+        this.stopBrowserLoginPoll();
+        this.post('browserLogin', { state: 'authenticated', accountLabel, accountId });
+        if (requested && accountId !== requested) {
+          void vscode.window.showWarningMessage(`Tài khoản vừa đăng nhập (${accountLabel}) khác với tài khoản cần gia hạn. Tài khoản mới đã được lưu, tài khoản cũ vẫn còn trong danh sách (không tự xóa tài khoản cũ, không tự nối session cũ sang tài khoản mới).`);
+        } else if (requested) {
+          void vscode.window.showInformationMessage(`Đã gia hạn lại tài khoản ${accountLabel}.`);
+        } else {
+          void vscode.window.showInformationMessage(`Đã lưu tài khoản ${accountLabel}.`);
+        }
+        await this.refreshAccounts();
+        this.onAccountsChanged();
+      } else {
+        this.stopBrowserLoginPoll();
+        this.post('browserLogin', { state: res.status, message: res.status === 'cancelled' ? 'Phiên đăng nhập đã bị hủy (bạn đã đóng cửa sổ trình duyệt hoặc bấm Hủy). Bạn có thể thử lại.' : res.status === 'expired' ? 'Phiên đăng nhập đã hết hạn sau 10 phút chưa đăng nhập. Bạn có thể thử lại.' : `Phiên đăng nhập kết thúc với trạng thái: ${res.status}` });
+        if (res.status === 'expired') {
+          void vscode.window.showWarningMessage('Phiên đăng nhập qua trình duyệt đã hết hạn sau 10 phút. Hãy thử đăng nhập lại.');
+        }
+      }
+    } catch (e) {
+      this.browserLoginFailures += 1;
+      if (this.browserLoginFailures >= 3) {
+        this.stopBrowserLoginPoll();
+        this.post('browserLogin', { state: 'error', message: `Không đọc được trạng thái đăng nhập sau 3 lần thử (gateway có thể đã khởi động lại, phiên cũ không còn): ${e instanceof Error ? e.message : String(e)}` });
+      }
+    }
+  }
+
+  private async cancelBrowserLoginFlow(): Promise<void> {
+    const loginId = this.activeBrowserLoginId;
+    this.stopBrowserLoginPoll();
+    if (loginId) {
+      try { await cancelBrowserLogin(this.browserLoginBaseUrl, this.browserLoginApiKey, loginId); } catch { /* phiên đã kết thúc thì thôi */ }
+    }
+    this.post('browserLogin', { state: 'cancelled', message: 'Phiên đăng nhập đã bị hủy. Bạn có thể thử lại.' });
+  }
+
+  private async accountAction(action: string, id: string): Promise<void> {
+    try {
+      const info = await this.gateway.ensureStarted();
+      if (action === 'renew') {
+        const res = await renewGatewayAccount(info.baseUrl, info.apiKey, id);
+        if (!res.ok) {
+          void vscode.window.showWarningMessage('Làm mới phiên không thành công (gateway báo ok=false). Tài khoản này có thể đã hết hạn thật: hãy đăng nhập lại trong app Muse desktop rồi bấm "Nhập đăng nhập từ app desktop".');
+        } else {
+          void vscode.window.showInformationMessage('Đã làm mới phiên tài khoản.');
+        }
+      } else if (action === 'reset') {
+        await resetGatewayAccount(info.baseUrl, info.apiKey, id);
+        void vscode.window.showInformationMessage('Đã xóa cooldown của tài khoản.');
+      } else if (action === 'toggle') {
+        const acc = (await fetchGatewayAccounts(info.baseUrl, info.apiKey)).find((a) => a.id === id);
+        if (!acc) { throw new Error('Không tìm thấy tài khoản này trong pool.'); }
+        await patchGatewayAccount(info.baseUrl, info.apiKey, id, !acc.enabled);
+        void vscode.window.showInformationMessage(acc.enabled ? 'Đã tắt tài khoản.' : 'Đã bật tài khoản.');
+      } else if (action === 'rename') {
+        const acc = (await fetchGatewayAccounts(info.baseUrl, info.apiKey)).find((a) => a.id === id);
+        if (!acc) { throw new Error('Không tìm thấy tài khoản này trong pool.'); }
+        const name = await vscode.window.showInputBox({ prompt: 'Nhập nhãn mới cho tài khoản này', value: acc.label });
+        if (!name || name.trim().length === 0) { return; }
+        await patchGatewayAccountLabel(info.baseUrl, info.apiKey, id, name.trim().slice(0, 80));
+        void vscode.window.showInformationMessage('Đã đổi tên nhãn tài khoản.');
+      } else if (action === 'logout') {
+        const answer = await vscode.window.showWarningMessage('Đăng xuất tài khoản này khỏi gateway? Tài khoản sẽ bị xóa bền vững khỏi pool của gateway trong extension (khỏi cả file lưu), các session đang dùng tài khoản này sẽ chuyển sang trạng thái Đã logout. Thao tác này không đăng xuất app Muse desktop, vì lệnh nhập chỉ sao chép dữ liệu.', 'Đăng xuất', 'Hủy');
+        if (answer !== 'Đăng xuất') { return; }
+        await deleteGatewayAccount(info.baseUrl, info.apiKey, id);
+        void vscode.window.showInformationMessage('Đã đăng xuất tài khoản khỏi gateway.');
+      }
+    } catch (e) {
+      void vscode.window.showErrorMessage(`Không thực hiện được thao tác tài khoản: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await this.refreshAccounts();
+    // Báo cho khung chat làm mới trạng thái session (Đã logout phụ thuộc
+    // vào pool hiện tại). Callback này không gửi dữ liệu tài khoản sang chat.
+    this.onAccountsChanged();
+  }
+}

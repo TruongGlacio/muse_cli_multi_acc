@@ -6,20 +6,15 @@ button { background: var(--vscode-button-background); color: var(--vscode-button
 button:hover { background: var(--vscode-button-hoverBackground); }
 #chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 #chips button { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
-#sessionBar { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
-#currentSessionLabel { font-weight: 700; }
-#sessionList { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
+#drawer { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; margin-bottom: 10px; }
+#currentSessionLabel { font-weight: 700; margin-bottom: 8px; }
+#sessionList { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; margin-top: 8px; }
 .session-item { text-align: left; background: transparent; border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 6px 8px; color: var(--vscode-editor-foreground); }
 .session-item.current { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-color: var(--vscode-badge-background); }
 .session-item small { display: block; opacity: 0.75; font-size: 11px; }
-#accountPanel { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; margin-bottom: 10px; }
-.panelTitle { font-weight: 700; margin-bottom: 4px; }
-#accountStatus { margin-bottom: 6px; }
-#accountList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
-.account-card { border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 6px 8px; }
-.account-card .acc-title { font-weight: 700; }
-.account-card .acc-meta { font-size: 12px; color: var(--vscode-descriptionForeground); margin: 2px 0 6px; word-break: break-word; }
-.account-card .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 0; }
+.status-badge { display: inline-block; margin-top: 4px; padding: 1px 7px; border-radius: 10px; font-size: 11px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+.status-badge.status-running { background: rgba(0, 180, 90, 0.25); color: inherit; }
+.status-badge.status-loggedout { background: rgba(255, 80, 80, 0.25); color: inherit; }
 #messages { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .bubble { padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
 .bubble.user { background: rgba(124, 92, 255, 0.18); align-self: flex-end; max-width: 92%; }

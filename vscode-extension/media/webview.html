@@ -10,29 +10,22 @@
 <div class="header">
   <div class="title">Muse</div>
   <div class="subtitle">Chat, đọc dự án, sửa tệp và chạy kiểm tra qua gateway Muse2Api.</div>
-  <button id="settingsBtn" title="Mở cài đặt Muse">Cài đặt</button>
+  <button id="drawerBtn" title="Mở/đóng ngăn quản lý hội thoại">☰ Quản lý hội thoại</button>
+  <button id="settingsBtn" title="Mở panel Cài đặt Muse (quản lý tài khoản)">Cài đặt</button>
   <button id="clearHistoryBtn" title="Xóa lịch sử của hội thoại hiện tại và mở thread Muse mới (hội thoại vẫn giữ tên)">Xóa lịch sử</button>
 </div>
-<div id="sessionBar">
-  <div id="currentSessionLabel">Hội thoại hiện tại: …</div>
-  <div id="sessionList"></div>
+<div id="currentSessionLabel">Hội thoại hiện tại: …</div>
+<div id="drawer" style="display: none;">
   <div class="actions">
     <button id="newSessionBtn" title="Tạo hội thoại mới, trống">Hội thoại mới</button>
     <button id="renameSessionBtn" title="Đổi tên hội thoại hiện tại">Đổi tên</button>
     <button id="deleteSessionBtn" title="Xóa hội thoại hiện tại (hỏi xác nhận trước)">Xóa hội thoại</button>
+    <button id="manageSessionsBtn" title="Hiện/ẩn danh sách hội thoại">Quản lý hội thoại</button>
   </div>
-</div>
-<div id="accountPanel">
-  <div class="panelTitle">Tài khoản Muse</div>
-  <div id="accountStatus">Đang kiểm tra tài khoản Muse…</div>
-  <div id="accountList"></div>
-  <div class="actions">
-    <button id="refreshAccountsBtn" title="Đọc lại trạng thái tài khoản từ gateway">Kiểm tra lại tài khoản</button>
-    <button id="importLoginBtn" title="Sao chép đăng nhập từ app Muse desktop sang gateway kèm theo">Nhập đăng nhập từ app desktop</button>
-    <button id="openDashboardBtn" title="Mở dashboard gateway trong trình duyệt">Mở dashboard</button>
-    <button id="restartGatewayBtn" title="Khởi động lại gateway rồi đọc lại tài khoản">Khởi động lại gateway</button>
+  <div id="sessionListContainer" style="display: none;">
+    <div id="sessionList"></div>
+    <p class="note">Bấm vào một hội thoại để đóng ngăn này và mở lại chat của hội thoại đó. Trạng thái: Đang chạy = hội thoại hiện tại đang có yêu cầu chạy; Đã logout = tài khoản gắn với hội thoại đã hết hạn hoặc đã đăng xuất; còn lại là Đã dừng.</p>
   </div>
-  <p class="note">Đăng nhập lại: bấm "Làm mới" trên từng tài khoản để gateway tự làm mới phiên; nếu vẫn Invalid thì đăng nhập lại trong app Muse desktop rồi bấm "Nhập đăng nhập từ app desktop". Đăng xuất ở đây chỉ xóa tài khoản khỏi gateway trong extension, không đăng xuất app desktop.</p>
 </div>
 <div id="chips">
   <button data-prompt="Giải thích dự án này đang làm gì và các phần chính liên hệ với nhau thế nào. Chỉ đọc tệp, chưa sửa gì.">Tìm hiểu dự án</button>

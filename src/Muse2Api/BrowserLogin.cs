@@ -1,0 +1,227 @@
+using Microsoft.Playwright;
+using System.Text.Json.Nodes;
+
+namespace Muse2Api;
+
+/// <summary>
+/// Đăng nhập qua trình duyệt của chính gateway (v0.5.0).
+///
+/// Vì sao không thể chỉ mở muse.ai trong trình duyệt ngoài của user:
+/// BrowserDriver dùng Playwright Chromium với context riêng cho từng tài
+/// khoản, cookie được nạp từ account store (SetCookies), không đọc
+/// profile trình duyệt hệ thống — đăng nhập ngoài không truyền session
+/// sang gateway được. Vì vậy gateway tự mở một cửa sổ Chromium có đầu
+/// (headed) của chính nó, user đăng nhập trong cửa sổ đó, gateway đọc
+/// cookie từ context đó rồi lưu.
+///
+/// An toàn và giới hạn:
+/// - Playwright instance RIÊNG, Headless=false, không dùng chung browser
+///   instance của chat driver (chat đang chạy headless, windowsHide=true)
+///   nên việc đăng nhập không làm gián đoạn chat đang chạy.
+/// - Chỉ một phiên đăng nhập đang chờ tại một thời điểm; start khi đã
+///   có phiên chờ sẽ lỗi rõ kèm id phiên đó để extension tiếp tục poll.
+/// - Cookie bắt buộc: hatch_sess, hatch_native_auth_device; tùy chọn:
+///   hatch_gw, hatch_vml (cùng danh sách với LoginForm của app desktop
+///   và Upstream.SessionCookies). Chỉ khi đủ cookie bắt buộc mới lưu.
+/// - Lưu bằng Pool.UpsertSession: cùng danh tính Muse thì cập nhật tài
+///   khoản cũ (giữ nguyên Id), khác danh tính thì tạo tài khoản mới với
+///   Id mới — tài khoản cũ không bị xóa, session cũ không tự nối sang.
+/// - User đóng cửa sổ tay => cancelled. Hết 10 phút chưa đăng nhập =>
+///   đóng trình duyệt, expired. Lỗi chưa cài Chromium báo rõ và hướng
+///   dẫn dùng nút cài Chromium trong panel Cài đặt.
+/// </summary>
+public sealed class BrowserLoginSession
+{
+    public string Id { get; init; } = "login_" + Guid.NewGuid().ToString("N")[..12];
+    public string Label { get; init; } = "Tài khoản cá nhân";
+    public string? AccountId { get; init; }
+    public string Status { get; set; } = "waiting";
+    public JsonObject? Account { get; set; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+    internal IPlaywright? Playwright { get; set; }
+    internal IBrowser? Browser { get; set; }
+    internal IBrowserContext? Context { get; set; }
+    internal IPage? Page { get; set; }
+}
+
+public sealed class BrowserLoginManager
+{
+    private static readonly TimeSpan Timeout = TimeSpan.FromMinutes(10);
+    private readonly Settings _settings;
+    private readonly AccountPool _pool;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private BrowserLoginSession? _current;
+
+    public BrowserLoginManager(Settings settings, AccountPool pool)
+    {
+        _settings = settings;
+        _pool = pool;
+    }
+
+    public async Task<BrowserLoginSession> StartAsync(string? label, string? accountId)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            if (_current is { Status: "waiting" } pending)
+            {
+                if (DateTimeOffset.UtcNow - pending.CreatedAt > Timeout)
+                {
+                    await CloseSessionAsync(pending);
+                    pending.Status = "expired";
+                    _current = null;
+                }
+                else
+                {
+                    throw new MuseException(
+                        $"Đã có một phiên đăng nhập qua trình duyệt đang chờ (id: {pending.Id}). Hãy tiếp tục đăng nhập trong cửa sổ đã mở, hoặc hủy phiên đó rồi thử lại.",
+                        409, "invalid_request_error", "login_already_pending");
+                }
+            }
+            string resolvedLabel = string.IsNullOrWhiteSpace(label) ? "Tài khoản cá nhân" : label.Trim();
+            Account? existing = null;
+            if (!string.IsNullOrWhiteSpace(accountId))
+            {
+                existing = _pool.Get(accountId) ?? throw MuseException.NotFound($"account '{accountId}' not found");
+                if (string.IsNullOrWhiteSpace(label)) resolvedLabel = existing.Label;
+            }
+            var session = new BrowserLoginSession { Label = resolvedLabel, AccountId = accountId };
+            try
+            {
+                session.Playwright = await Playwright.CreateAsync();
+                var launch = new BrowserTypeLaunchOptions
+                {
+                    Headless = false,
+                    Args = new[] { "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", "--window-size=1200,800" },
+                };
+                if (!string.IsNullOrEmpty(_settings.ChromiumPath)) launch.ExecutablePath = _settings.ChromiumPath;
+                if (!string.IsNullOrEmpty(_settings.BrowserProxy))
+                    launch.Proxy = new Proxy { Server = _settings.BrowserProxy };
+                try
+                {
+                    session.Browser = await session.Playwright.Chromium.LaunchAsync(launch);
+                }
+                catch (Exception ex)
+                {
+                    throw new MuseException(
+                        "Không mở được trình duyệt Chromium của Playwright. Có thể máy chưa cài Chromium: trong VS Code, mở panel Cài đặt Muse rồi bấm \"Cài Chromium cho gateway\", hoặc chạy playwright.ps1 install chromium, hoặc đặt MUSE2API_CHROMIUM_PATH trỏ tới Edge/Chrome sẵn có. Lỗi gốc: " + ex.Message,
+                        500, "server_error", "browser_not_installed");
+                }
+                session.Context = await session.Browser.NewContextAsync();
+                session.Page = await session.Context.NewPageAsync();
+                await session.Page.GotoAsync("https://muse.ai", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+            }
+            catch
+            {
+                await CloseSessionAsync(session);
+                throw;
+            }
+            _current = session;
+            return session;
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<BrowserLoginSession> CheckAsync(string id)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            var session = _current is not null && _current.Id == id ? _current : null;
+            if (session is null) throw MuseException.NotFound($"login session '{id}' not found");
+            if (session.Status != "waiting") return session;
+            if (DateTimeOffset.UtcNow - session.CreatedAt > Timeout)
+            {
+                await CloseSessionAsync(session);
+                session.Status = "expired";
+                _current = null;
+                return session;
+            }
+            // User đóng cửa sổ tay: browser ngắt kết nối hoặc page đã đóng.
+            if (session.Browser is not { IsConnected: true } || session.Page is { IsClosed: true })
+            {
+                await CloseSessionAsync(session);
+                session.Status = "cancelled";
+                _current = null;
+                return session;
+            }
+            var cookies = await session.Context!.CookiesAsync("https://muse.ai");
+            var byName = cookies
+                .Where(c => !string.IsNullOrEmpty(c.Value))
+                .GroupBy(c => c.Name)
+                .ToDictionary(g => g.Key, g => g.First());
+            if (Upstream.SessionCookies.Any(name => !byName.ContainsKey(name)))
+            {
+                return session; // chưa đăng nhập xong, vẫn chờ
+            }
+            var dict = new Dictionary<string, string>();
+            var expires = new Dictionary<string, long>();
+            foreach (var name in Upstream.SessionCookies.Concat(new[] { "hatch_gw", "hatch_vml" }))
+            {
+                if (!byName.TryGetValue(name, out var c)) continue;
+                dict[name] = c.Value;
+                if (c.Expires > 0) expires[name] = (long)c.Expires;
+            }
+            var existing = session.AccountId is not null ? _pool.Get(session.AccountId) : null;
+            var incoming = new Account
+            {
+                Label = session.Label,
+                Enabled = existing?.Enabled ?? true,
+                Cookies = dict,
+                CookieExpires = expires,
+            };
+            var saved = _pool.UpsertSession(incoming);
+            // Gia hạn lại đúng tài khoản đã yêu cầu: cookie mới phải làm
+            // tài khoản dùng được ngay, kể cả khi trước đó đang cooling.
+            if (existing is not null && saved.Id == existing.Id)
+            {
+                saved.Status = AccountStatus.Active;
+                saved.CooldownUntil = 0;
+                saved.LastError = null;
+                _pool.Upsert(saved);
+            }
+            session.Account = saved.Public();
+            session.Status = "authenticated";
+            await CloseSessionAsync(session);
+            _current = null;
+            return session;
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<BrowserLoginSession> CancelAsync(string id)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            var session = _current is not null && _current.Id == id ? _current : null;
+            if (session is null) throw MuseException.NotFound($"login session '{id}' not found");
+            if (session.Status == "waiting")
+            {
+                await CloseSessionAsync(session);
+                session.Status = "cancelled";
+                _current = null;
+            }
+            return session;
+        }
+        finally { _gate.Release(); }
+    }
+
+    private static async Task CloseSessionAsync(BrowserLoginSession session)
+    {
+        try { if (session.Context is not null) await session.Context.CloseAsync(); } catch { /* đóng trình duyệt không được thì bỏ qua */ }
+        try { if (session.Browser is not null) await session.Browser.CloseAsync(); } catch { /* như trên */ }
+        try { session.Playwright?.Dispose(); } catch { /* như trên */ }
+        session.Context = null;
+        session.Browser = null;
+        session.Playwright = null;
+        session.Page = null;
+    }
+
+    public static JsonObject View(BrowserLoginSession session) => new()
+    {
+        ["login_id"] = session.Id,
+        ["status"] = session.Status,
+        ["account"] = session.Account?.DeepClone(),
+    };
+}

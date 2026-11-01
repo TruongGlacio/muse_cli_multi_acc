@@ -803,6 +803,28 @@ public static class Endpoints
             s.Pool.Upsert(acc);
             return Results.Json(new JsonObject { ["account_id"] = acc.Id, ["quota"] = quota });
         });
+        // ---------- đăng nhập qua trình duyệt (v0.5.0) ----------
+        // Mở cửa sổ Chromium có đầu của chính gateway để user đăng nhập
+        // (xem BrowserLogin.cs: không đọc profile trình duyệt hệ thống).
+        admin.MapPost("/login/browser/start", async (HttpContext ctx) =>
+        {
+            RequireAdmin(ctx, s);
+            var body = await JsonHelp.ReadBody(ctx.Request);
+            var session = await s.Login.StartAsync(JsonHelp.Str(body["label"]), JsonHelp.Str(body["accountId"]));
+            return Results.Json(new JsonObject { ["login_id"] = session.Id, ["status"] = session.Status });
+        });
+        admin.MapGet("/login/browser/{id}/status", async (HttpContext ctx, string id) =>
+        {
+            RequireAdmin(ctx, s);
+            var session = await s.Login.CheckAsync(id);
+            return Results.Json(BrowserLoginManager.View(session));
+        });
+        admin.MapPost("/login/browser/{id}/cancel", async (HttpContext ctx, string id) =>
+        {
+            RequireAdmin(ctx, s);
+            var session = await s.Login.CancelAsync(id);
+            return Results.Json(BrowserLoginManager.View(session));
+        });
         admin.MapGet("/extension.zip", (HttpContext ctx) =>
         {
             RequireAdmin(ctx, s);

@@ -1,0 +1,18 @@
+body { font-family: var(--vscode-font-family); color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); margin: 0; padding: 20px; font-size: 13px; max-width: 900px; }
+h1 { font-size: 20px; }
+h2 { font-size: 16px; margin-top: 24px; }
+section { border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 16px; }
+button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 0; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+button:hover { background: var(--vscode-button-hoverBackground); }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.note { color: var(--vscode-descriptionForeground); font-size: 12px; }
+.warning { background: rgba(255, 180, 0, 0.12); border: 1px solid rgba(255, 180, 0, 0.4); border-radius: 4px; padding: 8px; }
+.account-card { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+.account-card summary { cursor: pointer; font-weight: 700; }
+.account-card .acc-meta { font-size: 12px; color: var(--vscode-descriptionForeground); margin: 4px 0; word-break: break-word; }
+.account-card .detail { margin-top: 8px; font-size: 12px; }
+.account-card .detail dt { font-weight: 700; margin-top: 6px; }
+.account-card .detail dd { margin: 2px 0 2px 12px; word-break: break-word; }
+.account-card pre { background: var(--vscode-textCodeBlock-background); padding: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+.config-row { display: flex; gap: 12px; padding: 4px 0; border-bottom: 1px solid var(--vscode-panel-border); word-break: break-all; }
+.config-row .key { font-weight: 700; min-width: 220px; }

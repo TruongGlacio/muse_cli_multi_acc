@@ -3,8 +3,8 @@
   var messagesEl = document.getElementById('messages');
   var sessionListEl = document.getElementById('sessionList');
   var currentSessionLabel = document.getElementById('currentSessionLabel');
-  var accountStatusEl = document.getElementById('accountStatus');
-  var accountListEl = document.getElementById('accountList');
+  var drawerEl = document.getElementById('drawer');
+  var sessionListContainer = document.getElementById('sessionListContainer');
   var statusEl = document.getElementById('status');
   var inputEl = document.getElementById('input');
   var attachmentsEl = document.getElementById('attachments');
@@ -43,6 +43,20 @@
     div.scrollIntoView();
     return div;
   }
+  function addLoginBubble(text, isWarning) {
+    var div = document.createElement('div');
+    div.className = 'bubble error';
+    div.innerHTML = render(text);
+    var row = document.createElement('div');
+    row.className = 'actions';
+    var settingsBtn = document.createElement('button');
+    settingsBtn.textContent = 'Mở Cài đặt';
+    settingsBtn.addEventListener('click', function () { vscode.postMessage({ type: 'openSettings' }); });
+    row.appendChild(settingsBtn);
+    div.appendChild(row);
+    messagesEl.appendChild(div);
+    div.scrollIntoView();
+  }
   function addAccountErrorBubble(text) {
     var div = document.createElement('div');
     div.className = 'bubble error';
@@ -55,8 +69,12 @@
     var dashBtn = document.createElement('button');
     dashBtn.textContent = 'Mở dashboard gateway';
     dashBtn.addEventListener('click', function () { vscode.postMessage({ type: 'openDashboard' }); });
+    var settingsBtn = document.createElement('button');
+    settingsBtn.textContent = 'Mở Cài đặt';
+    settingsBtn.addEventListener('click', function () { vscode.postMessage({ type: 'openSettings' }); });
     row.appendChild(importBtn);
     row.appendChild(dashBtn);
+    row.appendChild(settingsBtn);
     div.appendChild(row);
     messagesEl.appendChild(div);
     div.scrollIntoView();
@@ -83,21 +101,14 @@
   document.getElementById('renameSessionBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'renameSession' });
   });
+  document.getElementById('drawerBtn').addEventListener('click', function () {
+    drawerEl.style.display = drawerEl.style.display === 'none' ? 'block' : 'none';
+  });
+  document.getElementById('manageSessionsBtn').addEventListener('click', function () {
+    sessionListContainer.style.display = sessionListContainer.style.display === 'none' ? 'block' : 'none';
+  });
   document.getElementById('deleteSessionBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'deleteSession' });
-  });
-  document.getElementById('refreshAccountsBtn').addEventListener('click', function () {
-    accountStatusEl.textContent = 'Đang kiểm tra tài khoản Muse…';
-    vscode.postMessage({ type: 'refreshAccounts' });
-  });
-  document.getElementById('importLoginBtn').addEventListener('click', function () {
-    vscode.postMessage({ type: 'importLogin' });
-  });
-  document.getElementById('openDashboardBtn').addEventListener('click', function () {
-    vscode.postMessage({ type: 'openDashboard' });
-  });
-  document.getElementById('restartGatewayBtn').addEventListener('click', function () {
-    vscode.postMessage({ type: 'restartGateway' });
   });
   document.getElementById('settingsBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'openSettings' });
@@ -119,6 +130,8 @@
     else if (m.type === 'status') { statusEl.textContent = m.text || ''; }
     else if (m.type === 'error') { addBubble('error', m.text || 'Đã xảy ra lỗi.'); statusEl.textContent = 'Có lỗi, xem khung đỏ ở trên.'; }
     else if (m.type === 'accountError') { addAccountErrorBubble(m.text || ''); statusEl.textContent = 'Chưa có tài khoản Muse khả dụng.'; }
+    else if (m.type === 'loginRequired') { addLoginBubble(m.text || 'Hội thoại này cần đăng nhập lại.'); statusEl.textContent = 'Cần đăng nhập lại.'; }
+    else if (m.type === 'loginWarning') { addLoginBubble(m.text || ''); statusEl.textContent = 'Tài khoản của hội thoại này đã hết hạn hoặc đã đăng xuất.'; }
     else if (m.type === 'streamStart') { streamRaw = ''; streamBubble = addBubble('assistant', ''); }
     else if (m.type === 'streamDelta') {
       streamRaw += m.text || '';
@@ -167,42 +180,21 @@
         var when = s.updatedAt ? new Date(s.updatedAt).toLocaleString() : '';
         meta.textContent = (s.count || 0) + ' tin' + (when ? ' • ' + when : '') + (s.workspacePath ? ' • ' + s.workspacePath.split(/[\\/]/).pop() : '');
         item.appendChild(meta);
-        item.addEventListener('click', function () { vscode.postMessage({ type: 'switchSession', id: s.id }); });
+        var accLine = document.createElement('small');
+        accLine.textContent = 'Tài khoản: ' + (s.accountLabel ? s.accountLabel : 'Chưa xác định tài khoản') + (s.accountDetail ? ' (' + s.accountDetail + ')' : '');
+        item.appendChild(accLine);
+        var badge = document.createElement('span');
+        badge.className = 'status-badge status-' + (s.accountStatus || 'stopped');
+        badge.textContent = s.accountStatus === 'running' ? 'Đang chạy' : s.accountStatus === 'loggedout' ? 'Đã logout' : 'Đã dừng';
+        item.appendChild(badge);
+        item.addEventListener('click', function () {
+          drawerEl.style.display = 'none';
+          sessionListContainer.style.display = 'none';
+          vscode.postMessage({ type: 'switchSession', id: s.id });
+        });
         sessionListEl.appendChild(item);
         if (s.id === m.currentId) { currentSessionLabel.textContent = 'Hội thoại hiện tại: ' + (s.title || 'Hội thoại'); }
       });
-    }
-    else if (m.type === 'accounts') {
-      accountListEl.innerHTML = '';
-      if (m.error) {
-        accountStatusEl.textContent = 'Không đọc được tài khoản Muse: ' + m.error + ' Hãy bấm "Kiểm tra lại tài khoản" hoặc mở dashboard.';
-      } else if (!m.accounts || m.accounts.length === 0) {
-        accountStatusEl.textContent = 'Chưa có tài khoản Muse nào trong gateway' + (m.gatewayMode ? ' (' + m.gatewayMode + ', cổng ' + m.port + ')' : '') + '. Đây là nguyên nhân lỗi 503. Hãy bấm "Nhập đăng nhập từ app desktop".';
-      } else {
-        accountStatusEl.textContent = 'Gateway ' + (m.gatewayMode || '') + ' (cổng ' + m.port + '): ' + m.total + ' tài khoản, ' + m.available + ' khả dụng.';
-        m.accounts.forEach(function (a) {
-          var card = document.createElement('div');
-          card.className = 'account-card';
-          var title = document.createElement('div');
-          title.className = 'acc-title';
-          title.textContent = (a.label ? a.label + ' (' + a.id + ')' : a.id);
-          card.appendChild(title);
-          var meta = document.createElement('div');
-          meta.className = 'acc-meta';
-          meta.textContent = 'Trạng thái: ' + (a.status || '?') + ' • ' + (a.enabled ? 'đang bật' : 'đã tắt') + ' • ' + (a.cooldown || '') + (a.lastError ? ' • Lỗi cuối: ' + a.lastError : '');
-          card.appendChild(meta);
-          var row = document.createElement('div');
-          row.className = 'actions';
-          [['renew', 'Làm mới / Đăng nhập lại'], ['reset', 'Xóa cooldown'], ['toggle', a.enabled ? 'Tắt' : 'Bật'], ['logout', 'Đăng xuất']].forEach(function (pair) {
-            var btn = document.createElement('button');
-            btn.textContent = pair[1];
-            btn.addEventListener('click', function () { vscode.postMessage({ type: 'accountAction', action: pair[0], id: a.id }); });
-            row.appendChild(btn);
-          });
-          card.appendChild(row);
-          accountListEl.appendChild(card);
-        });
-      }
     }
     else if (m.type === 'history') {
       (m.messages || []).forEach(function (h) { addBubble(h.role === 'user' ? 'user' : 'assistant', h.text || ''); });
