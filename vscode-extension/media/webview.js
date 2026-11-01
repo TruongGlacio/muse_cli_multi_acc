@@ -46,6 +46,66 @@
     var savedState = vscode.getState();
     if (savedState && savedState.sidebarCollapsed) { document.body.classList.add('sidebar-collapsed'); }
   } catch (e) { /* mặc định mở */ }
+  // Tay kéo đổi chiều rộng cột hội thoại (v0.8.10): vùng kéo là
+  // #sidebarResizer ở mép phải sidebar, kéo bằng pointer, chiều rộng
+  // bám theo chuột theo thời gian thực, thả chuột thì lưu bền qua
+  // extension (globalState), nhấp đúp thì về mặc định 230px. Kéo chỉ
+  // bắt đầu khi pointer xuống đúng vùng tay kéo nên không ảnh hưởng
+  // lựa chọn hay cuộn trong nội dung sidebar.
+  var sidebarEl = document.getElementById('sidebar');
+  var layoutEl = document.getElementById('layout');
+  var resizerEl = document.getElementById('sidebarResizer');
+  var sidebarResizing = false;
+  // __SIDEBAR_WIDTH_FN_START__
+  function clampSidebarWidth(px, containerWidth) {
+    var DEFAULT_WIDTH = 230;
+    if (typeof px !== 'number' || !isFinite(px)) { return DEFAULT_WIDTH; }
+    var w = Math.floor(px);
+    if (w < 160) { w = 160; }
+    if (w > 480) { w = 480; }
+    if (typeof containerWidth === 'number' && isFinite(containerWidth) && containerWidth > 0) {
+      var half = Math.floor(containerWidth / 2);
+      if (w > half) { w = half; }
+    }
+    return w;
+  }
+  // __SIDEBAR_WIDTH_FN_END__
+  function applySidebarWidth(px) {
+    if (!sidebarEl) { return 230; }
+    var w = clampSidebarWidth(px, layoutEl ? layoutEl.clientWidth : 0);
+    sidebarEl.style.width = w + 'px';
+    sidebarEl.style.flexBasis = w + 'px';
+    return w;
+  }
+  if (resizerEl && sidebarEl) {
+    resizerEl.addEventListener('pointerdown', function (e) {
+      if (document.body.classList.contains('sidebar-collapsed')) { return; }
+      e.preventDefault();
+      sidebarResizing = true;
+      var startX = e.clientX;
+      var startW = sidebarEl.getBoundingClientRect().width;
+      document.body.classList.add('sidebar-resizing');
+      try { resizerEl.setPointerCapture(e.pointerId); } catch (err) { /* trình duyệt cũ không có capture thì vẫn kéo bằng listener */ }
+      function onMove(ev) { applySidebarWidth(startW + (ev.clientX - startX)); }
+      function onUp() {
+        resizerEl.removeEventListener('pointermove', onMove);
+        resizerEl.removeEventListener('pointerup', onUp);
+        resizerEl.removeEventListener('pointercancel', onUp);
+        document.body.classList.remove('sidebar-resizing');
+        sidebarResizing = false;
+        var finalW = clampSidebarWidth(sidebarEl.getBoundingClientRect().width, layoutEl ? layoutEl.clientWidth : 0);
+        vscode.postMessage({ type: 'setSessionListWidth', width: finalW });
+      }
+      resizerEl.addEventListener('pointermove', onMove);
+      resizerEl.addEventListener('pointerup', onUp);
+      resizerEl.addEventListener('pointercancel', onUp);
+    });
+    resizerEl.addEventListener('dblclick', function () {
+      if (document.body.classList.contains('sidebar-collapsed')) { return; }
+      applySidebarWidth(230);
+      vscode.postMessage({ type: 'setSessionListWidth', width: 230 });
+    });
+  }
   var statusEl = document.getElementById('status');
   var inputEl = document.getElementById('input');
   var attachmentsEl = document.getElementById('attachments');
@@ -297,6 +357,9 @@
     else if (m.type === 'attachmentsCleared') { attachmentsEl.innerHTML = ''; }
     else if (m.type === 'sessions') {
       renderAccountFilter(m.accountFilterOptions, m.accountFilter);
+      // Khôi phục chiều rộng cột đã lưu (v0.8.10); đang kéo thì không
+      // áp để khỏi giật lại chiều rộng giữa chừng.
+      if (typeof m.sessionListWidth === 'number' && !sidebarResizing) { applySidebarWidth(m.sessionListWidth); }
       sessionListEl.innerHTML = '';
       var sessions = m.sessions || [];
       if (sessions.length === 0) {

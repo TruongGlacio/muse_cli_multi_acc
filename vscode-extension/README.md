@@ -1,7 +1,11 @@
-# Muse cho VS Code (v0.8.9)
+# Muse cho VS Code (v0.8.10)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.8.10: kéo đổi chiều rộng cột danh sách hội thoại
+
+Cột danh sách hội thoại trước đây cố định 230px (200px khi khung hẹp) nên user không đổi được. Bản này thêm tay kéo ở mép phải của cột: vùng bắt pointer rộng 6px (3px trong + 3px ngoài, nằm trong khe giữa hai cột), hiện rõ khi hover, kéo bằng pointer thì chiều rộng bám theo chuột theo thời gian thực. Giới hạn: tối thiểu 160px, tối đa 480px và không vượt quá 50% chiều rộng khung chat; khung hẹp dưới 600px vẫn giữ 200px theo media query hiện tại (quy tắc này nay có `!important` để không bị chiều rộng inline đã kéo lấn át); nhấp đúp vào tay kéo thì về mặc định 230px. Chiều rộng đã kéo được lưu vào globalState (`muse.sessionListWidth`, cùng chỗ với các state bền khác) khi thả chuột và khôi phục khi webview khởi tạo (không có giá trị lưu hoặc giá trị không hợp lệ thì dùng 230px) — chỉ là thiết lập giao diện, không lưu vào session hay tài khoản. Không phá trạng thái hiện tại: sidebar thu gọn thì tay kéo ẩn theo (và kéo không kích hoạt khi sidebar đang ẩn); dropdown lọc tài khoản và danh sách session vẫn hoạt động bình thường; kéo chỉ bắt đầu khi pointer xuống đúng vùng tay kéo nên không làm mất lựa chọn hay cuộn trong nội dung sidebar. Chưa kiểm chứng được: kéo tay nắm trên VS Code thật vẫn cần user thử (máy build Linux không chạy được webview thật).
 
 ## Mới trong v0.8.9: title hội thoại qua thăm dò lấy từ text nút sidebar
 

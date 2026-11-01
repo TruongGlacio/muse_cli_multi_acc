@@ -2,9 +2,17 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-editor-foregr
 /* Layout 2 cột (v0.6.0): cột trái là danh sách hội thoại, cột phải là
    khung chat chính. Drawer nằm dưới header của 0.5.0 đã xóa hoàn toàn. */
 #layout { display: flex; flex-direction: row; gap: 10px; align-items: flex-start; }
-#sidebar { width: 230px; flex: 0 0 230px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; box-sizing: border-box; }
-@media (max-width: 600px) { #sidebar { width: 200px; flex-basis: 200px; } }
+#sidebar { position: relative; width: 230px; flex: 0 0 230px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; box-sizing: border-box; }
+@media (max-width: 600px) { #sidebar { width: 200px !important; flex-basis: 200px !important; } }
 body.sidebar-collapsed #sidebar { display: none; }
+/* Tay kéo đổi chiều rộng cột hội thoại (v0.8.10): vùng bắt pointer 6px
+   straddling mép phải sidebar (3px trong + 3px ngoài, nằm trong khe 10px
+   giữa hai cột nên không đè nội dung), chỉ hiện rõ khi hover/active;
+   khi sidebar thu gọn thì ẩn theo. */
+#sidebarResizer { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; touch-action: none; z-index: 2; border-radius: 3px; }
+#sidebarResizer:hover, #sidebarResizer:active { background: var(--vscode-focusBorder); }
+body.sidebar-collapsed #sidebarResizer { display: none; }
+body.sidebar-resizing { user-select: none; cursor: col-resize; }
 #chatColumn { flex: 1 1 auto; min-width: 0; }
 .sidebar-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .sidebar-title { font-size: 14px; font-weight: 700; }

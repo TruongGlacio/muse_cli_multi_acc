@@ -334,7 +334,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     this.panel = panel;
     panel.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')] };
     panel.webview.html = this.html(panel.webview);
-    panel.webview.onDidReceiveMessage((m: { type?: string; text?: string; id?: string }) => { this.onWebviewMessage(m); });
+    panel.webview.onDidReceiveMessage((m: { type?: string; text?: string; id?: string; width?: number }) => { this.onWebviewMessage(m); });
     panel.onDidDispose(() => { this.disposeSurface(); });
     this.postSessions();
     void this.refreshAccounts();
@@ -449,6 +449,24 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     return acc.email || acc.username || acc.label || '';
   }
 
+  // Chiều rộng cột danh sách hội thoại (v0.8.10): lưu globalState
+  // (theo user qua mọi workspace, như session đã làm), mặc định 230.
+  // Chỉ là thiết lập giao diện, không lưu vào session hay tài khoản.
+  // Giới hạn cứng 160..480 ở đây; giới hạn 50% khung chat do webview
+  // kẹp thêm lúc áp vì chỉ webview mới biết chiều rộng khung.
+  private sessionListWidth(): number {
+    const raw = this.context.globalState.get<unknown>('muse.sessionListWidth', 230);
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) { return 230; }
+    return Math.min(480, Math.max(160, Math.floor(raw)));
+  }
+
+  private async setSessionListWidth(width: number): Promise<void> {
+    const next = Math.min(480, Math.max(160, Math.floor(width)));
+    if (next === this.sessionListWidth()) { this.postSessions(); return; }
+    await this.context.globalState.update('muse.sessionListWidth', next);
+    MuseChatProvider.refreshSessionLists();
+  }
+
   // Bộ lọc hiển thị hội thoại theo tài khoản (v0.8.8): lưu
   // globalState (theo user qua mọi workspace, như session đã làm),
   // mặc định 'all' = "Tất cả tài khoản". Chỉ lọc HIỂN THỊ ở cột
@@ -530,6 +548,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       currentId: this.currentSessionId,
       accountFilter: filter,
       accountFilterOptions: this.accountFilterOptions(),
+      sessionListWidth: this.sessionListWidth(),
       totalSessionCount: this.store.sessions.length,
       currentSession: current ? { id: current.id, title: current.title, accountDisplay: this.accountDisplayFor(current), accountStatus: this.sessionStatus(current).status } : null,
     });
@@ -1255,7 +1274,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // nhận tin nên run/switch/delete đều tác động đúng bề mặt đó.
   // Điểm mới duy nhất so với sidebar cũ: 'openInNewTab' mở session
   // trong một WebviewPanel riêng (xem openSessionInPanel).
-  private onWebviewMessage(m: { type?: string; text?: string; id?: string }): void {
+  private onWebviewMessage(m: { type?: string; text?: string; id?: string; width?: number }): void {
     if (m.type === 'send' && m.text) { void this.run(m.text); }
     else if (m.type === 'stop') { this.abort?.abort(); }
     else if (m.type === 'openSettings') { this.openSettings(); }
@@ -1264,6 +1283,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     else if (m.type === 'newSession') { void this.newSession(); }
     else if (m.type === 'switchSession' && m.id) { void this.switchSession(m.id); }
     else if (m.type === 'setAccountFilter' && typeof m.id === 'string') { void this.setAccountFilter(m.id); }
+    else if (m.type === 'setSessionListWidth' && typeof m.width === 'number') { void this.setSessionListWidth(m.width); }
     else if (m.type === 'openInNewTab' && m.id) { void this.openSessionInPanel(m.id); }
     else if (m.type === 'renameSession') { void this.renameSession(); }
     else if (m.type === 'deleteSession') { void this.deleteSession(); }
@@ -1281,7 +1301,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')] };
     view.webview.html = this.html(view.webview);
-    view.webview.onDidReceiveMessage((m: { type?: string; text?: string; id?: string }) => { this.onWebviewMessage(m); });
+    view.webview.onDidReceiveMessage((m: { type?: string; text?: string; id?: string; width?: number }) => { this.onWebviewMessage(m); });
     this.postSessions();
     void this.refreshAccounts();
     if (this.history.length > 0) {
