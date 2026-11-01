@@ -140,6 +140,71 @@ public static class DiagnosticLines
         return (ProbeOutcome.GoBackOther, null);
     }
 
+    /// <summary>
+    /// Làm sạch tiêu đề hội thoại lấy từ document.title của trang
+    /// thread (v0.8.8, hàm thuần để test đơn vị): cắt khoảng trắng
+    /// hai đầu, bỏ MỘT hậu tố " - Muse" ở cuối nếu có, rồi cắt lại
+    /// khoảng trắng. Sau đó nếu còn lại rỗng hoặc chỉ là tiêu đề
+    /// chung ("Chat" hoặc "Muse") thì trả null — extension sẽ tự đặt
+    /// dự phòng "Hội thoại web &lt;id&gt;" như trước. Tiêu đề thật
+    /// (ví dụ "Kế hoạch tuần") giữ nguyên, kể cả khi nó chứa " -
+    /// Muse" ở giữa (chỉ hậu tố cuối mới bị bỏ).
+    /// </summary>
+    public static string? CleanThreadTitle(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return null;
+        var t = title.Trim();
+        const string suffix = " - Muse";
+        if (t.EndsWith(suffix, StringComparison.Ordinal))
+            t = t[..^suffix.Length].Trim();
+        if (t.Length == 0) return null;
+        if (t.Equals("Chat", StringComparison.Ordinal)
+            || t.Equals("Muse", StringComparison.Ordinal)) return null;
+        return t;
+    }
+
+    /// <summary>
+    /// Dòng log của endpoint thread-messages (v0.8.8): CHỈ số lượng
+    /// tin + id tài khoản, KHÔNG nội dung tin, KHÔNG tiêu đề hội
+    /// thoại, KHÔNG URL thread. Caller ghi qua LogLocal nên tiền tố
+    /// "[local] " do LogLocal thêm, hàm này không tự thêm.
+    /// </summary>
+    public static string ThreadMessagesLine(string accountId, int count)
+        => $"thread_messages account={accountId} count={count}";
+
+    /// <summary>
+    /// Cắt một tin nhắn về tối đa <paramref name="maxChars"/> ký tự
+    /// (v0.8.8, hàm thuần): tin ngắn hơn hoặc bằng giới hạn giữ
+    /// nguyên; tin dài hơn thì cắt để tổng độ dài (kể cả ghi chú)
+    /// không vượt giới hạn, ghi chú "[... đã cắt ...]" nằm ở cuối
+    /// nội dung bị cắt.
+    /// </summary>
+    public static string TruncateThreadContent(string content, int maxChars = 8000)
+    {
+        const string note = "[... đã cắt ...]";
+        if (content.Length <= maxChars) return content;
+        return content[..Math.Max(0, maxChars - note.Length)] + note;
+    }
+
+    /// <summary>
+    /// Giới hạn danh sách tin nhắn đã trích theo thứ tự tài liệu
+    /// (v0.8.8, hàm thuần): giữ tối đa 200 tin ĐẦU TIÊN theo thứ tự
+    /// tài liệu (tin cũ nhất trước), mỗi tin cắt về tối đa 8000 ký
+    /// tự kèm ghi chú. Thứ tự user → agent trong danh sách vào được
+    /// giữ nguyên, không sắp xếp lại.
+    /// </summary>
+    public static List<(string Role, string Content)> LimitThreadMessages(
+        IEnumerable<(string Role, string Content)> messages)
+    {
+        var limited = new List<(string Role, string Content)>();
+        foreach (var (role, content) in messages)
+        {
+            if (limited.Count >= 200) break;
+            limited.Add((role, TruncateThreadContent(content)));
+        }
+        return limited;
+    }
+
     /// <summary>Tiêu đề trang chung, cắt 80 ký tự (v0.8.5).</summary>
     public static string TruncateTitle(string? title)
     {

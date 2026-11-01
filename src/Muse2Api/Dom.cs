@@ -40,6 +40,62 @@ public static class Dom
 
     public static readonly string ChatState = ReadChatState();
 
+    /// <summary>
+    /// Trích TOÀN BỘ lịch sử hội thoại của trang thread hiện tại
+    /// (v0.8.8, cho endpoint thread-messages). Dùng ĐÚNG selector đã
+    /// có: bubble trợ lý (<see cref="AgentBubble"/>) → role
+    /// "assistant", nhóm user ([class~="group/msg"] có ms-auto +
+    /// items-end và KHÔNG chứa agent bubble) → role "user"; text
+    /// bằng ĐÚNG hàm replyText của <see cref="ChatState"/> (kèm khôi
+    /// phục fence code cho &lt;pre&gt;&lt;code&gt;). Các ứng viên
+    /// được sắp theo thứ tự tài liệu (compareDocumentPosition) rồi
+    /// loại ứng viên lồng trong ứng viên khác, nên thứ tự user →
+    /// agent trên trang được giữ nguyên. Trả { messages: [{ role,
+    /// content }], title: document.title thô } — title thô do C#
+    /// làm sạch bằng DiagnosticLines.CleanThreadTitle, không làm
+    /// sạch ở đây để logic tiêu đề chung chỉ nằm một chỗ.
+    /// </summary>
+    public static readonly string ThreadHistory = $$"""
+        (() => {
+          const visible = e => e.getClientRects().length > 0
+            && !e.closest('[hidden],[aria-hidden="true"],[inert]')
+            && getComputedStyle(e).visibility !== 'hidden';
+          // Bản sao nguyên văn replyText của ChatState: <pre><code>
+          // đã render không còn fence Markdown nên khôi phục lại
+          // trước khi trả về.
+          const replyText = node => {
+            if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
+            if (node.nodeType !== Node.ELEMENT_NODE) return '';
+            const tag = node.tagName;
+            if (['BUTTON', 'SVG', 'SCRIPT', 'STYLE'].includes(tag) || node.getAttribute('aria-hidden') === 'true') return '';
+            if (tag === 'PRE') {
+              const code = node.querySelector('code') || node;
+              const language = (code.className || '').match(/(?:language|lang)-([\w-]+)/)?.[1]
+                || code.getAttribute('data-language') || node.getAttribute('data-language') || '';
+              return '\n```' + language + '\n' + (code.textContent || '') + '\n```\n';
+            }
+            if (tag === 'BR') return '\n';
+            const body = [...node.childNodes].map(replyText).join('');
+            return ['DIV', 'P', 'LI', 'UL', 'OL', 'SECTION', 'H1', 'H2', 'H3'].includes(tag) ? body + '\n' : body;
+          };
+          const bubbles = [...document.querySelectorAll({{Q(AgentBubble)}})].filter(visible);
+          const groups = [...document.querySelectorAll('[class~="group/msg"]')].filter(visible);
+          const users = groups.filter(e => e.classList.contains('ms-auto') && e.classList.contains('items-end') && !e.querySelector({{Q(AgentBubble)}}));
+          const candidates = bubbles.map(el => ({ el, role: 'assistant' }))
+            .concat(users.map(el => ({ el, role: 'user' })));
+          candidates.sort((a, b) => {
+            if (a.el === b.el) return 0;
+            const p = a.el.compareDocumentPosition(b.el);
+            if (p & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+            if (p & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+            return 0;
+          });
+          const outer = candidates.filter(c => !candidates.some(o => o !== c && o.el.contains(c.el)));
+          const messages = outer.map(c => ({ role: c.role, content: replyText(c.el).trim() }));
+          return { messages, title: (document.title || '') };
+        })()
+        """;
+
     public static string ReadChatState(string? localRequestId = null) => $$"""
         (() => {
           const visible = e => e.getClientRects().length > 0

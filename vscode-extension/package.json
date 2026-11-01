@@ -28,7 +28,9 @@
     "onCommand:muse.generateVideo",
     "onCommand:muse.openSessionInNewTab",
     "onCommand:muse.allowReimportDeleted",
-    "onCommand:muse.toggleLocalTools"
+    "onCommand:muse.toggleLocalTools",
+    "onCommand:muse.reloadWebHistory",
+    "onCommand:muse.filterSessionsByAccount"
   ],
   "categories": [
     "Other"
@@ -166,6 +168,14 @@
       {
         "command": "muse.toggleLocalTools",
         "title": "Muse: Bật/Tắt tool cục bộ"
+      },
+      {
+        "command": "muse.reloadWebHistory",
+        "title": "Muse: Tải lại lịch sử hội thoại web"
+      },
+      {
+        "command": "muse.filterSessionsByAccount",
+        "title": "Muse: Lọc hội thoại theo tài khoản"
       }
     ],
     "configuration": {
@@ -275,7 +285,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.8.7",
+  "version": "0.8.8",
   "extensionKind": [
     "ui",
     "workspace"

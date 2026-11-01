@@ -1,7 +1,13 @@
-# Muse cho VS Code (v0.8.7)
+# Muse cho VS Code (v0.8.8)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.8.8: tải lịch sử thread web khi mở hội thoại + lọc hội thoại theo tài khoản
+
+Phía gateway (phần riêng, tích hợp sau) thêm endpoint `POST /admin/accounts/{id}/thread-messages` trả lịch sử + tiêu đề đã làm sạch của một thread web; phần extension này dùng đúng hợp đồng đó.
+1. **Title + lịch sử khi mở hội thoại.** Hội thoại import từ web mà messages đang rỗng thì khi mở (chuyển session, mở tab mới, khôi phục sidebar, chuyển do session bị xóa ở nơi khác) extension tự gọi endpoint một lần bằng accountId của session (không có thì dùng tài khoản đang lọc, cũng không có thì giữ rỗng) rồi thay messages, lưu lại và hiển thị. Endpoint trả rỗng hoặc lỗi thì giữ rỗng và báo rõ là chưa đọc được lịch sử từ trang web, không tự retry. Lệnh palette mới `Muse: Tải lại lịch sử hội thoại web` (`muse.reloadWebHistory`) chỉ chạy cho session đang mở và có threadUrl, ghi đè messages đã lưu bằng kết quả mới; nếu đã có nội dung thì hỏi xác nhận modal trước. Title chỉ cập nhật khi title cũ đúng dạng dự phòng `Hội thoại web <id>` (id từ threadUrl) và title mới là tiêu đề thật (khác null/rỗng, không phải `Chat`/`Muse`) — không ghi đè title từ anchor text hay title user đã sửa tay. Đồng bộ từ web cũng áp cùng quy tắc cho các thread đã import từ bản trước: quét thấy title thật thì cập nhật title dự phòng cũ và lưu lại, không cần mở từng cái, không đổi logic khử trùng/tombstone/register.
+2. **Lọc hội thoại theo tài khoản.** Cột trái thêm dropdown ngay trên danh sách: `Tất cả tài khoản` + một mục cho mỗi tài khoản gateway (nhãn + id + trạng thái). Lựa chọn lưu globalState (theo user qua mọi workspace), mặc định `Tất cả tài khoản`. Danh sách chỉ hiển thị session khớp bộ lọc; session không có accountId (cũ, trước 0.5.0) chỉ hiện khi chọn `Tất cả tài khoản`. Chỉ lọc hiển thị — mở/xóa vẫn theo từng session, session đang mở mà bị lọc khỏi danh sách vẫn hiển thị nội dung bình thường. Khi bộ lọc là một tài khoản cụ thể thì `Đồng bộ từ web` và `Hội thoại mới` dùng thẳng tài khoản đó, không hiện QuickPick; khi là `Tất cả tài khoản` thì QuickPick như cũ. Tài khoản đang lọc mà không còn trong pool (refresh/đăng nhập/đăng xuất/xóa) thì tự về `Tất cả tài khoản` và báo rõ một lần. Lệnh palette `Muse: Lọc hội thoại theo tài khoản` (`muse.filterSessionsByAccount`) mở QuickPick cùng danh sách mục như dropdown cho người dùng bàn phím.
 
 ## Mới trong v0.8.7: đồng bộ thăm dò nút lịch sử trong sidebar + chẩn đoán nhóm
 

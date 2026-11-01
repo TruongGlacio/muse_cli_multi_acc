@@ -997,7 +997,7 @@ public sealed class BrowserDriver : IMuseDriver
         try
         {
             var pages = new List<WebThreadsPageDiag>();
-            var best = new WebThreadsScan(new List<(string Url, string Title)>(), Upstream.Site, 0);
+            var best = new WebThreadsScan(new List<(string Url, string? Title)>(), Upstream.Site, 0);
             var last = best;
             // v0.8.7: ngân sách thăm dò CHUNG cho cả lần quét một tài
             // khoản là 60 giây (mỗi trang thăm dò tối đa 30 nút nhưng
@@ -1013,7 +1013,7 @@ public sealed class BrowserDriver : IMuseDriver
             {
                 await page.GotoAsync(startUrl,
                     new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-                var scan = new WebThreadsScan(new List<(string Url, string Title)>(), Upstream.Site, 0);
+                var scan = new WebThreadsScan(new List<(string Url, string? Title)>(), Upstream.Site, 0);
                 var previousCount = -1;
                 for (var i = 0; i < 20; i++)
                 {
@@ -1081,6 +1081,113 @@ public sealed class BrowserDriver : IMuseDriver
             return final;
         }
         finally { try { await page.CloseAsync(); } catch { } }
+    }
+
+    // ---------- lấy lịch sử tin nhắn của một thread web (v0.8.8) ----------
+    // Mở URL thread trong một page TẠM thuộc đúng context của tài
+    // khoản (GetContext, giống ListWebThreads), không đưa vào _tabs,
+    // chỉ đóng page trong finally. Chờ tải theo mẫu poll của quét
+    // (mỗi 500ms tối đa 10 giây, dừng sớm khi số tin > 0 và ổn định
+    // qua 2 lần trích liên tiếp, không chờ vô hạn); sau đó cuộn
+    // container lên đầu để tải thêm tin cũ nếu cần (tối đa 8 lần
+    // cuộn, dừng khi số tin ổn định 2 lần liên tiếp, không cuộn vô
+    // hạn). Trích bằng ĐÚNG selector + replyText của Dom.ThreadHistory
+    // (bubble trợ lý → assistant, nhóm user → user, theo thứ tự tài
+    // liệu, kèm fence code khôi phục). Giới hạn ở C# bằng
+    // LimitThreadMessages (tối đa 200 tin đầu, mỗi tin tối đa 8000
+    // ký tự kèm ghi chú). Hết hạn thì ném Auth như ListWebThreads;
+    // URL không phải thread thì endpoint đã chặn bằng 400 trước khi
+    // tới đây, nhưng vẫn kiểm tra lại để không mở URL lạ.
+    public async Task<ThreadMessagesResult> GetThreadMessages(Account account, string url)
+    {
+        if (!LocalConversationStore.IsThread(url))
+            throw MuseException.Invalid("URL phải là thread muse.ai dạng /thread/<id>");
+        if (Upstream.MissingSessionCookies(account.Cookies) is { Count: > 0 })
+            throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+        var context = await GetContext(account);
+        var page = await context.NewPageAsync();
+        try
+        {
+            await page.GotoAsync(url,
+                new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            if (!Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
+                || !pageUri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase))
+                throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+            var probe = await ReadProbeStateAsync(page);
+            if (probe.LoginSignal)
+                throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+            // Poll như quét: tối đa 20 lần × 500ms.
+            var raw = new List<(string Role, string Content)>();
+            var rawTitle = probe.Title;
+            var previousCount = -1;
+            for (var i = 0; i < 20; i++)
+            {
+                var extracted = await ExtractThreadHistoryAsync(page);
+                raw = extracted.Messages;
+                rawTitle = extracted.Title;
+                if (raw.Count > 0 && raw.Count == previousCount) break;
+                previousCount = raw.Count;
+                if (i < 19) await Task.Delay(TimeSpan.FromMilliseconds(500));
+            }
+            // Cuộn lên đầu để tải thêm tin cũ: cùng cách tìm container
+            // cuộn của ChatState (overflowY auto/scroll, scrollHeight
+            // vượt clientHeight), chỉ khác hướng cuộn (lên đầu thay
+            // vì xuống cuối) vì tin cũ nằm phía trên.
+            var stableScrolls = 0;
+            for (var s = 0; s < 8; s++)
+            {
+                await Eval(page, """
+                    (() => {
+                      const scrollers = [...document.querySelectorAll('*')].filter(e => {
+                        const st = getComputedStyle(e);
+                        return (st.overflowY === 'auto' || st.overflowY === 'scroll') && e.scrollHeight > e.clientHeight + 50;
+                      });
+                      scrollers.forEach(e => { e.scrollTop = 0; });
+                      return { scrollers: scrollers.length };
+                    })()
+                    """);
+                await Task.Delay(TimeSpan.FromMilliseconds(500));
+                var extracted = await ExtractThreadHistoryAsync(page);
+                if (extracted.Messages.Count == raw.Count)
+                {
+                    stableScrolls++;
+                    if (stableScrolls >= 2) break;
+                }
+                else
+                {
+                    stableScrolls = 0;
+                    raw = extracted.Messages;
+                    rawTitle = extracted.Title;
+                }
+            }
+            var limited = DiagnosticLines.LimitThreadMessages(raw);
+            return new ThreadMessagesResult(
+                limited.Select(m => new ThreadMessage(m.Role, m.Content)).ToList(),
+                DiagnosticLines.CleanThreadTitle(rawTitle));
+        }
+        finally { try { await page.CloseAsync(); } catch { } }
+    }
+
+    // Một lần trích lịch sử bằng Dom.ThreadHistory: trả danh sách
+    // (role, content) theo thứ tự tài liệu + document.title thô.
+    // Eval trả null (lỗi đọc trang) thì coi là 0 tin, để vòng poll
+    // thử lại thay vì vỡ cả lần lấy.
+    private async Task<(List<(string Role, string Content)> Messages, string? Title)> ExtractThreadHistoryAsync(IPage page)
+    {
+        var result = await Eval(page, Dom.ThreadHistory);
+        var messages = new List<(string Role, string Content)>();
+        if (result is not System.Text.Json.Nodes.JsonObject obj) return (messages, null);
+        if (obj["messages"] is System.Text.Json.Nodes.JsonArray arr)
+        {
+            foreach (var item in arr)
+            {
+                if (item is not System.Text.Json.Nodes.JsonObject msg) continue;
+                var role = Str(msg, "role") ?? "";
+                if (role != "user" && role != "assistant") continue;
+                messages.Add((role, Str(msg, "content") ?? ""));
+            }
+        }
+        return (messages, Str(obj, "title"));
     }
 
     // Bấm mở sidebar lịch sử (v0.8.5, sửa triệt để lỗi lạc trang ở
@@ -1192,8 +1299,10 @@ public sealed class BrowserDriver : IMuseDriver
     // cũ (đã thử ở bước trước); tối đa 30 nút và chung ngân sách 60
     // giây cho cả lần quét một tài khoản (deadline do caller cấp).
     // Sau mỗi lần bấm: URL thành /thread/<id> thì ghi nhận thread đó
-    // (chỉ lấy id từ URL, tiêu đề để extension tự đặt dự phòng) rồi
-    // GoBack; URL thành /thread/new thì GoBack + loại nút (nút tạo
+    // (id từ URL + title đã làm sạch từ document.title tại trang đó,
+    // null khi chỉ là tiêu đề chung thì extension tự đặt dự phòng
+    // như cũ, v0.8.8) rồi GoBack; URL thành /thread/new thì GoBack
+    // + loại nút (nút tạo
     // mới, không phải lịch sử); URL không đổi thì bấm Escape; URL rời
     // khỏi khu vực chat thì GoBack ngay + loại nút, không ghi nhận gì
     // từ trang lạc. Không bao giờ điền form, không gửi tin, không bấm
@@ -1207,7 +1316,7 @@ public sealed class BrowserDriver : IMuseDriver
     private async Task<(WebThreadsScan? Found, bool HitAuth)> ProbeHistoryButtonsAsync(
         IPage page, WebThreadsScan baseline, DateTimeOffset deadline)
     {
-        var found = new List<(string Url, string Title)>(baseline.Threads);
+        var found = new List<(string Url, string? Title)>(baseline.Threads);
         var seen = new HashSet<string>(found.Select(t => t.Url), StringComparer.OrdinalIgnoreCase);
         var clicked = 0;
         while (clicked < 30 && DateTimeOffset.UtcNow < deadline)
@@ -1273,7 +1382,12 @@ public sealed class BrowserDriver : IMuseDriver
                 case DiagnosticLines.ProbeOutcome.RecordThread:
                 {
                     var url = Upstream.Site + "/thread/" + threadId!;
-                    if (seen.Add(url)) found.Add((url, ""));
+                    // v0.8.8: đọc document.title tại trang thread vừa
+                    // mở làm title ứng viên, làm sạch bằng cùng quy
+                    // tắc với endpoint thread-messages; null thì
+                    // extension tự đặt dự phòng như cũ. Đường link
+                    // giữ nguyên title từ innerText anchor.
+                    if (seen.Add(url)) found.Add((url, DiagnosticLines.CleanThreadTitle(state.Title)));
                     try { await page.GoBackAsync(); } catch { }
                     await Task.Delay(TimeSpan.FromMilliseconds(800));
                     break;
@@ -1300,21 +1414,24 @@ public sealed class BrowserDriver : IMuseDriver
     }
 
     // Trạng thái nhẹ sau một lần bấm thăm dò: URL hiện tại + tín hiệu
-    // hết hạn (gợi ý chữ trên 2000 ký tự đầu hoặc form đăng nhập).
-    // Chỉ đọc tín hiệu, không đọc nội dung trang hay tiêu đề hội thoại.
-    private async Task<(string Url, bool LoginSignal)> ReadProbeStateAsync(IPage page)
+    // hết hạn (gợi ý chữ trên 2000 ký tự đầu hoặc form đăng nhập) +
+    // document.title thô của trang hiện tại. Title thô do caller làm
+    // sạch bằng CleanThreadTitle; chỉ đọc title, không đọc nội dung
+    // trang hay tin nhắn.
+    private async Task<(string Url, bool LoginSignal, string? Title)> ReadProbeStateAsync(IPage page)
     {
         var result = await Eval(page, """
             (() => ({
               head: (document.body ? document.body.innerText.slice(0, 2000) : ''),
               hasLoginForm: !!document.querySelector('input[type="password"], input[type="email"]'),
+              title: (document.title || ''),
             }))()
             """);
         if (result is not System.Text.Json.Nodes.JsonObject obj)
-            return (page.Url, false);
+            return (page.Url, false, null);
         var head = (Str(obj, "head") ?? "").ToLowerInvariant();
         var textHint = Dom.LoginHints.Any(h => head.Contains(h));
-        return (page.Url, DiagnosticLines.HasLoginSignal(textHint, BoolNode(obj, "hasLoginForm")));
+        return (page.Url, DiagnosticLines.HasLoginSignal(textHint, BoolNode(obj, "hasLoginForm")), Str(obj, "title"));
     }
 
     // Một lần quét trang: <a href> + regex /thread/<id> trên outerHTML.
@@ -1353,7 +1470,7 @@ public sealed class BrowserDriver : IMuseDriver
             })()
             """);
         if (result is not System.Text.Json.Nodes.JsonObject obj)
-            return new WebThreadsScan(new List<(string Url, string Title)>(), page.Url, 0, LoginHint: false);
+            return new WebThreadsScan(new List<(string Url, string? Title)>(), page.Url, 0, LoginHint: false);
         var head = (Str(obj, "head") ?? "").ToLowerInvariant();
         var textHint = Dom.LoginHints.Any(h => head.Contains(h));
         var hasLoginForm = BoolNode(obj, "hasLoginForm");
@@ -1364,7 +1481,7 @@ public sealed class BrowserDriver : IMuseDriver
         var labeledButtons = obj["labeledButtons"] is System.Text.Json.Nodes.JsonValue lv && lv.TryGetValue<int>(out var lb) ? lb : 0;
         var historyTestids = obj["historyTestids"] is System.Text.Json.Nodes.JsonValue hv && hv.TryGetValue<int>(out var ht) ? ht : 0;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var threads = new List<(string Url, string Title)>();
+        var threads = new List<(string Url, string? Title)>();
         var linkCount = 0;
         var threadLinks = 0;
         var libraryLinks = 0;

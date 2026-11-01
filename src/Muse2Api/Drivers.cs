@@ -38,9 +38,19 @@ public sealed record ProfileDebug(List<string> Attempted, List<string> Succeeded
     // "goto_error:<TênLoạiException>" (Goto/Eval ném exception, chỉ
     // ghi tên loại, không ghi nội dung trang hay thông điệp lỗi).
     string? HomeError = null);
+// Một tin nhắn trong lịch sử thread (v0.8.8): role "user" hoặc
+// "assistant", content đã qua replyText (kèm fence code khôi phục).
+public sealed record ThreadMessage(string Role, string Content);
+// Kết quả endpoint thread-messages (v0.8.8): danh sách tin theo thứ
+// tự tài liệu (đã giới hạn 200 tin / 8000 ký tự mỗi tin ở driver) và
+// tiêu đề đã làm sạch (null = tiêu đề chung, extension tự đặt dự phòng).
+public sealed record ThreadMessagesResult(List<ThreadMessage> Messages, string? Title);
 // Kết quả quét thread web (v0.7.0, điểm 4): danh sách + chẩn đoán chỉ
 // gồm số lượng (pageUrl, linkCount, threadCount), không nội dung trang.
-public sealed record WebThreadsScan(List<(string Url, string Title)> Threads, string PageUrl, int LinkCount, bool LoginHint = false,
+// v0.8.8: Title thành nullable — thread qua thăm dò nút mang title đã
+// làm sạch từ document.title, null khi chỉ là tiêu đề chung (extension
+// tự đặt dự phòng); thread qua link vẫn mang title từ innerText anchor.
+public sealed record WebThreadsScan(List<(string Url, string? Title)> Threads, string PageUrl, int LinkCount, bool LoginHint = false,
     // v0.8.5: chẩn đoán từng trang quét (tiêu đề chung của app, số
     // lượng, cờ form đăng nhập — KHÔNG tiêu đề hội thoại, KHÔNG nội
     // dung trang, KHÔNG URL thread; URL trang chỉ là trang chủ hoặc
@@ -100,6 +110,12 @@ public interface IMuseDriver
     // khác dùng default này và gateway trả 501.
     Task<WebThreadsScan> ListWebThreads(Account account)
         => throw MuseException.NotImplemented($"driver '{Name}' không hỗ trợ liệt kê hội thoại web");
+    // v0.8.8: lấy toàn bộ lịch sử tin nhắn của một thread web (theo
+    // thứ tự tài liệu, đã giới hạn). Chỉ BrowserDriver cài đặt thật;
+    // driver mock và các driver khác giữ default này (gateway trả 501,
+    // không cần mock endpoint mới).
+    Task<ThreadMessagesResult> GetThreadMessages(Account account, string url)
+        => throw MuseException.NotImplemented($"driver '{Name}' không hỗ trợ lấy lịch sử hội thoại");
     // v0.7.0: lấy hồ sơ best-effort của tài khoản. Driver không phải
     // trình duyệt trả null (không lấy được gì), không lỗi.
     Task<ProfileInfo?> FetchProfile(Account account, CancellationToken cancel = default)

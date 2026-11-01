@@ -19,6 +19,12 @@
       <button id="deleteSessionBtn" title="Xóa hội thoại hiện tại (hỏi xác nhận trước)">Xóa hội thoại</button>
       <button id="syncFromWebBtn" title="Lấy danh sách hội thoại từ web muse.ai và tạo session nối tiếp (không nhập nội dung cũ)">Đồng bộ từ web</button>
     </div>
+    <div class="account-filter">
+      <label for="accountFilterSelect">Tài khoản:</label>
+      <select id="accountFilterSelect" title="Lọc danh sách hội thoại theo tài khoản (chỉ lọc hiển thị, không đổi session đang mở)">
+        <option value="all">Tất cả tài khoản</option>
+      </select>
+    </div>
     <div id="sessionList"></div>
     <p class="note">Danh sách luôn hiện khi cột trái đang mở. Bấm vào một hội thoại để mở lại chat của hội thoại đó (cột trái vẫn mở). Trạng thái: Đang chạy = hội thoại hiện tại đang có yêu cầu chạy; Đã logout = tài khoản gắn với hội thoại đã hết hạn hoặc đã đăng xuất; còn lại là Đã dừng.</p>
   </aside>

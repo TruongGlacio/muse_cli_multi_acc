@@ -21,6 +21,9 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 #chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 #chips button { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
 #sessionList { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; margin-top: 8px; }
+/* Dropdown lọc hội thoại theo tài khoản (v0.8.8), ngay trên danh sách. */
+.account-filter { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; }
+.account-filter select { flex: 1; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 4px; padding: 3px 4px; }
 .session-item { text-align: left; background: transparent; border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 6px 8px; color: var(--vscode-editor-foreground); }
 .session-item.current { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-color: var(--vscode-badge-background); }
 .session-item small { display: block; opacity: 0.75; font-size: 11px; }

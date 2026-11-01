@@ -341,6 +341,71 @@ export async function fetchWebThreads(baseUrl: string, apiKey: string, id: strin
   return { threads, debug };
 }
 
+// Lấy lịch sử một thread web (v0.8.8, hợp đồng endpoint do phía
+// gateway thực hiện): POST /admin/accounts/{id}/thread-messages,
+// body {"url": "<thread url>"}, RequireAdmin; trả {"data":
+// [{"role": "user"|"assistant", "content": "..."}], "title": "<title
+// đã làm sạch hoặc null>", "count": <n>}. Title null nghĩa là
+// gateway không lấy được tiêu đề thật (ví dụ tiêu đề chung) — phía
+// extension giữ nguyên tiêu đề dự phòng như cũ, không ghi đè.
+export interface ThreadMessage { role: 'user' | 'assistant'; content: string; }
+export interface ThreadMessagesResult { messages: ThreadMessage[]; title: string | null; count: number; }
+
+export async function fetchThreadMessages(baseUrl: string, apiKey: string, accountId: string, url: string): Promise<ThreadMessagesResult> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(accountId)}/thread-messages`, { method: 'POST', body: JSON.stringify({ url }) },
+    'Gateway chưa có endpoint lấy lịch sử thread web (gateway cũ).')) as Record<string, unknown>;
+  const arr = Array.isArray(data.data) ? data.data : [];
+  const messages = arr
+    .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null && (x.role === 'user' || x.role === 'assistant') && typeof x.content === 'string')
+    .map((x) => ({ role: x.role as 'user' | 'assistant', content: x.content as string }));
+  return {
+    messages,
+    title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : null,
+    count: typeof data.count === 'number' ? data.count : messages.length,
+  };
+}
+
+// Quy tắc cập nhật title thread web (v0.8.8, hàm thuần để test đơn
+// vị trực tiếp từ out/admin.js): CHỈ ghi đè khi title hiện tại đúng
+// dạng dự phòng "Hội thoại web <id>" (id lấy từ threadUrl) VÀ title
+// mới là tiêu đề thật (khác null/rỗng, khác chính dạng dự phòng đó,
+// không phải tiêu đề chung "Chat"/"Muse"). Trả title mới (cắt 80 ký
+// tự như syncFromWeb) hoặc null = giữ nguyên: không ghi đè title từ
+// anchor text, không ghi đè title user đã sửa tay.
+export function threadIdFromWebUrl(url: string): string {
+  const noQuery = url.split(/[?#]/)[0].replace(/\/+$/, '');
+  const idx = noQuery.indexOf('/thread/');
+  return idx >= 0 ? noQuery.slice(idx + '/thread/'.length) : noQuery;
+}
+
+export function fallbackWebTitle(threadUrl: string): string {
+  return `Hội thoại web ${threadIdFromWebUrl(threadUrl)}`;
+}
+
+export function isFallbackWebTitle(title: string, threadUrl: string): boolean {
+  return !!threadUrl && title === fallbackWebTitle(threadUrl);
+}
+
+export function resolveWebTitle(currentTitle: string, threadUrl: string, fetchedTitle: string | null | undefined): string | null {
+  if (!fetchedTitle) { return null; }
+  const fresh = fetchedTitle.trim();
+  if (!fresh) { return null; }
+  if (fresh.toLowerCase() === 'chat' || fresh.toLowerCase() === 'muse') { return null; }
+  if (!isFallbackWebTitle(currentTitle, threadUrl)) { return null; }
+  if (fresh === fallbackWebTitle(threadUrl)) { return null; }
+  return fresh.slice(0, 80);
+}
+
+// Bộ lọc hiển thị hội thoại theo tài khoản (v0.8.8, hàm thuần):
+// 'all' (hoặc rỗng) hiện tất cả; tài khoản cụ thể chỉ hiện session
+// có accountId đúng bằng nó — session không có accountId (cũ, trước
+// 0.5.0) vì vậy chỉ hiện khi chọn "Tất cả tài khoản". Chỉ lọc hiển
+// thị, không đổi logic mở/xóa theo từng session.
+export function sessionMatchesAccountFilter(accountId: string | undefined, filter: string): boolean {
+  if (!filter || filter === 'all') { return true; }
+  return accountId === filter;
+}
+
 export async function registerConversation(baseUrl: string, apiKey: string, accountId: string, hint: string, url: string): Promise<void> {
   await adminFetch(baseUrl, apiKey, '/admin/conversations/register', { method: 'POST', body: JSON.stringify({ accountId, hint, url }) });
 }

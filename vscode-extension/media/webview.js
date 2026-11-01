@@ -2,6 +2,33 @@
   var vscode = acquireVsCodeApi();
   var messagesEl = document.getElementById('messages');
   var sessionListEl = document.getElementById('sessionList');
+  // Dropdown lọc hội thoại theo tài khoản (v0.8.8): nằm ngay trên
+  // danh sách, chỉ lọc hiển thị. Chỉ rebuild options khi danh sách
+  // thay đổi để không giật focus khi đang chọn.
+  var accountFilterEl = document.getElementById('accountFilterSelect');
+  var lastFilterOptionsKey = '';
+  if (accountFilterEl) {
+    accountFilterEl.addEventListener('change', function () {
+      vscode.postMessage({ type: 'setAccountFilter', id: accountFilterEl.value });
+    });
+  }
+  function renderAccountFilter(options, currentFilter) {
+    if (!accountFilterEl) { return; }
+    var opts = options && options.length ? options : [{ id: 'all', label: 'Tất cả tài khoản', status: '' }];
+    var key = opts.map(function (o) { return o.id + '|' + o.label + '|' + (o.status || ''); }).join(';');
+    if (key !== lastFilterOptionsKey) {
+      lastFilterOptionsKey = key;
+      accountFilterEl.innerHTML = '';
+      opts.forEach(function (o) {
+        var opt = document.createElement('option');
+        opt.value = o.id;
+        opt.textContent = o.label + (o.status ? ' — ' + o.status : '');
+        accountFilterEl.appendChild(opt);
+      });
+    }
+    var want = currentFilter || 'all';
+    if (accountFilterEl.value !== want) { accountFilterEl.value = want; }
+  }
   var currentSessionLabel = document.getElementById('currentSessionLabel');
   var currentSessionAccountEl = document.getElementById('currentSessionAccount');
   // Layout 2 cột (v0.6.0): drawer dưới header của 0.5.0 đã xóa; nút
@@ -269,14 +296,19 @@
     }
     else if (m.type === 'attachmentsCleared') { attachmentsEl.innerHTML = ''; }
     else if (m.type === 'sessions') {
+      renderAccountFilter(m.accountFilterOptions, m.accountFilter);
       sessionListEl.innerHTML = '';
       var sessions = m.sessions || [];
       if (sessions.length === 0) {
         var empty = document.createElement('div');
-        empty.textContent = 'Chưa có hội thoại nào. Bấm "Hội thoại mới" để bắt đầu.';
+        // Lọc mà ra rỗng trong khi tổng số session > 0 thì nói rõ là
+        // do bộ lọc, không phải danh sách đã hết.
+        empty.textContent = (m.totalSessionCount || 0) > 0
+          ? 'Không có hội thoại nào cho tài khoản đang lọc. Đổi bộ lọc tài khoản ở trên để xem hội thoại khác.'
+          : 'Chưa có hội thoại nào. Bấm "Hội thoại mới" để bắt đầu.';
         sessionListEl.appendChild(empty);
       }
-      if (sessions.length === 0) {
+      if (sessions.length === 0 && !m.currentSession) {
         currentSessionLabel.textContent = 'Chưa có hội thoại nào.';
         if (currentSessionAccountEl) { currentSessionAccountEl.textContent = ''; }
       }
@@ -352,6 +384,18 @@
           }
         }
       });
+      // v0.8.8: session đang mở mà bị lọc khỏi danh sách vẫn phải
+      // hiện tiêu đề/tài khoản ở header (không dùng sessions đã lọc
+      // để suy ra header, mà dùng currentSession ngoài danh sách).
+      var currentShown = sessions.some(function (s) { return s.id === m.currentId; });
+      if (!currentShown && m.currentSession) {
+        currentSessionLabel.textContent = 'Hội thoại hiện tại: ' + (m.currentSession.title || 'Hội thoại');
+        if (currentSessionAccountEl) {
+          var csDisplay = m.currentSession.accountDisplay || 'Chưa xác định tài khoản';
+          currentSessionAccountEl.textContent = 'Tài khoản: ' + csDisplay + (m.currentSession.accountStatus === 'loggedout' ? ' (Đã logout)' : '');
+          currentSessionAccountEl.title = csDisplay;
+        }
+      }
     }
     else if (m.type === 'history') {
       (m.messages || []).forEach(function (h) { addBubble(h.role === 'user' ? 'user' : 'assistant', h.text || ''); });

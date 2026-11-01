@@ -7,7 +7,7 @@ namespace Muse2Api;
 
 public static class Endpoints
 {
-    public const string Version = "0.8.7";
+    public const string Version = "0.8.8";
 
     public static void Map(WebApplication app, AppState s)
     {
@@ -880,7 +880,10 @@ public static class Endpoints
             // tiêu đề/URL thread.
             var arr = new JsonArray();
             foreach (var (url, title) in scan.Threads)
-                arr.Add(new JsonObject { ["url"] = url, ["title"] = title });
+                // v0.8.8: title có thể null (thread qua thăm dò nút mà
+                // document.title chỉ là tiêu đề chung) — extension tự
+                // đặt dự phòng; thread qua link vẫn có title chuỗi.
+                arr.Add(new JsonObject { ["url"] = url, ["title"] = title is null ? null : JsonValue.Create(title) });
             // debug v0.7.0, điểm 4 (mở rộng v0.8.5): chỉ số lượng +
             // tiêu đề chung, không nội dung trang. pages ghi riêng
             // trang chủ và /thread/new để popup về 0 nêu được số liệu
@@ -907,6 +910,39 @@ public static class Endpoints
                     ["threadCount"] = scan.Threads.Count,
                     ["pages"] = pagesArr,
                 },
+            });
+        });
+        // ---------- lịch sử tin nhắn của một thread web (v0.8.8) ----------
+        // POST /admin/accounts/{id}/thread-messages, body {"url": ...}.
+        // RequireAdmin như web-threads; không có tài khoản thì 404 như
+        // web-threads; URL không phải /thread/ thì 400 rõ ràng; hết
+        // hạn thì driver ném Auth như các đường khác; driver không
+        // phải trình duyệt thì 501 qua default của interface (mock
+        // giữ hành vi cũ, không cần mock endpoint mới). Trả
+        // {"data": [{"role", "content"}], "title", "count"} — title
+        // đã làm sạch theo quy tắc việc 1 (null = tiêu đề chung,
+        // extension tự đặt dự phòng), count = số tin trong data.
+        // Log CHỈ số lượng tin + id tài khoản (qua LogLocal, tiền tố
+        // "[local] " do LogLocal thêm): không nội dung tin, không
+        // tiêu đề hội thoại, không URL thread.
+        admin.MapPost("/accounts/{id}/thread-messages", async (HttpContext ctx, string id) =>
+        {
+            RequireAdmin(ctx, s);
+            var acc = s.Pool.Get(id) ?? throw MuseException.NotFound($"account '{id}' not found");
+            var body = await JsonHelp.ReadBody(ctx.Request);
+            var url = JsonHelp.Str(body["url"]) ?? "";
+            if (!LocalConversationStore.IsThread(url))
+                throw MuseException.Invalid("URL phải là thread muse.ai dạng /thread/<id>");
+            var result = await s.Driver.GetThreadMessages(acc, url);
+            s.LogLocal(DiagnosticLines.ThreadMessagesLine(id, result.Messages.Count));
+            var data = new JsonArray();
+            foreach (var m in result.Messages)
+                data.Add(new JsonObject { ["role"] = m.Role, ["content"] = m.Content });
+            return Results.Json(new JsonObject
+            {
+                ["data"] = data,
+                ["title"] = result.Title is null ? null : JsonValue.Create(result.Title),
+                ["count"] = result.Messages.Count,
             });
         });
         // ---------- hồ sơ tài khoản + gộp trùng (v0.7.0) ----------
