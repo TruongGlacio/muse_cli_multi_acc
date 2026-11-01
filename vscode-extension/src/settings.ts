@@ -21,7 +21,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { GatewayManager } from './gateway';
-import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, patchGatewayAccountLabel, deleteGatewayAccount, purgeGatewayAccount, fetchGatewayAccountQuota, formatCooldown, startBrowserLogin, getBrowserLoginStatus, cancelBrowserLogin, refreshGatewayAccountProfile, mergeGatewayDuplicates } from './admin';
+import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, patchGatewayAccountLabel, deleteGatewayAccount, purgeGatewayAccount, fetchGatewayAccountQuota, formatCooldown, startBrowserLogin, getBrowserLoginStatus, cancelBrowserLogin, refreshGatewayAccountProfile, updateGatewayAccountProfile, mergeGatewayDuplicates } from './admin';
 
 export interface SettingsSessionInfo {
   id: string;
@@ -117,6 +117,7 @@ export class MuseSettingsPanel {
       else if (m.type === 'refreshConfig') { void this.refreshConfig(); }
       else if (m.type === 'accountAction' && m.action && m.id) { void this.accountAction(m.action, m.id); }
       else if (m.type === 'profileRefresh' && m.id) { void this.profileRefresh(m.id); }
+      else if (m.type === 'editProfileField' && m.id) { void this.editProfileField(m.id, (m as { field?: string }).field); }
       else if (m.type === 'mergeDuplicates') { void this.mergeDuplicates(); }
       else if (m.type === 'accountQuota' && m.id) { void this.accountQuota(m.id); }
       else if (m.type === 'browserLogin') { void this.startBrowserLoginFlow((m as { label?: string }).label, undefined); }
@@ -177,6 +178,8 @@ export class MuseSettingsPanel {
             email: a.email,
             username: a.username,
             phone: a.phone,
+            // ID người dùng Muse (v0.8.5): chỉ đọc, không sửa tay.
+            museUserId: a.museUserId,
             enabled: a.enabled,
             status: a.status,
             lastError: a.lastError.slice(0, 200),
@@ -321,6 +324,44 @@ export class MuseSettingsPanel {
     await this.refreshAccounts();
     // Cache tài khoản của khung chat làm mới theo, để dòng tài khoản
     // trong cột trái + header chat cập nhật danh tính mới (điểm 3).
+    this.onAccountsChanged();
+  }
+
+  // Nhập tay hồ sơ (v0.8.5, theo quyết định của user: chưa cần lấy thêm
+  // email/sđt tự động, để user tự nhập): panel gửi field cần sửa, hộp
+  // nhập của VS Code hỏi giá trị mới (để trống = xóa trường đó), rồi
+  // PATCH sang gateway. Gateway kiểm tra hợp lệ và trả 400 kèm lý do
+  // rõ khi không hợp lệ — extension hiện nguyên văn lỗi đó và không
+  // lưu gì cả. Giá trị nhập tay đã hợp lệ thì lần profile-refresh sau
+  // không ghi đè (chỉ điền trường trống) và đường dọn rác cũng không
+  // xóa (giá trị hợp lệ qua được kiểm tra dọn rác). ID Muse KHÔNG cho
+  // sửa tay (chỉ session API mới ghi) nên không có nút sửa cho nó.
+  private async editProfileField(id: string, field: string | undefined): Promise<void> {
+    const labels: Record<string, { title: string; prompt: string }> = {
+      email: { title: 'Sửa email', prompt: 'Nhập email của tài khoản (để trống để xóa). Email phải đúng dạng tên@miền.' },
+      phone: { title: 'Sửa số điện thoại', prompt: 'Nhập số điện thoại của tài khoản (để trống để xóa). Cần 7–15 chữ số.' },
+      username: { title: 'Sửa tên hiển thị', prompt: 'Nhập tên hiển thị của tài khoản (để trống để xóa). Cần 3–80 ký tự, không phải UUID hay đường dẫn.' },
+    };
+    const spec = field ? labels[field] : undefined;
+    if (!spec) { return; }
+    try {
+      const info = await this.gateway.ensureStarted();
+      const accounts = await fetchGatewayAccounts(info.baseUrl, info.apiKey);
+      const current = accounts.find((a) => a.id === id);
+      const currentValue = field === 'email' ? current?.email : field === 'phone' ? current?.phone : current?.username;
+      const value = await vscode.window.showInputBox({ title: spec.title, prompt: spec.prompt, value: currentValue || '' });
+      if (value === undefined) { return; } // user hủy hộp nhập
+      const patch: { email?: string | null; phone?: string | null; username?: string | null } = {};
+      const trimmed = value.trim();
+      if (field === 'email') { patch.email = trimmed ? trimmed : null; }
+      else if (field === 'phone') { patch.phone = trimmed ? trimmed : null; }
+      else { patch.username = trimmed ? trimmed : null; }
+      await updateGatewayAccountProfile(info.baseUrl, info.apiKey, id, patch);
+      void vscode.window.showInformationMessage('Đã lưu thông tin nhập tay của tài khoản.');
+    } catch (e) {
+      void vscode.window.showErrorMessage(`Không lưu được thông tin nhập tay: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await this.refreshAccounts();
     this.onAccountsChanged();
   }
 

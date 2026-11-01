@@ -109,12 +109,38 @@ public static class ProfileValidation
         return m.Success ? m.Value : null;
     }
 
+    /// <summary>
+    /// Số điện thoại có plausibly là số thật không: 7–15 chữ số, chỉ
+    /// gồm dấu +, chữ số, khoảng trắng, gạch ngang, ngoặc, chấm.
+    /// Dùng chung cho endpoint nhập tay (v0.8.5) và quét trang hồ sơ.
+    /// </summary>
+    public static bool IsPhoneLike(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var v = value.Trim();
+        var digits = v.Count(char.IsDigit);
+        return digits >= 7 && digits <= 15
+            && System.Text.RegularExpressions.Regex.IsMatch(v, @"^[+\d][\d\s\-().]*$");
+    }
+
     /// <summary>Chuỗi có phải id kỹ thuật (UUID hoặc hex thuần dài) không.</summary>
     public static bool IsTechnicalId(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return false;
         var v = value.Trim();
         return UuidPattern.IsMatch(v) || PureHexPattern.IsMatch(v);
+    }
+
+    /// <summary>
+    /// Chuỗi có phải UUID chuẩn dạng 8-4-4-4-12 hex không (không phân
+    /// biệt hoa/thường). Dùng cho khóa định danh MuseUserId (v0.8.5):
+    /// chỉ UUID mới được coi là id người dùng Muse, hex thuần dài thì
+    /// không (nó có thể là id phiên/avatar, không ổn định theo người).
+    /// </summary>
+    public static bool IsUuid(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        return UuidPattern.IsMatch(value.Trim());
     }
     public static string StripUrlAttributes(string html)
         => string.IsNullOrEmpty(html) ? html : UrlAttributePattern.Replace(html, "");
@@ -131,6 +157,37 @@ public static class ProfileValidation
             { acc.Email = null; changed = true; }
         if (!string.IsNullOrWhiteSpace(acc.Username) && !IsValidUsername(acc.Username))
             { acc.Username = null; changed = true; }
+        return changed;
+    }
+
+    /// <summary>
+    /// Di chuyển dữ liệu cũ sang khóa định danh mới (v0.8.5): username
+    /// đã lưu dạng UUID (trước 0.8.3) thực ra là id người dùng Muse
+    /// ổn định, không phải tên hiển thị — chuyển nó sang MuseUserId
+    /// và xóa username (về trạng thái chưa xác định). MuseUserId đã
+    /// lưu mà không phải UUID thì xóa luôn (không phải id hợp lệ).
+    /// Trả true nếu có trường nào đổi — caller phải Persist/Upsert.
+    /// PHẢI chạy trước SanitizeStoredIdentity, vì sanitize sẽ xóa
+    /// username UUID trước khi kịp chuyển nó sang id.
+    /// </summary>
+    public static bool MigrateStoredIdentity(Account acc)
+    {
+        var changed = false;
+        if (!string.IsNullOrWhiteSpace(acc.Username) && IsUuid(acc.Username))
+        {
+            var id = acc.Username.Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(acc.MuseUserId))
+                acc.MuseUserId = id;
+            acc.Username = null;
+            changed = true;
+        }
+        if (!string.IsNullOrWhiteSpace(acc.MuseUserId) && !IsUuid(acc.MuseUserId))
+            { acc.MuseUserId = null; changed = true; }
+        else if (!string.IsNullOrWhiteSpace(acc.MuseUserId))
+        {
+            var norm = acc.MuseUserId.Trim().ToLowerInvariant();
+            if (acc.MuseUserId != norm) { acc.MuseUserId = norm; changed = true; }
+        }
         return changed;
     }
 }

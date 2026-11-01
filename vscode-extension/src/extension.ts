@@ -950,7 +950,19 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       if (errors > 0) { msg += `, ${errors} hội thoại lỗi khi đăng ký`; }
       if (added === 0 && debug) {
         if (debug.threadCount === 0) {
-          msg += `. Gateway không đọc được thread nào từ trang ${debug.pageUrl || 'muse.ai'} (tổng số link đọc được: ${debug.linkCount}). Có thể sidebar lịch sử chưa kịp tải hoặc không render thành link — hãy mở panel Nhật ký để xem chi tiết rồi thử đồng bộ lại.`;
+          // v0.8.5: khi về 0 thì nêu thêm số liệu trang chủ (không
+          // chỉ trang cuối) để user tự đọc được lỗi ở khâu nào mà
+          // không cần mò log; gateway cũ không có pages thì giữ dạng
+          // cũ. Hướng dẫn tìm dòng web_threads: dòng này chỉ có từ
+          // 0.8.4 và chỉ in ra khi request đồng bộ kết thúc (sau
+          // khoảng 20–25 giây quét) — user 0.8.4 không thấy dòng này
+          // có thể vì tìm trước khi quét xong hoặc gateway cũ vẫn
+          // đang chạy.
+          const home = debug.pages && debug.pages.length > 0 ? debug.pages[0] : undefined;
+          const extra = home
+            ? ` Trang chủ đọc được ${home.threadCount} thread / ${home.linkCount} link${home.hasLoginForm ? ' (có form đăng nhập)' : ''}${home.sidebarClicked ? ' (đã thử bấm mở sidebar)' : ''}; trang /thread/new đọc được ${debug.pages && debug.pages.length > 1 ? `${debug.pages[1].threadCount} thread / ${debug.pages[1].linkCount} link` : 'không rõ'}.`
+            : '';
+          msg += `. Gateway không đọc được thread nào từ trang ${debug.pageUrl || 'muse.ai'} (tổng số link đọc được: ${debug.linkCount}). Có thể sidebar lịch sử chưa kịp tải hoặc không render thành link.${extra} Hãy tìm dòng bắt đầu bằng web_threads trong panel Nhật ký hoặc Output (dòng này chỉ có từ bản 0.8.4 và chỉ in ra khi request đồng bộ kết thúc, tức sau khoảng 20–25 giây quét) rồi thử đồng bộ lại.`;
         } else {
           msg += `.`;
         }

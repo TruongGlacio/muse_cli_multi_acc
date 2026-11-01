@@ -81,7 +81,7 @@
         // Hồ sơ (v0.7.0): chỉ hiện trong panel Cài đặt, chưa biết thì
         // "Chưa xác định". Email/phone không đưa vào khung chat, log
         // hay thông báo nào khác.
-        ['Email', a.email || 'Chưa xác định'], ['Username', a.username || 'Chưa xác định'], ['Số điện thoại', a.phone || 'Chưa xác định'],
+        ['Email', a.email || 'Chưa xác định'], ['Username', a.username || 'Chưa xác định'], ['ID Muse', a.museUserId || 'Chưa xác định'], ['Số điện thoại', a.phone || 'Chưa xác định'],
         ['Trạng thái', a.status || '?'],
         ['Bật/tắt', a.enabled ? 'Đang bật' : 'Đã tắt'], ['Tạo lúc', a.createdAt || '—'],
         ['Dùng lần cuối', a.lastUsedAt || '—'], ['Thành công', a.successCount],
@@ -132,6 +132,17 @@
       profileBtn.title = 'Lấy email/username từ trang Muse cho tài khoản này mà không cần đăng nhập lại';
       profileBtn.addEventListener('click', function () { vscode.postMessage({ type: 'profileRefresh', id: a.id }); });
       row.appendChild(profileBtn);
+      // Nhập tay hồ sơ (v0.8.5): user tự nhập email/số điện thoại/tên
+      // hiển thị; gateway kiểm tra hợp lệ rồi mới lưu, giá trị hợp lệ
+      // không bị lần cập nhật tự động sau ghi đè hay dọn rác xóa.
+      // ID Muse không có nút sửa (chỉ session API mới ghi).
+      [['Sửa email', 'email'], ['Sửa số điện thoại', 'phone'], ['Sửa tên hiển thị', 'username']].forEach(function (pair) {
+        var editBtn = document.createElement('button');
+        editBtn.textContent = pair[0];
+        editBtn.title = 'Tự nhập giá trị này cho tài khoản (để trống trong hộp nhập để xóa)';
+        editBtn.addEventListener('click', function () { vscode.postMessage({ type: 'editProfileField', id: a.id, field: pair[1] }); });
+        row.appendChild(editBtn);
+      });
       var reloginBtn = document.createElement('button');
       reloginBtn.textContent = 'Đăng nhập lại qua trình duyệt';
       reloginBtn.title = 'Mở cửa sổ trình duyệt của gateway để đăng nhập lại (gia hạn) tài khoản này';

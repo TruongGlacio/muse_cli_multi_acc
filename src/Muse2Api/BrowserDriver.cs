@@ -937,7 +937,7 @@ public sealed class BrowserDriver : IMuseDriver
             _settings.VideoTimeout, req.OnProgress, req.Cancel);
     }
 
-    // ---------- liệt kê thread web (v0.6.0, mức 1; bền hơn ở v0.7.0, điểm 4) ----------
+    // ---------- liệt kê thread web (v0.6.0, mức 1; bền hơn ở v0.7.0, điểm 4; chẩn đoán từng trang + bấm mở sidebar ở v0.8.5) ----------
     // Mở trang chủ muse.ai trong một page TẠM thuộc đúng context của tài
     // khoản (GetContext, cookie đã gắn sẵn lúc tạo context). Page tạm
     // KHÔNG đưa vào _tabs, chỉ đóng page đó trong finally, không đóng
@@ -960,6 +960,25 @@ public sealed class BrowserDriver : IMuseDriver
     // sách/trang chủ, KHÔNG mở từng thread để quét (không lấy thread
     // từ nội dung chat trong thread). Mở /thread/new chỉ mở trang,
     // không gửi tin nhắn nên không tự tạo thread mới.
+    // v0.8.5, theo bằng chứng popup của user ("trang cuối là
+    // /thread/new, tổng số link là 1" — trang gần như không render
+    // gì, và số liệu trang chủ đã mất khi chuyển trang):
+    // (a) Chẩn đoán RIÊNG từng trang: mỗi trang ghi threads, links,
+    // pageUrl, tiêu đề chung của app (cắt 80 ký tự), có form đăng
+    // nhập không, số nút bấm — chỉ số lượng, không tiêu đề hội thoại
+    // hay nội dung trang. Dòng web_threads in cả hai trang (kể cả khi
+    // Auth: ghi log trước khi ném, để user vẫn đọc được chẩn đoán).
+    // (b) Mở rộng phát hiện hết hạn: ngoài gợi ý đăng nhập bằng chữ
+    // (Dom.LoginHints trên 2000 ký tự đầu), trang có form đăng nhập
+    // (input password/email) cũng coi là hết hạn → Auth rõ ràng, thay
+    // vì im lặng trả 0 thread gây hiểu nhầm.
+    // (c) Bấm mở sidebar lịch sử: sau khi quét một trang được 0
+    // thread, thử bấm tối đa 4 nút có aria-label/title/text chứa
+    // history/lịch sử/chat/sidebar/menu rồi quét lại; nút nào làm
+    // tăng số link/thread thì giữ kết quả đó. CHỈ bấm nút: không điền
+    // form (bỏ qua nút trong form), không bấm nút đăng nhập/đăng
+    // xuất/thanh toán/nâng cấp/xóa. Không đoán mò cấu trúc DOM: nếu
+    // sau bước này vẫn 0 thì trả 0 kèm chẩn đoán đầy đủ.
     public async Task<WebThreadsScan> ListWebThreads(Account account)
     {
         if (Upstream.MissingSessionCookies(account.Cookies) is { Count: > 0 })
@@ -968,34 +987,133 @@ public sealed class BrowserDriver : IMuseDriver
         var page = await context.NewPageAsync();
         try
         {
-            var scan = new WebThreadsScan(new List<(string Url, string Title)>(), Upstream.Site, 0);
+            var pages = new List<WebThreadsPageDiag>();
+            var best = new WebThreadsScan(new List<(string Url, string Title)>(), Upstream.Site, 0);
+            var last = best;
+            // Ghi log chẩn đoán trước khi ném Auth để user vẫn đọc được
+            // số liệu các trang đã quét (endpoint chỉ ghi log khi quét
+            // kết thúc thành công, còn đường Auth thì không tới đó).
+            void LogScan(WebThreadsScan s) =>
+                Diagnostic?.Invoke(DiagnosticLines.WebThreadsLine(account.Id, s with { Pages = pages.ToList() }));
             foreach (var startUrl in new[] { Upstream.Site, Upstream.Site + "/thread/new" })
             {
                 await page.GotoAsync(startUrl,
                     new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                var scan = new WebThreadsScan(new List<(string Url, string Title)>(), Upstream.Site, 0);
                 var previousCount = -1;
                 for (var i = 0; i < 20; i++)
                 {
                     scan = await ScanThreadsPage(page);
                     if (!Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
                         || !pageUri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase))
+                    {
+                        LogScan(scan);
                         throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
-                    if (scan.LoginHint) throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+                    }
+                    if (scan.LoginHint)
+                    {
+                        LogScan(scan);
+                        throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+                    }
                     if (scan.Threads.Count > 0 && scan.Threads.Count == previousCount) break;
                     previousCount = scan.Threads.Count;
                     if (i < 19) await Task.Delay(TimeSpan.FromMilliseconds(500));
                 }
-                if (scan.Threads.Count > 0) break;
+                var sidebarClicked = false;
+                if (scan.Threads.Count == 0)
+                {
+                    var improved = await TryOpenSidebarAsync(page, scan);
+                    if (improved is not null) { scan = improved; sidebarClicked = true; }
+                    else sidebarClicked = await AnySidebarButtonClickedAsync(page);
+                }
+                pages.Add(new WebThreadsPageDiag(scan.PageUrl, scan.Threads.Count, scan.LinkCount,
+                    scan.Title, scan.HasLoginForm, scan.ButtonCount, sidebarClicked));
+                last = scan;
+                if (DiagnosticLines.IsBetterScan(scan, best)) best = scan;
+                if (best.Threads.Count > 0) break;
             }
-            return scan;
+            // Có thread thì trả quét tốt nhất; không có thread nào thì
+            // trả quét của trang cuối (giữ tương thích popup cũ: trang
+            // cuối + tổng số link của nó), kèm chẩn đoán cả hai trang.
+            var final = best.Threads.Count > 0 ? best : last;
+            final = final with { Pages = pages };
+            LogScan(final);
+            return final;
         }
         finally { try { await page.CloseAsync(); } catch { } }
     }
 
+    // Bấm mở sidebar lịch sử (v0.8.5, best-effort): tìm nút ứng viên
+    // bằng JS trên trang (không trả nhãn nút về C#, chỉ trả token),
+    // bấm từng nút rồi quét lại; quét nào tốt hơn baseline thì giữ.
+    // Trả null nếu không nút nào làm tăng số liệu. Nút đã bấm được
+    // đánh dấu để lần gọi sau không bấm lại.
+    private async Task<WebThreadsScan?> TryOpenSidebarAsync(IPage page, WebThreadsScan baseline)
+    {
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            var tokens = await Eval(page, """
+                (() => {
+                  const include = /history|lịch sử|chat|sidebar|menu/i;
+                  const exclude = /log\s?in|sign\s?in|đăng nhập|log\s?out|sign\s?out|đăng xuất|payment|thanh toán|billing|upgrade|subscribe|pricing|delete|xoá|xóa/i;
+                  const out = [];
+                  if (!window.__museSyncNext) window.__museSyncNext = 1;
+                  for (const b of document.querySelectorAll('button, [role="button"]')) {
+                    if (b.dataset.museSyncClicked === '1') continue;
+                    const r = b.getClientRects();
+                    if (!r.length || (r[0].width === 0 && r[0].height === 0)) continue;
+                    if (b.closest('form')) continue;
+                    const label = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.innerText || '')).trim();
+                    if (!include.test(label) || exclude.test(label)) continue;
+                    const token = 'm' + (window.__museSyncNext++);
+                    b.dataset.museSyncToken = token;
+                    out.push(token);
+                  }
+                  return { tokens: out };
+                })()
+                """);
+            if (tokens is not System.Text.Json.Nodes.JsonObject tokObj
+                || tokObj["tokens"] is not System.Text.Json.Nodes.JsonArray tokArr
+                || tokArr.Count == 0)
+                return null;
+            var token = tokArr[0]?.GetValue<string>();
+            if (string.IsNullOrEmpty(token)) return null;
+            var clicked = await Eval(page, $$"""
+                (() => {
+                  const b = document.querySelector('[data-muse-sync-token="{{token}}"]');
+                  if (!b) return { clicked: false };
+                  b.dataset.museSyncClicked = '1';
+                  b.click();
+                  return { clicked: true };
+                })()
+                """);
+            if (clicked is not System.Text.Json.Nodes.JsonObject clickObj || !BoolNode(clickObj, "clicked"))
+                return null;
+            await Task.Delay(TimeSpan.FromMilliseconds(800));
+            var rescan = await ScanThreadsPage(page);
+            if (DiagnosticLines.IsBetterScan(rescan, baseline)) return rescan;
+            // Không tốt hơn thì giữ nguyên baseline và thử nút tiếp
+            // theo (tối đa 4 lần); nút đã bấm không bấm lại.
+        }
+        return null;
+    }
+
+    // Đã bấm nút sidebar nào chưa (v0.8.5, chỉ để ghi cờ chẩn đoán
+    // khi bấm mà số liệu không tăng): kiểm tra dấu đã bấm trên trang.
+    private async Task<bool> AnySidebarButtonClickedAsync(IPage page)
+    {
+        var result = await Eval(page, """
+            (() => ({ clicked: !!document.querySelector('[data-muse-sync-clicked="1"]') }))()
+            """);
+        return result is System.Text.Json.Nodes.JsonObject obj && BoolNode(obj, "clicked");
+    }
+
     // Một lần quét trang: <a href> + regex /thread/<id> trên outerHTML.
-    // Trả kèm linkCount (tổng số <a> đọc được) và LoginHint để caller
-    // phân biệt hết hạn với rỗng thật. Debug chỉ chứa số lượng, không
-    // chứa nội dung trang hay tiêu đề nhạy cảm.
+    // Trả kèm linkCount (tổng số <a> đọc được), LoginHint (gợi ý chữ
+    // HOẶC form đăng nhập, v0.8.5), tiêu đề chung của app, và số nút
+    // bấm — để caller phân biệt hết hạn với rỗng thật và để dòng
+    // web_threads chẩn đoán từng trang. Debug chỉ chứa số lượng +
+    // tiêu đề chung, không chứa nội dung trang hay tiêu đề hội thoại.
     private async Task<WebThreadsScan> ScanThreadsPage(IPage page)
     {
         var result = await Eval(page, """
@@ -1008,13 +1126,20 @@ public sealed class BrowserDriver : IMuseDriver
                 head: (document.body ? document.body.innerText.slice(0, 2000) : ''),
                 html: (document.documentElement ? document.documentElement.outerHTML.slice(0, 500000) : ''),
                 links,
+                title: (document.title || ''),
+                hasLoginForm: !!document.querySelector('input[type="password"], input[type="email"]'),
+                buttonCount: document.querySelectorAll('button, [role="button"]').length,
               };
             })()
             """);
         if (result is not System.Text.Json.Nodes.JsonObject obj)
             return new WebThreadsScan(new List<(string Url, string Title)>(), page.Url, 0, LoginHint: false);
         var head = (Str(obj, "head") ?? "").ToLowerInvariant();
-        var loginHint = Dom.LoginHints.Any(h => head.Contains(h));
+        var textHint = Dom.LoginHints.Any(h => head.Contains(h));
+        var hasLoginForm = BoolNode(obj, "hasLoginForm");
+        var loginHint = DiagnosticLines.HasLoginSignal(textHint, hasLoginForm);
+        var pageTitle = DiagnosticLines.TruncateTitle(Str(obj, "title"));
+        var buttonCount = obj["buttonCount"] is System.Text.Json.Nodes.JsonValue bv && bv.TryGetValue<int>(out var bc) ? bc : 0;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var threads = new List<(string Url, string Title)>();
         var linkCount = 0;
@@ -1042,7 +1167,7 @@ public sealed class BrowserDriver : IMuseDriver
             if (!seen.Add(url)) continue;
             threads.Add((url, ""));
         }
-        return new WebThreadsScan(threads, page.Url, linkCount, loginHint);
+        return new WebThreadsScan(threads, page.Url, linkCount, loginHint, pageTitle, hasLoginForm, buttonCount);
     }
 
     // ---------- lấy hồ sơ tài khoản, best-effort (v0.8.2, viết lại từ v0.7.0) ----------
@@ -1145,14 +1270,31 @@ public sealed class BrowserDriver : IMuseDriver
                                             { scan.EmailRejectedSource = "session_api:email:rejected"; scan.EmailRejectedValue = s.Trim(); }
                                         break;
                                     case "username":
-                                        if (scan.Username is null && ProfileValidation.IsValidUsername(s))
+                                        // v0.8.5: khóa `username` dạng UUID cũng là id
+                                        // người dùng, không phải tên hiển thị — ghi
+                                        // vào MuseUserId, không ghi username.
+                                        if (ProfileValidation.IsUuid(s))
+                                        {
+                                            if (scan.MuseUserId is null)
+                                                { scan.MuseUserId = s.Trim().ToLowerInvariant(); scan.MuseUserIdDetail ??= "session_api:username"; }
+                                        }
+                                        else if (scan.Username is null && ProfileValidation.IsValidUsername(s))
                                             { scan.Username = s.Trim(); scan.UsernameDetail ??= "session_api:username"; scan.UsernameSource ??= "session_api"; }
                                         else if (scan.Username is null && scan.UsernameRejectedValue is null
                                             && ProfileValidation.IsTechnicalId(s))
                                             { scan.UsernameRejectedSource = "session_api:username:rejected"; scan.UsernameRejectedValue = s.Trim(); }
                                         break;
                                     case "name":
-                                        if (nameFallback is null && ProfileValidation.IsValidUsername(s))
+                                        // v0.8.5: khóa `name` dạng UUID là id người dùng
+                                        // Muse ổn định (trường hợp user đã xác nhận) —
+                                        // ghi vào MuseUserId, KHÔNG ghi username.
+                                        // Tên người thật vẫn làm username như cũ.
+                                        if (ProfileValidation.IsUuid(s))
+                                        {
+                                            if (scan.MuseUserId is null)
+                                                { scan.MuseUserId = s.Trim().ToLowerInvariant(); scan.MuseUserIdDetail ??= "session_api:name"; }
+                                        }
+                                        else if (nameFallback is null && ProfileValidation.IsValidUsername(s))
                                             nameFallback = s.Trim();
                                         else if (scan.Username is null && scan.UsernameRejectedValue is null
                                             && ProfileValidation.IsTechnicalId(s))
@@ -1434,9 +1576,10 @@ public sealed class BrowserDriver : IMuseDriver
         Diagnostic?.Invoke(DiagnosticLines.ProfileDetailLine(account.Id,
             scan.Email, scan.EmailDetail, scan.EmailRejectedSource, scan.EmailRejectedValue,
             scan.Username, scan.UsernameDetail, scan.UsernameRejectedSource, scan.UsernameRejectedValue,
-            scan.Phone, scan.PhoneDetail, homeError, apiPaths));
-        if (scan.Email is null && scan.Username is null && scan.Phone is null) return (null, debug);
-        return (new ProfileInfo(scan.Email, scan.Username, scan.Phone), debug);
+            scan.Phone, scan.PhoneDetail, homeError, apiPaths,
+            scan.MuseUserId, scan.MuseUserIdDetail));
+        if (scan.Email is null && scan.Username is null && scan.Phone is null && scan.MuseUserId is null) return (null, debug);
+        return (new ProfileInfo(scan.Email, scan.Username, scan.Phone, scan.MuseUserId), debug);
     }
 
     // v0.8.4: phân loại kết quả một lần đọc trang chủ thành
@@ -1519,6 +1662,9 @@ public sealed class BrowserDriver : IMuseDriver
         public string? Email;
         public string? Username;
         public string? Phone;
+        // v0.8.5: id người dùng Muse (UUID từ API phiên) + nguồn chi tiết.
+        public string? MuseUserId;
+        public string? MuseUserIdDetail;
         public string? EmailSource;
         public string? UsernameSource;
         public string? EmailDetail;
@@ -1627,11 +1773,7 @@ public sealed class BrowserDriver : IMuseDriver
     }
 
     private static bool IsPhoneLike(string value)
-    {
-        var digits = value.Count(char.IsDigit);
-        return digits >= 7 && digits <= 15
-            && System.Text.RegularExpressions.Regex.IsMatch(value.Trim(), @"^[+\d][\d\s\-().]*$");
-    }
+        => ProfileValidation.IsPhoneLike(value);
 
     private static string TrimCandidate(string raw)
     {

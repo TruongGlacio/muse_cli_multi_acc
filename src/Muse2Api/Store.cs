@@ -17,6 +17,15 @@ public sealed class Account
     public string? Email { get; set; }
     public string? Username { get; set; }
     public string? Phone { get; set; }
+    // Khóa định danh nội bộ của người dùng Muse (v0.8.5): giá trị khóa
+    // `name` dạng UUID của API phiên, ổn định qua các lần đăng nhập
+    // của cùng một người và khác nhau giữa hai tài khoản. TÁCH RIÊNG
+    // khỏi Username hiển thị: UUID nhìn như rác khi hiện tên, nhưng
+    // là khóa chống trùng tốt nhất (email có thể không có, cookie xoay
+    // vòng). Chỉ session API mới được ghi vào đây, username từ trang
+    // web không bao giờ ghi vào. Hiện trong panel Cài đặt ở dòng
+    // "ID Muse" để user đối chiếu, không đưa vào popup.
+    public string? MuseUserId { get; set; }
     public bool Enabled { get; set; } = true;
     public AccountStatus Status { get; set; } = AccountStatus.Active;
     public Dictionary<string, string> Cookies { get; set; } = new();
@@ -52,6 +61,7 @@ public sealed class Account
             ["email"] = Email is null ? null : JsonValue.Create(Email),
             ["username"] = Username is null ? null : JsonValue.Create(Username),
             ["phone"] = Phone is null ? null : JsonValue.Create(Phone),
+            ["muse_user_id"] = MuseUserId is null ? null : JsonValue.Create(MuseUserId),
             ["enabled"] = Enabled,
             ["status"] = Status.ToString().ToLowerInvariant(),
             ["cookies"] = masked,
@@ -158,6 +168,30 @@ public sealed class AccountPool
         return ProfileValidation.IsValidUsername(v) ? v : null;
     }
 
+    // Chuẩn hóa id người dùng Muse để so khớp (v0.8.5): trim +
+    // lowercase, CHỈ chấp nhận chuỗi dạng UUID. Giá trị khác dạng
+    // UUID (tên người, hex thuần, chuỗi rác) coi như không có id.
+    public static string? NormalizeMuseUserId(string? id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return null;
+        var v = id.Trim();
+        return ProfileValidation.IsUuid(v) ? v.ToLowerInvariant() : null;
+    }
+
+    // Khóa nhóm danh tính cho merge-duplicates (v0.8.5), theo thứ tự
+    // ưu tiên: id người dùng Muse → email → username. Trả null khi
+    // tài khoản không có danh tính nào dùng được (bỏ qua khi nhóm).
+    public static string? IdentityGroupKey(Account acc)
+    {
+        var id = NormalizeMuseUserId(acc.MuseUserId);
+        if (id is not null) return "museid:" + id;
+        var email = NormalizeEmail(acc.Email);
+        if (email is not null) return "email:" + email;
+        var username = NormalizeUsername(acc.Username);
+        if (username is not null) return "username:" + username.ToLowerInvariant();
+        return null;
+    }
+
     // Điền danh tính từ tài khoản vào vào tài khoản cũ, CHỈ khi trường
     // cũ còn trống — không ghi đè email/username/phone đã có.
     private static void FillMissingIdentity(Account existing, Account incoming)
@@ -168,6 +202,8 @@ public sealed class AccountPool
             existing.Username = incoming.Username;
         if (string.IsNullOrWhiteSpace(existing.Phone) && !string.IsNullOrWhiteSpace(incoming.Phone))
             existing.Phone = incoming.Phone;
+        if (string.IsNullOrWhiteSpace(existing.MuseUserId) && !string.IsNullOrWhiteSpace(incoming.MuseUserId))
+            existing.MuseUserId = incoming.MuseUserId;
     }
 
     public Account UpsertSession(Account incoming)
@@ -187,7 +223,27 @@ public sealed class AccountPool
                 FillMissingIdentity(existing, incoming);
                 Persist(); return existing;
             }
-            // Bước 2 (v0.7.0): khớp theo Email đã chuẩn hóa. Đây là khóa
+            // Bước 2 (v0.8.5): khớp theo id người dùng Muse (UUID từ khóa
+            // `name` của API phiên). Đây là khóa ổn định nhất: cùng một
+            // người đăng nhập lại sẽ có auth-hash khác (cookie xoay
+            // vòng) và có thể không có email, nhưng id này không đổi.
+            // Đặt trước khớp email vì id chính xác hơn email (email có
+            // thể đổi, id thì không). Ngữ nghĩa cập nhật như bước 1:
+            // giữ nguyên Id và label cũ.
+            var incomingId = NormalizeMuseUserId(incoming.MuseUserId);
+            if (incomingId is not null)
+            {
+                existing = _accounts.Values.FirstOrDefault(a => NormalizeMuseUserId(a.MuseUserId) == incomingId);
+                if (existing is not null)
+                {
+                    existing.Cookies = incoming.Cookies; existing.CookieExpires = incoming.CookieExpires;
+                    existing.Enabled = incoming.Enabled;
+                    if (existing.Status == AccountStatus.Invalid) { existing.Status = AccountStatus.Active; existing.LastError = null; }
+                    FillMissingIdentity(existing, incoming);
+                    Persist(); return existing;
+                }
+            }
+            // Bước 3 (v0.7.0): khớp theo Email đã chuẩn hóa. Đây là khóa
             // chính chống trùng: cùng một tài khoản Muse đăng nhập lại
             // (trình duyệt khác, desktop khác, gia hạn khác) sẽ có
             // auth-hash khác nhưng cùng email → cập nhật tài khoản cũ,
@@ -206,7 +262,7 @@ public sealed class AccountPool
                     Persist(); return existing;
                 }
             }
-            // Bước 3 (v0.7.0, yếu hơn): chỉ khi cả hai bên đều không có
+            // Bước 4 (v0.7.0, yếu hơn): chỉ khi cả hai bên đều không có
             // Email và Username đều khác rỗng, dài từ 3 ký tự, mới khớp
             // theo Username (không phân biệt hoa/thường). Khớp Username
             // yếu hơn Email vì tên hiển thị có thể trùng giữa hai người.

@@ -25,6 +25,9 @@ export interface GatewayAccountSummary {
   email: string | null;
   username: string | null;
   phone: string | null;
+  // ID người dùng Muse (v0.8.5, nullable): UUID từ API phiên, khóa
+  // định danh nội bộ, hiện ở panel Cài đặt để user đối chiếu.
+  museUserId: string | null;
   // Các trường an toàn bổ sung cho panel đa tài khoản (v0.5.0). KHÔNG
   // bao gồm cookies (kể cả dạng đã che) hay meta: asAccount chỉ chọn
   // đúng các trường dưới đây, không bao giờ chuyển cookies sang webview.
@@ -84,6 +87,7 @@ function asAccount(obj: Record<string, unknown>): GatewayAccountSummary {
     email: typeof obj.email === 'string' && obj.email ? obj.email : null,
     username: typeof obj.username === 'string' && obj.username ? obj.username : null,
     phone: typeof obj.phone === 'string' && obj.phone ? obj.phone : null,
+    museUserId: typeof obj.muse_user_id === 'string' && obj.muse_user_id ? obj.muse_user_id : null,
     enabled: obj.enabled === true,
     status: String(obj.status || ''),
     lastError: String(obj.last_error || obj.lastError || ''),
@@ -246,6 +250,15 @@ export async function refreshGatewayAccountProfile(baseUrl: string, apiKey: stri
   return { account: asAccount((data.account || {}) as Record<string, unknown>), profileFound: data.profile_found === true, debug: asProfileDebug(data.debug) };
 }
 
+// Nhập tay hồ sơ (v0.8.5): PATCH /admin/accounts/{id} với đúng trường
+// user sửa (email/phone/username). Giá trị null = xóa trường đó.
+// Gateway kiểm tra hợp lệ và trả 400 kèm lý do rõ khi không hợp lệ;
+// adminFetch ném lỗi đó để extension hiện nguyên văn cho user.
+export async function updateGatewayAccountProfile(baseUrl: string, apiKey: string, id: string, patch: { email?: string | null; phone?: string | null; username?: string | null }): Promise<GatewayAccountSummary> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) })) as Record<string, unknown>;
+  return asAccount((data.account || {}) as Record<string, unknown>);
+}
+
 // Xóa mapping gateway của một session (v0.8.2, việc 2b): DELETE
 // /admin/conversations/{hint}, hint = conversationId. Trả true nếu
 // file mapping đã xóa, false nếu file vốn không có. Lỗi HTTP thì ném
@@ -295,7 +308,8 @@ export async function mergeGatewayDuplicates(baseUrl: string, apiKey: string): P
 // mapping, không nhập nội dung tin nhắn cũ.
 export interface WebThread { url: string; title: string; }
 
-export interface WebThreadsDebug { pageUrl: string; linkCount: number; threadCount: number; }
+export interface WebThreadsPageDebug { pageUrl: string; threadCount: number; linkCount: number; title: string; hasLoginForm: boolean; buttonCount: number; sidebarClicked: boolean; }
+export interface WebThreadsDebug { pageUrl: string; linkCount: number; threadCount: number; pages?: WebThreadsPageDebug[]; }
 
 export interface WebThreadsResult { threads: WebThread[]; debug?: WebThreadsDebug; }
 
@@ -309,8 +323,20 @@ export async function fetchWebThreads(baseUrl: string, apiKey: string, id: strin
     .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null && typeof x.url === 'string')
     .map((x) => ({ url: x.url as string, title: typeof x.title === 'string' ? x.title : '' }));
   const d = data.debug as Record<string, unknown> | undefined;
+  const pagesRaw = Array.isArray(d?.pages) ? (d?.pages as Record<string, unknown>[]) : [];
+  const pages: WebThreadsPageDebug[] = pagesRaw
+    .filter((p) => typeof p === 'object' && p !== null)
+    .map((p) => ({
+      pageUrl: typeof p.pageUrl === 'string' ? p.pageUrl : '',
+      threadCount: typeof p.threadCount === 'number' ? p.threadCount : 0,
+      linkCount: typeof p.linkCount === 'number' ? p.linkCount : 0,
+      title: typeof p.title === 'string' ? p.title : '',
+      hasLoginForm: p.hasLoginForm === true,
+      buttonCount: typeof p.buttonCount === 'number' ? p.buttonCount : 0,
+      sidebarClicked: p.sidebarClicked === true,
+    }));
   const debug: WebThreadsDebug | undefined = d && typeof d === 'object'
-    ? { pageUrl: typeof d.pageUrl === 'string' ? d.pageUrl : '', linkCount: typeof d.linkCount === 'number' ? d.linkCount : 0, threadCount: typeof d.threadCount === 'number' ? d.threadCount : threads.length }
+    ? { pageUrl: typeof d.pageUrl === 'string' ? d.pageUrl : '', linkCount: typeof d.linkCount === 'number' ? d.linkCount : 0, threadCount: typeof d.threadCount === 'number' ? d.threadCount : threads.length, pages: pages.length > 0 ? pages : undefined }
     : undefined;
   return { threads, debug };
 }

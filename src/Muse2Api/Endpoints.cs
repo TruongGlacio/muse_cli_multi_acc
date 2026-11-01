@@ -740,6 +740,33 @@ public static class Endpoints
             var body = await JsonHelp.ReadBody(ctx.Request);
             if (JsonHelp.Str(body["label"]) is { } label) acc.Label = label;
             if (body["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var enabled)) acc.Enabled = enabled;
+            // v0.8.5: nhập tay hồ sơ (user tự nhập trong panel Cài đặt).
+            // Khóa có mặt với giá trị null/rỗng = xóa trường đó; khóa
+            // vắng mặt = giữ nguyên. Giá trị không rỗng phải qua đúng
+            // kiểm tra hợp lệ đã có, nếu không trả 400 kèm lý do rõ và
+            // KHÔNG lưu gì cả (kiểm tra hết trước khi gán). Giá trị
+            // nhập tay đã hợp lệ thì lần profile-refresh sau không ghi
+            // đè (chỉ điền trường trống) và đường dọn rác cũng không
+            // xóa (giá trị hợp lệ qua được kiểm tra dọn rác).
+            // MuseUserId KHÔNG cho nhập tay (chỉ session API mới ghi).
+            string? ManualField(string key, Func<string, bool> valid, string reason)
+            {
+                if (!body.ContainsKey(key)) return null;
+                var raw = JsonHelp.Str(body[key]);
+                if (string.IsNullOrWhiteSpace(raw)) return string.Empty; // xóa trường
+                var v = raw.Trim();
+                if (!valid(v)) throw MuseException.Invalid(reason);
+                return v;
+            }
+            var newEmail = ManualField("email", ProfileValidation.IsValidEmail,
+                "Email nhập tay không hợp lệ: cần đúng dạng tên@miền, không phải tên file hay đường dẫn.");
+            var newUsername = ManualField("username", ProfileValidation.IsValidUsername,
+                "Tên hiển thị nhập tay không hợp lệ: cần 3–80 ký tự, không phải UUID, tên file hay đường dẫn.");
+            var newPhone = ManualField("phone", ProfileValidation.IsPhoneLike,
+                "Số điện thoại nhập tay không hợp lệ: cần 7–15 chữ số, chỉ gồm dấu +, chữ số, khoảng trắng, gạch ngang, ngoặc, chấm.");
+            if (body.ContainsKey("email")) acc.Email = string.IsNullOrEmpty(newEmail) ? null : newEmail;
+            if (body.ContainsKey("username")) acc.Username = string.IsNullOrEmpty(newUsername) ? null : newUsername;
+            if (body.ContainsKey("phone")) acc.Phone = string.IsNullOrEmpty(newPhone) ? null : newPhone;
             if (body["cookies"] is JsonObject cookies)
             {
                 acc.Cookies = cookies.ToDictionary(kv => kv.Key, kv => JsonHelp.Str(kv.Value) ?? "");
@@ -846,12 +873,30 @@ public static class Endpoints
             var scan = await s.Driver.ListWebThreads(acc);
             // v0.8.3: ghi dòng tóm tắt ra stdout gateway để user sao
             // chép được từ Output > Muse Gateway (popup đồng bộ trôi
-            // nhanh). Chỉ số lượng + trang, không tiêu đề/URL thread.
-            s.LogLocal(DiagnosticLines.WebThreadsLine(id, scan.Threads.Count, scan.LinkCount, scan.PageUrl, scan.LoginHint));
+            // nhanh). Từ v0.8.5 việc ghi log nằm trong ListWebThreads
+            // (ghi cả khi Auth, vì endpoint không tới được dòng này
+            // khi ném lỗi) — endpoint không ghi lại để khỏi trùng dòng.
+            // Dòng log chỉ số lượng + URL trang + tiêu đề chung, không
+            // tiêu đề/URL thread.
             var arr = new JsonArray();
             foreach (var (url, title) in scan.Threads)
                 arr.Add(new JsonObject { ["url"] = url, ["title"] = title });
-            // debug v0.7.0, điểm 4: chỉ số lượng, không nội dung trang.
+            // debug v0.7.0, điểm 4 (mở rộng v0.8.5): chỉ số lượng +
+            // tiêu đề chung, không nội dung trang. pages ghi riêng
+            // trang chủ và /thread/new để popup về 0 nêu được số liệu
+            // trang chủ, không chỉ trang cuối.
+            var pagesArr = new JsonArray();
+            foreach (var p in scan.Pages ?? new List<WebThreadsPageDiag>())
+                pagesArr.Add(new JsonObject
+                {
+                    ["pageUrl"] = p.PageUrl,
+                    ["threadCount"] = p.Threads,
+                    ["linkCount"] = p.Links,
+                    ["title"] = p.Title,
+                    ["hasLoginForm"] = p.HasLoginForm,
+                    ["buttonCount"] = p.Buttons,
+                    ["sidebarClicked"] = p.SidebarClicked,
+                });
             return Results.Json(new JsonObject
             {
                 ["data"] = arr,
@@ -860,6 +905,7 @@ public static class Endpoints
                     ["pageUrl"] = scan.PageUrl,
                     ["linkCount"] = scan.LinkCount,
                     ["threadCount"] = scan.Threads.Count,
+                    ["pages"] = pagesArr,
                 },
             });
         });
@@ -884,7 +930,10 @@ public static class Endpoints
             // rỗng ("Chưa xác định") chứ không giữ rác. Dọn xong vẫn
             // phải Persist kể cả khi không lấy được gì mới — nếu không
             // lần mở panel sau rác lại hiện ra.
-            var cleaned = ProfileValidation.SanitizeStoredIdentity(acc);
+            // v0.8.5: chạy di chuyển dữ liệu cũ TRƯỚC dọn rác — username
+            // UUID đã lưu phải chuyển sang MuseUserId trước khi sanitize
+            // xóa nó (sanitize chạy sau sẽ xóa mất id nếu chạy trước).
+            var cleaned = ProfileValidation.MigrateStoredIdentity(acc) | ProfileValidation.SanitizeStoredIdentity(acc);
             var found = false;
             if (profile is not null)
             {
@@ -894,11 +943,14 @@ public static class Endpoints
                     { acc.Username = profile.Username.Trim(); found = true; }
                 if (!string.IsNullOrWhiteSpace(profile.Phone) && string.IsNullOrWhiteSpace(acc.Phone))
                     { acc.Phone = profile.Phone.Trim(); found = true; }
+                // v0.8.5: điền cả id người dùng Muse (chỉ khi trống).
+                if (!string.IsNullOrWhiteSpace(profile.MuseUserId) && string.IsNullOrWhiteSpace(acc.MuseUserId))
+                    { acc.MuseUserId = profile.MuseUserId.Trim().ToLowerInvariant(); found = true; }
                 // Profile có giá trị nhưng các trường đã đầy: vẫn coi là
                 // đã xác định được danh tính (found theo giá trị mới
                 // điền không phản ánh đúng) — tính lại: found = có ít
                 // nhất một trường hồ sơ (kể cả đã có sẵn) sau khi đọc.
-                if (!found && (profile.Email is not null || profile.Username is not null || profile.Phone is not null))
+                if (!found && (profile.Email is not null || profile.Username is not null || profile.Phone is not null || profile.MuseUserId is not null))
                     found = true;
                 if (found || cleaned) s.Pool.Upsert(acc);
             }
@@ -941,7 +993,9 @@ public static class Endpoints
             var all = s.Pool.All();
             foreach (var acc in all)
             {
-                if (!string.IsNullOrWhiteSpace(acc.Email) || !string.IsNullOrWhiteSpace(acc.Username)) continue;
+                // v0.8.5: tài khoản đã có id người dùng thì coi là đã có
+                // danh tính, không cần fetch thêm.
+                if (!string.IsNullOrWhiteSpace(acc.MuseUserId) || !string.IsNullOrWhiteSpace(acc.Email) || !string.IsNullOrWhiteSpace(acc.Username)) continue;
                 try
                 {
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
@@ -950,6 +1004,7 @@ public static class Endpoints
                     if (!string.IsNullOrWhiteSpace(profile.Email)) acc.Email = profile.Email.Trim();
                     if (!string.IsNullOrWhiteSpace(profile.Username)) acc.Username = profile.Username.Trim();
                     if (!string.IsNullOrWhiteSpace(profile.Phone)) acc.Phone = profile.Phone.Trim();
+                    if (!string.IsNullOrWhiteSpace(profile.MuseUserId)) acc.MuseUserId = profile.MuseUserId.Trim().ToLowerInvariant();
                     s.Pool.Upsert(acc);
                 }
                 catch { /* bỏ qua tài khoản này, không dừng cả quá trình */ }
@@ -967,18 +1022,20 @@ public static class Endpoints
             // Sau bước này, lần refresh sau gộp vẫn xóa được username
             // UUID của tài khoản chính nhờ đường dọn rác của
             // profile-refresh (độc lập với gộp).
+            // v0.8.5: di chuyển username UUID sang MuseUserId TRƯỚC khi
+            // dọn rác (lý do như profile-refresh: sanitize chạy trước
+            // sẽ xóa mất id). Nhóm theo thứ tự: id người dùng → email
+            // → username (xem AccountPool.IdentityGroupKey).
             foreach (var acc in all)
-                if (ProfileValidation.SanitizeStoredIdentity(acc))
+                if (ProfileValidation.MigrateStoredIdentity(acc) | ProfileValidation.SanitizeStoredIdentity(acc))
                     s.Pool.Upsert(acc);
             all = s.Pool.All();
             var groups = new Dictionary<string, List<Account>>(StringComparer.Ordinal);
             var skipped = new List<string>();
             foreach (var acc in all)
             {
-                var email = AccountPool.NormalizeEmail(acc.Email);
-                if (email is not null) { AddToGroup(groups, "email:" + email, acc); continue; }
-                var username = AccountPool.NormalizeUsername(acc.Username);
-                if (username is not null) { AddToGroup(groups, "username:" + username.ToLowerInvariant(), acc); continue; }
+                var key = AccountPool.IdentityGroupKey(acc);
+                if (key is not null) { AddToGroup(groups, key, acc); continue; }
                 skipped.Add(acc.Id);
             }
             var merged = new JsonArray();

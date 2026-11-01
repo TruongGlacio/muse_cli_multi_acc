@@ -124,6 +124,75 @@ public sealed class BrowserLoginManager
         finally { _gate.Release(); }
     }
 
+    // v0.8.5: lấy danh tính từ API phiên bằng cookie mới nhận, CHỈ để
+    // gắn vào tài khoản trước khi upsert (xem CheckAsync). Không cần
+    // context trình duyệt, không đọc trang, không log giá trị. Trả null
+    // khi API từ chối (401/403) hoặc không đọc được JSON — caller giữ
+    // hành vi cũ. Quy tắc map giống khối Walk của BrowserDriver:
+    // email hợp lệ mới nhận; username hợp lệ mới nhận; khóa `name`
+    // dạng UUID → MuseUserId, tên thật → username; phone nhận nguyên.
+    private static async Task<(string? Email, string? Username, string? Phone, string? MuseUserId)?> FetchSessionIdentityAsync(
+        Dictionary<string, string> cookies)
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        client.DefaultRequestHeaders.Add("User-Agent", Upstream.UserAgent);
+        client.DefaultRequestHeaders.Add("Accept", "application/json");
+        using var req = new HttpRequestMessage(HttpMethod.Get, Upstream.SessionApi);
+        req.Headers.Add("Cookie", Upstream.CookieHeader(cookies));
+        req.Headers.Referrer = new Uri(Upstream.Site);
+        using var resp = await client.SendAsync(req);
+        if ((int)resp.StatusCode is 401 or 403) return null;
+        if (!resp.IsSuccessStatusCode) return null;
+        var text = await resp.Content.ReadAsStringAsync();
+        System.Text.Json.Nodes.JsonNode? root;
+        try { root = System.Text.Json.Nodes.JsonNode.Parse(text); } catch { return null; }
+        string? email = null, username = null, phone = null, museUserId = null, nameFallback = null;
+        void Walk(System.Text.Json.Nodes.JsonNode? node)
+        {
+            if (node is System.Text.Json.Nodes.JsonObject obj)
+            {
+                foreach (var (key, value) in obj)
+                {
+                    if (value is System.Text.Json.Nodes.JsonValue v
+                        && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s))
+                    {
+                        switch (key.ToLowerInvariant())
+                        {
+                            case "email":
+                                if (email is null && ProfileValidation.IsValidEmail(s)) email = s.Trim();
+                                break;
+                            case "username":
+                                if (ProfileValidation.IsUuid(s))
+                                {
+                                    if (museUserId is null) museUserId = s.Trim().ToLowerInvariant();
+                                }
+                                else if (username is null && ProfileValidation.IsValidUsername(s)) username = s.Trim();
+                                break;
+                            case "name":
+                                if (ProfileValidation.IsUuid(s))
+                                {
+                                    if (museUserId is null) museUserId = s.Trim().ToLowerInvariant();
+                                }
+                                else if (nameFallback is null && ProfileValidation.IsValidUsername(s)) nameFallback = s.Trim();
+                                break;
+                            case "phone":
+                                if (phone is null) phone = s.Trim();
+                                break;
+                        }
+                    }
+                    Walk(value);
+                }
+            }
+            else if (node is System.Text.Json.Nodes.JsonArray arr)
+            {
+                foreach (var item in arr) Walk(item);
+            }
+        }
+        Walk(root);
+        username ??= nameFallback;
+        return (email, username, phone, museUserId);
+    }
+
     public async Task<BrowserLoginSession> CheckAsync(string id)
     {
         await _gate.WaitAsync();
@@ -172,6 +241,25 @@ public sealed class BrowserLoginManager
                 Cookies = dict,
                 CookieExpires = expires,
             };
+            // v0.8.5: biết danh tính TRƯỚC khi upsert. UpsertSession
+            // khớp theo MuseUserId nên phải có id trước — nếu upsert
+            // trước rồi mới fetch sau thì lần đăng nhập lại vẫn tạo tài
+            // khoản mới rồi mới biết id (đúng lỗi trùng tài khoản gốc).
+            // Chỉ gọi API phiên bằng cookie mới (HttpClient, không cần
+            // context trình duyệt); thất bại thì giữ hành vi cũ (upsert
+            // theo cookie, lần fetch sau sẽ điền id).
+            try
+            {
+                var ident = await FetchSessionIdentityAsync(dict);
+                if (ident is not null)
+                {
+                    if (!string.IsNullOrWhiteSpace(ident.Value.Email)) incoming.Email = ident.Value.Email;
+                    if (!string.IsNullOrWhiteSpace(ident.Value.Username)) incoming.Username = ident.Value.Username;
+                    if (!string.IsNullOrWhiteSpace(ident.Value.Phone)) incoming.Phone = ident.Value.Phone;
+                    if (!string.IsNullOrWhiteSpace(ident.Value.MuseUserId)) incoming.MuseUserId = ident.Value.MuseUserId;
+                }
+            }
+            catch { /* giữ hành vi cũ khi không gọi được API phiên */ }
             var saved = _pool.UpsertSession(incoming);
             // Gia hạn lại đúng tài khoản đã yêu cầu: cookie mới phải làm
             // tài khoản dùng được ngay, kể cả khi trước đó đang cooling.
@@ -199,6 +287,10 @@ public sealed class BrowserLoginManager
                             saved.Username = profile.Username.Trim();
                         if (!string.IsNullOrWhiteSpace(profile.Phone) && string.IsNullOrWhiteSpace(saved.Phone))
                             saved.Phone = profile.Phone.Trim();
+                        // v0.8.5: điền cả id người dùng Muse (UUID từ API
+                        // phiên) — chỉ điền khi trống, như các trường khác.
+                        if (!string.IsNullOrWhiteSpace(profile.MuseUserId) && string.IsNullOrWhiteSpace(saved.MuseUserId))
+                            saved.MuseUserId = profile.MuseUserId.Trim().ToLowerInvariant();
                         _pool.Upsert(saved);
                     }
                 }
