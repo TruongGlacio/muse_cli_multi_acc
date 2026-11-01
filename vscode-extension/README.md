@@ -1,7 +1,13 @@
-# Muse cho VS Code (v0.8.0)
+# Muse cho VS Code (v0.8.1)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.8.1: sửa lỗi gateway kèm theo thoát ngay khi khởi động (mã 2147516566)
+
+Bản 0.8.0 publish lại binary gateway thiếu cờ `--self-contained`, nên file `Muse2Api.runtimeconfig.json` trong vsix 0.8.0 dùng khóa `frameworks` (dạng framework-dependent, cần .NET 10 cài sẵn trên máy) thay vì `includedFrameworks` (dạng self-contained, runtime kèm theo). Trên máy user không cài .NET 10, apphost bỏ qua `coreclr.dll` trong thư mục app, đi tìm shared framework, không thấy thì báo "No frameworks were found" và thoát mã 2147516566. Các file runtime cũ sót lại từ tháng 10 trong `bin/win-x64` không cứu được vì apphost đang ở chế độ framework-dependent. Bản 0.8.1 không đổi code gateway hay extension, chỉ publish lại gateway đúng chuẩn và tăng version.
+
+**Quy tắc chống tái phát (bắt buộc cho mọi lần đóng gói sau này): gateway kèm theo BẮT BUỘC publish với `--self-contained true` và phải dọn sạch thư mục `vscode-extension/bin/win-x64/` (giữ nguyên thư mục con `computer-helper/`) trước khi publish lại.** Publish thiếu cờ sẽ tạo binary framework-dependent và file runtime cũ sót lại không cứu được. Lệnh chuẩn (xem `scripts/Build-VscodeExtension.ps1` dòng 12): `dotnet publish src/Muse2Api/Muse2Api.csproj -c Release -r win-x64 --self-contained true -o vscode-extension/bin/win-x64`. Trước khi đóng gói phải kiểm chứng: `Muse2Api.runtimeconfig.json` chứa `includedFrameworks` và không chứa khóa `frameworks` độc lập.
 
 ## Mới trong v0.8.0: icon activity bar vẽ bằng path, xóa hoàn toàn tài khoản, nhiều hội thoại song song
 

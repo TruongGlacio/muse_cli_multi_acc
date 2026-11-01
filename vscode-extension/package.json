@@ -260,7 +260,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.8.0",
+  "version": "0.8.1",
   "extensionKind": [
     "ui",
     "workspace"
