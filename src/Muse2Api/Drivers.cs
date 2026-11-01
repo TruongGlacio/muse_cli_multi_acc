@@ -48,12 +48,17 @@ public sealed record WebThreadsScan(List<(string Url, string Title)> Threads, st
     string Title = "", bool HasLoginForm = false, int ButtonCount = 0, List<WebThreadsPageDiag>? Pages = null);
 
 /// <summary>
-/// Chẩn đoán của MỘT trang trong lần quét web-threads (v0.8.5):
-/// trang chủ và /thread/new được ghi riêng, vì trước đây số liệu trang
-/// chủ bị mất khi chuyển sang trang thứ hai. Title là tiêu đề chung
-/// của app (đã cắt 80 ký tự), không phải tiêu đề hội thoại.
+/// Chẩn đoán của MỘT trang trong lần quét web-threads (v0.8.5, mở rộng
+/// v0.8.6): trang chủ và /thread/new được ghi riêng, vì trước đây số
+/// liệu trang chủ bị mất khi chuyển sang trang thứ hai. Title là tiêu
+/// đề chung của app (đã cắt 80 ký tự), không phải tiêu đề hội thoại.
+/// BaselineThreads/BaselineLinks là số liệu TRƯỚC khi bấm mở sidebar
+/// (v0.8.6): bước bấm có thể làm trang đổi số liệu (thậm chí lạc sang
+/// trang khác như artifact ở bản 0.8.5), nên phải giữ riêng số liệu
+/// gốc để lần sau đọc log vẫn thấy trang chat gốc cho bao nhiêu.
+/// Khi không bấm thì baseline bằng đúng số liệu cuối.
 /// </summary>
-public sealed record WebThreadsPageDiag(string PageUrl, int Threads, int Links, string Title, bool HasLoginForm, int Buttons, bool SidebarClicked);
+public sealed record WebThreadsPageDiag(string PageUrl, int Threads, int Links, string Title, bool HasLoginForm, int Buttons, bool SidebarClicked, int BaselineThreads, int BaselineLinks);
 public sealed record DriverCapabilities(bool Chat = false, bool ChatImages = false,
     bool Image = false, bool ImageEdit = false, bool Video = false,
     bool RenewSession = false, bool Quota = false);

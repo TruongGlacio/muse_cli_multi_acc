@@ -33,11 +33,12 @@ public static class DiagnosticLines
     {
         var pages = scan.Pages is { Count: > 0 } ? scan.Pages : new List<WebThreadsPageDiag>
         {
-            new(scan.PageUrl, scan.Threads.Count, scan.LinkCount, scan.Title, scan.HasLoginForm, scan.ButtonCount, false),
+            new(scan.PageUrl, scan.Threads.Count, scan.LinkCount, scan.Title, scan.HasLoginForm, scan.ButtonCount, false, scan.Threads.Count, scan.LinkCount),
         };
         var pageParts = pages.Select((p, i) =>
             $"{(i == 0 ? "home" : "new")}"
             + $"[page={p.PageUrl} threads={p.Threads} links={p.Links}"
+            + $" base_threads={p.BaselineThreads} base_links={p.BaselineLinks}"
             + $" title={TruncateTitle(p.Title)} login_form={Bool(p.HasLoginForm)}"
             + $" buttons={p.Buttons} sidebar_clicked={Bool(p.SidebarClicked)}]");
         return $"web_threads account={accountId} threads={scan.Threads.Count} links={scan.LinkCount}"
@@ -66,6 +67,32 @@ public static class DiagnosticLines
         => candidate.Threads.Count != baseline.Threads.Count
             ? candidate.Threads.Count > baseline.Threads.Count
             : candidate.LinkCount > baseline.LinkCount;
+
+    /// <summary>
+    /// Trang có còn ở khu vực chat không (v0.8.6, chống lạc trang khi
+    /// bấm mở sidebar): chỉ chấp nhận host muse.ai và path "/" hoặc
+    /// bắt đầu bằng "/thread/". Trang artifact (/library/...), trang
+    /// cài đặt hay bất kỳ trang nào khác đều bị coi là đã lạc, dù
+    /// trang đó có nhiều link hơn (đúng lỗi 0.8.5: bấm nút "Chatbot
+    /// UI" rồi lấy số liệu trang artifact làm kết quả quét).
+    /// </summary>
+    public static bool IsChatAreaUrl(string? url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (!uri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase)) return false;
+        var path = uri.AbsolutePath;
+        return path == "/" || path.StartsWith("/thread/", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Có chấp nhận kết quả quét lại sau khi bấm sidebar không
+    /// (v0.8.6): chỉ khi trang vẫn ở khu vực chat VÀ quét tốt hơn
+    /// baseline. Trang đã lạc thì không bao giờ được chấp nhận, kể cả
+    /// khi số link tăng (14 link của trang artifact không phải là
+    /// "tốt hơn" 1 link của trang chat).
+    /// </summary>
+    public static bool ShouldAcceptRescan(string? pageUrl, WebThreadsScan rescan, WebThreadsScan baseline)
+        => IsChatAreaUrl(pageUrl) && IsBetterScan(rescan, baseline);
 
     /// <summary>
     /// Một lần profile-refresh: có lấy được hồ sơ không, các bước đã

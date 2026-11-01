@@ -979,6 +979,15 @@ public sealed class BrowserDriver : IMuseDriver
     // form (bỏ qua nút trong form), không bấm nút đăng nhập/đăng
     // xuất/thanh toán/nâng cấp/xóa. Không đoán mò cấu trúc DOM: nếu
     // sau bước này vẫn 0 thì trả 0 kèm chẩn đoán đầy đủ.
+    // v0.8.6, sửa lỗi lạc trang của bước (c) trên 0.8.5 (log thật:
+    // cả hai trang kết thúc ở /library/artifacts/chatbot-ui):
+    // matcher cũ khớp chuỗi con "chat" trên cả innerText nên bấm nhầm
+    // nút "Chatbot UI" rồi lấy số liệu trang artifact làm kết quả.
+    // Nay chỉ xét aria-label/title và khớp cụm từ nguyên (history/
+    // lịch sử/sidebar/menu/new chat); sau mỗi lần bấm, trang rời
+    // khỏi khu vực chat thì GoBack và loại nút đó, không lấy số liệu
+    // trang lạc; chẩn đoán từng trang giữ riêng số liệu trước khi
+    // bấm (base_threads/base_links) để không mất số liệu gốc.
     public async Task<WebThreadsScan> ListWebThreads(Account account)
     {
         if (Upstream.MissingSessionCookies(account.Cookies) is { Count: > 0 })
@@ -1019,6 +1028,12 @@ public sealed class BrowserDriver : IMuseDriver
                     previousCount = scan.Threads.Count;
                     if (i < 19) await Task.Delay(TimeSpan.FromMilliseconds(500));
                 }
+                // v0.8.6: giữ số liệu TRƯỚC khi bấm để chẩn đoán từng
+                // trang không mất số liệu gốc của trang chat (0.8.5
+                // chỉ ghi số liệu sau khi bấm nên trang chat gốc bị
+                // số liệu trang artifact che mất).
+                var baselineThreads = scan.Threads.Count;
+                var baselineLinks = scan.LinkCount;
                 var sidebarClicked = false;
                 if (scan.Threads.Count == 0)
                 {
@@ -1027,7 +1042,7 @@ public sealed class BrowserDriver : IMuseDriver
                     else sidebarClicked = await AnySidebarButtonClickedAsync(page);
                 }
                 pages.Add(new WebThreadsPageDiag(scan.PageUrl, scan.Threads.Count, scan.LinkCount,
-                    scan.Title, scan.HasLoginForm, scan.ButtonCount, sidebarClicked));
+                    scan.Title, scan.HasLoginForm, scan.ButtonCount, sidebarClicked, baselineThreads, baselineLinks));
                 last = scan;
                 if (DiagnosticLines.IsBetterScan(scan, best)) best = scan;
                 if (best.Threads.Count > 0) break;
@@ -1043,18 +1058,37 @@ public sealed class BrowserDriver : IMuseDriver
         finally { try { await page.CloseAsync(); } catch { } }
     }
 
-    // Bấm mở sidebar lịch sử (v0.8.5, best-effort): tìm nút ứng viên
-    // bằng JS trên trang (không trả nhãn nút về C#, chỉ trả token),
-    // bấm từng nút rồi quét lại; quét nào tốt hơn baseline thì giữ.
-    // Trả null nếu không nút nào làm tăng số liệu. Nút đã bấm được
-    // đánh dấu để lần gọi sau không bấm lại.
+    // Bấm mở sidebar lịch sử (v0.8.5, sửa triệt để lỗi lạc trang ở
+    // v0.8.6): tìm nút ứng viên bằng JS trên trang (không trả nhãn nút
+    // về C#, chỉ trả token), bấm từng nút rồi quét lại; quét nào tốt
+    // hơn baseline thì giữ. Trả null nếu không nút nào làm tăng số
+    // liệu. Nút đã bấm được đánh dấu để lần gọi sau không bấm lại.
+    // v0.8.6, theo log thật của user trên 0.8.5 (cả hai trang đều kết
+    // thúc ở /library/artifacts/chatbot-ui, 0 thread / 14 link):
+    // matcher cũ dùng chuỗi con "chat" trên chuỗi gộp aria-label +
+    // title + innerText nên nút có nhãn "Chatbot UI" cũng khớp, bấm
+    // vào thì rời khỏi trang chat, và vì trang artifact có nhiều link
+    // hơn baseline nên IsBetterScan nhận nhầm là "tốt hơn". Bản này:
+    // (a) CHỈ xét aria-label/title (nhãn điều khiển), KHÔNG xét
+    // innerText (tiêu đề nội dung); nhãn phải khớp dạng cụm từ
+    // nguyên (history/lịch sử/sidebar/menu/new chat) sau khi chuẩn
+    // hóa, nên "Chatbot", "Chatbot UI", "My Chatbot" đều KHÔNG khớp;
+    // (b) sau mỗi lần bấm, kiểm tra URL: chỉ quét lại khi trang vẫn
+    // ở khu vực chat (muse.ai, "/" hoặc "/thread/..."); nếu đã lạc
+    // thì GoBack, loại nút đó và KHÔNG BAO GIỜ lấy số liệu trang lạc
+    // làm kết quả, dù trang lạc có nhiều link hơn.
     private async Task<WebThreadsScan?> TryOpenSidebarAsync(IPage page, WebThreadsScan baseline)
     {
         for (var attempt = 0; attempt < 4; attempt++)
         {
             var tokens = await Eval(page, """
                 (() => {
-                  const include = /history|lịch sử|chat|sidebar|menu/i;
+                  // __SIDEBAR_MATCH_FN_START__
+                  const sidebarControlMatch = (label) => {
+                    const norm = ' ' + (label || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim() + ' ';
+                    return norm.includes(' history ') || norm.includes(' lịch sử ') || norm.includes(' sidebar ') || norm.includes(' menu ') || norm.includes(' new chat ');
+                  };
+                  // __SIDEBAR_MATCH_FN_END__
                   const exclude = /log\s?in|sign\s?in|đăng nhập|log\s?out|sign\s?out|đăng xuất|payment|thanh toán|billing|upgrade|subscribe|pricing|delete|xoá|xóa/i;
                   const out = [];
                   if (!window.__museSyncNext) window.__museSyncNext = 1;
@@ -1063,8 +1097,8 @@ public sealed class BrowserDriver : IMuseDriver
                     const r = b.getClientRects();
                     if (!r.length || (r[0].width === 0 && r[0].height === 0)) continue;
                     if (b.closest('form')) continue;
-                    const label = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.innerText || '')).trim();
-                    if (!include.test(label) || exclude.test(label)) continue;
+                    const label = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '')).trim();
+                    if (!label || !sidebarControlMatch(label) || exclude.test(label)) continue;
                     const token = 'm' + (window.__museSyncNext++);
                     b.dataset.museSyncToken = token;
                     out.push(token);
@@ -1090,8 +1124,22 @@ public sealed class BrowserDriver : IMuseDriver
             if (clicked is not System.Text.Json.Nodes.JsonObject clickObj || !BoolNode(clickObj, "clicked"))
                 return null;
             await Task.Delay(TimeSpan.FromMilliseconds(800));
+            // v0.8.6, chống lạc trang: chỉ quét lại khi trang vẫn ở
+            // khu vực chat. Nếu nút bấm đã dẫn sang trang khác thì
+            // quay lại trang trước, loại nút đó (đã đánh dấu clicked)
+            // và KHÔNG lấy số liệu trang lạc — kể cả khi trang lạc có
+            // nhiều link hơn baseline. Lưu ý: nếu GoBack tải lại toàn
+            // bộ trang thì dấu đã bấm trên DOM mất theo, nút đó có thể
+            // bị bấm lại ở lần thử sau — nhưng vòng lặp vẫn giới hạn
+            // 4 lần và không bao giờ nhận số liệu trang lạc làm kết quả.
+            if (!DiagnosticLines.IsChatAreaUrl(page.Url))
+            {
+                try { await page.GoBackAsync(); } catch { }
+                await Task.Delay(TimeSpan.FromMilliseconds(800));
+                continue;
+            }
             var rescan = await ScanThreadsPage(page);
-            if (DiagnosticLines.IsBetterScan(rescan, baseline)) return rescan;
+            if (DiagnosticLines.ShouldAcceptRescan(page.Url, rescan, baseline)) return rescan;
             // Không tốt hơn thì giữ nguyên baseline và thử nút tiếp
             // theo (tối đa 4 lần); nút đã bấm không bấm lại.
         }

@@ -1,7 +1,11 @@
-# Muse cho VS Code (v0.8.5)
+# Muse cho VS Code (v0.8.6)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.8.6: sửa lỗi bấm mở sidebar làm đồng bộ lạc sang trang artifact
+
+Bản 0.8.5 thêm bước bấm mở sidebar khi quét đồng bộ được 0 hội thoại, nhưng log thật của user cho thấy bước này phản tác dụng: cả trang chủ và trang thread mới đều kết thúc ở `https://muse.ai/library/artifacts/chatbot-ui` (0 hội thoại / 14 link). Nguyên nhân: bộ lọc nút dùng chuỗi con `chat` trên chuỗi gộp aria-label + title + innerText nên nút có nhãn chứa "Chatbot UI" cũng khớp; bấm vào thì rời khỏi trang chat, và vì trang artifact có nhiều link hơn nên quét bị nhận nhầm là "tốt hơn". Bản này vá đúng ba điểm: (1) chỉ xét aria-label/title (nhãn điều khiển), không xét innerText, và nhãn phải khớp cụm từ nguyên (history/lịch sử/sidebar/menu/new chat) nên "Chatbot UI" không còn khớp; (2) sau mỗi lần bấm, trang rời khỏi khu vực chat (muse.ai, "/" hoặc "/thread/...") thì quay lại trang trước, loại nút đó và không bao giờ lấy số liệu trang lạc làm kết quả; (3) chẩn đoán từng trang giữ riêng số liệu trước khi bấm (`base_threads`/`base_links`) để lần sau đọc log vẫn thấy trang chat gốc cho bao nhiêu.
 
 ## Mới trong v0.8.5: định danh tài khoản bằng ID Muse (UUID từ API phiên) + nhập tay email/số điện thoại
 
