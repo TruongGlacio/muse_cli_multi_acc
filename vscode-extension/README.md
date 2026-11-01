@@ -1,7 +1,12 @@
-# Muse cho VS Code (v0.3.2)
+# Muse cho VS Code (v0.3.3)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.3.3: quản lý session + lỗi 502 dạng dễ hiểu
+
+- Quản lý session (trước đây không có giao diện này, chỉ có một lịch sử duy nhất theo workspace): thanh session ở đầu khung chat gồm danh sách chọn hội thoại, nút Hội thoại mới, Đổi tên, Xóa hội thoại. Mỗi session có lịch sử và conversationId riêng (gửi gateway làm ID thread), chuyển session là chuyển cả lịch sử lẫn thread. Lịch sử cũ được chuyển thành session đầu tiên, không mất. Tin đầu tiên của session mới tự đặt tên session. Nút Xóa lịch sử vẫn giữ nghĩa cũ: làm trống hội thoại hiện tại và mở thread mới, session vẫn giữ tên.
+- Lỗi 502 upstream: khi Muse web bắt đầu trả lời rồi dừng mà gateway không xác định được phản hồi hoàn tất, extension giờ hiện hướng dẫn tiếng Việt thay vì JSON thô: hội thoại được giữ nguyên, không tự gửi lại, đừng tạo session mới hay xóa lịch sử, hãy gửi tiếp tin ngắn trong cùng session.
 
 ## Mới trong v0.3.2: chat dạng chat + đính kèm video/tệp
 

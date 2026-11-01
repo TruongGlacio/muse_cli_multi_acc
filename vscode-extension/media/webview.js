@@ -1,6 +1,7 @@
 (function () {
   var vscode = acquireVsCodeApi();
   var messagesEl = document.getElementById('messages');
+  var sessionSelect = document.getElementById('sessionSelect');
   var statusEl = document.getElementById('status');
   var inputEl = document.getElementById('input');
   var attachmentsEl = document.getElementById('attachments');
@@ -73,6 +74,18 @@
   document.getElementById('clearHistoryBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'clearHistory' });
   });
+  document.getElementById('newSessionBtn').addEventListener('click', function () {
+    vscode.postMessage({ type: 'newSession' });
+  });
+  document.getElementById('renameSessionBtn').addEventListener('click', function () {
+    vscode.postMessage({ type: 'renameSession' });
+  });
+  document.getElementById('deleteSessionBtn').addEventListener('click', function () {
+    vscode.postMessage({ type: 'deleteSession' });
+  });
+  sessionSelect.addEventListener('change', function () {
+    vscode.postMessage({ type: 'switchSession', id: sessionSelect.value });
+  });
   document.getElementById('settingsBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'openSettings' });
   });
@@ -123,6 +136,16 @@
       attachmentsEl.appendChild(chip);
     }
     else if (m.type === 'attachmentsCleared') { attachmentsEl.innerHTML = ''; }
+    else if (m.type === 'sessions') {
+      sessionSelect.innerHTML = '';
+      (m.sessions || []).forEach(function (s) {
+        var opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = s.title || 'Hội thoại';
+        sessionSelect.appendChild(opt);
+      });
+      if (m.currentId) { sessionSelect.value = m.currentId; }
+    }
     else if (m.type === 'history') {
       (m.messages || []).forEach(function (h) { addBubble(h.role === 'user' ? 'user' : 'assistant', h.text || ''); });
     }

@@ -36,6 +36,7 @@ interface ToolCall { name: string; args: Record<string, unknown>; }
 type ChatContent = string | Array<Record<string, unknown>>;
 interface ChatMsg { role: string; content: ChatContent; }
 interface PendingAttachment { name: string; size: number; kind: 'image' | 'text' | 'video' | 'file'; kindLabel: string; dataUrl?: string; text?: string; note?: string; }
+interface ChatSession { id: string; title: string; conversationId: string; messages: ChatMsg[]; createdAt: number; updatedAt: number; }
 
 const SYSTEM_PROMPT = [
   'Bạn là Muse, trợ lý lập trình chạy trong VS Code, làm việc trực tiếp trên',
@@ -150,6 +151,8 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   private abort?: AbortController;
   private history: ChatMsg[] = [];
   private conversationId: string;
+  private sessions: ChatSession[] = [];
+  private currentSessionId: string;
   private pendingAttachments: PendingAttachment[] = [];
   private processes = new BackgroundProcesses();
   private computer = new ComputerHelper(this.context);
@@ -157,37 +160,162 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   private lastStreamed = false;
 
   constructor(private readonly context: vscode.ExtensionContext, private readonly gateway: GatewayManager) {
-    const saved = this.context.workspaceState.get<Array<{ role?: unknown; content?: unknown }>>('muse.chatHistory', []);
-    this.history = saved
-      .filter((m) => typeof m.role === 'string' && typeof m.content === 'string')
-      .map((m) => ({ role: m.role as string, content: m.content as string }))
-      .slice(-40);
-    // ID hội thoại ổn định, bắt buộc khi dùng local tools: gateway lấy
-    // field "user" làm ConversationHint (Endpoints.cs -> BrowserDriver:
-    // local tools mà hint trống thì trả 400 "Local tools require a stable
-    // conversation ID"). Agent terminal luôn gửi conversationId của nó;
-    // extension trước 0.3.1 không gửi field này nên mọi lượt chat đều 400.
-    // ID này là UUID ngẫu nhiên theo workspace, không chứa thông tin tài
-    // khoản; cùng ID thì gateway tái dùng đúng thread Muse phía server
-    // (LocalConversationStore), khác ID thì mở thread mới.
-    const savedId = this.context.workspaceState.get<string>('muse.conversationId', '');
-    this.conversationId = savedId || crypto.randomUUID();
-    if (!savedId) { void this.context.workspaceState.update('muse.conversationId', this.conversationId); }
+    // Quản lý session (v0.3.3): trước đây chỉ có một lịch sử duy nhất
+    // theo workspace và không có giao diện session nào, nên user không
+    // thấy phần quản lý session. Từ 0.3.3, mỗi session có id, tiêu đề,
+    // conversationId (hint gửi gateway) và lịch sử riêng, lưu ở
+    // workspaceState 'muse.sessions' + 'muse.currentSessionId'. Dữ liệu
+    // cũ (muse.chatHistory + muse.conversationId) được chuyển thành
+    // session đầu tiên một lần, không mất lịch sử cũ.
+    const rawSessions = this.context.workspaceState.get<Array<Record<string, unknown>>>('muse.sessions', []);
+    const parsed: ChatSession[] = [];
+    for (const s of rawSessions) {
+      if (typeof s.id !== 'string' || typeof s.conversationId !== 'string' || !Array.isArray(s.messages)) { continue; }
+      const messages = (s.messages as Array<Record<string, unknown>>)
+        .filter((m) => typeof m.role === 'string' && typeof m.content === 'string')
+        .map((m) => ({ role: m.role as string, content: m.content as string }))
+        .slice(-40);
+      parsed.push({ id: s.id, title: typeof s.title === 'string' && s.title ? s.title : 'Hội thoại', conversationId: s.conversationId, messages, createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(), updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : Date.now() });
+    }
+    if (parsed.length === 0) {
+      const legacy = this.context.workspaceState.get<Array<{ role?: unknown; content?: unknown }>>('muse.chatHistory', [])
+        .filter((m) => typeof m.role === 'string' && typeof m.content === 'string')
+        .map((m) => ({ role: m.role as string, content: m.content as string }))
+        .slice(-40);
+      const legacyId = this.context.workspaceState.get<string>('muse.conversationId', '');
+      const firstUser = legacy.find((m) => m.role === 'user');
+      parsed.push({
+        id: crypto.randomUUID(),
+        title: firstUser ? String(firstUser.content).trim().slice(0, 40) || 'Hội thoại 1' : 'Hội thoại 1',
+        conversationId: legacyId || crypto.randomUUID(),
+        messages: legacy,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    }
+    this.sessions = parsed;
+    const savedCurrent = this.context.workspaceState.get<string>('muse.currentSessionId', '');
+    const current = this.sessions.find((s) => s.id === savedCurrent) || this.sessions[0];
+    this.currentSessionId = current.id;
+    this.history = current.messages;
+    this.conversationId = current.conversationId;
+  }
+
+  private currentSession(): ChatSession {
+    return this.sessions.find((s) => s.id === this.currentSessionId) || this.sessions[0];
+  }
+
+  private saveSessions(): void {
+    this.syncCurrentSession();
+    const stored = this.sessions.map((s) => ({ ...s, messages: s.messages.slice(-40) }));
+    void this.context.workspaceState.update('muse.sessions', stored);
+    void this.context.workspaceState.update('muse.currentSessionId', this.currentSessionId);
+    // Giữ cả key cũ theo session hiện tại để không mất dữ liệu nếu hạ cấp.
+    void this.context.workspaceState.update('muse.chatHistory', this.history.slice(-40));
+    void this.context.workspaceState.update('muse.conversationId', this.conversationId);
+  }
+
+  private syncCurrentSession(): void {
+    const s = this.currentSession();
+    if (!s) { return; }
+    s.messages = this.history;
+    s.conversationId = this.conversationId;
+    s.updatedAt = Date.now();
+  }
+
+  private postSessions(): void {
+    this.post('sessions', {
+      sessions: this.sessions.map((s) => ({ id: s.id, title: s.title })),
+      currentId: this.currentSessionId,
+    });
+  }
+
+  private switchSession(id: string): void {
+    if (this.running) { this.post('error', { text: 'Đang có một yêu cầu chạy. Bấm Dừng rồi mới đổi hội thoại.' }); return; }
+    const target = this.sessions.find((s) => s.id === id);
+    if (!target || target.id === this.currentSessionId) { return; }
+    this.syncCurrentSession();
+    this.currentSessionId = target.id;
+    this.history = target.messages;
+    this.conversationId = target.conversationId;
+    this.pendingAttachments = [];
+    this.saveSessions();
+    this.post('historyCleared', {});
+    if (this.history.length > 0) {
+      this.post('history', { messages: this.history.map((h) => ({ role: h.role, text: typeof h.content === 'string' ? h.content : '' })) });
+    }
+    this.postSessions();
+    this.post('status', { text: `Đã chuyển sang hội thoại: ${target.title}` });
+  }
+
+  private newSession(): void {
+    if (this.running) { this.post('error', { text: 'Đang có một yêu cầu chạy. Bấm Dừng rồi mới tạo hội thoại mới.' }); return; }
+    this.syncCurrentSession();
+    const session: ChatSession = { id: crypto.randomUUID(), title: 'Hội thoại mới', conversationId: crypto.randomUUID(), messages: [], createdAt: Date.now(), updatedAt: Date.now() };
+    this.sessions.push(session);
+    this.currentSessionId = session.id;
+    this.history = session.messages;
+    this.conversationId = session.conversationId;
+    this.pendingAttachments = [];
+    this.saveSessions();
+    this.post('historyCleared', {});
+    this.postSessions();
+    this.post('status', { text: 'Đã tạo hội thoại mới.' });
+  }
+
+  private async renameSession(): Promise<void> {
+    const session = this.currentSession();
+    const name = await vscode.window.showInputBox({ prompt: 'Đặt tên mới cho hội thoại hiện tại', value: session.title });
+    if (!name || name.trim().length === 0) { return; }
+    session.title = name.trim().slice(0, 80);
+    this.saveSessions();
+    this.postSessions();
+  }
+
+  private async deleteSession(): Promise<void> {
+    const session = this.currentSession();
+    const answer = await vscode.window.showWarningMessage(`Xóa hội thoại "${session.title}"? Lịch sử của hội thoại này sẽ mất.`, 'Xóa', 'Hủy');
+    if (answer !== 'Xóa') { return; }
+    if (this.sessions.length <= 1) {
+      // Chỉ còn một session: làm trống nó thay vì để danh sách rỗng.
+      this.history = [];
+      this.pendingAttachments = [];
+      this.conversationId = crypto.randomUUID();
+      session.messages = [];
+      session.conversationId = this.conversationId;
+      session.title = 'Hội thoại 1';
+      this.saveSessions();
+      this.post('historyCleared', {});
+      this.postSessions();
+      return;
+    }
+    this.sessions = this.sessions.filter((s) => s.id !== session.id);
+    const next = [...this.sessions].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    this.currentSessionId = next.id;
+    this.history = next.messages;
+    this.conversationId = next.conversationId;
+    this.pendingAttachments = [];
+    this.saveSessions();
+    this.post('historyCleared', {});
+    if (this.history.length > 0) {
+      this.post('history', { messages: this.history.map((h) => ({ role: h.role, text: typeof h.content === 'string' ? h.content : '' })) });
+    }
+    this.postSessions();
   }
 
   private saveHistory(): void {
-    void this.context.workspaceState.update('muse.chatHistory', this.history.slice(-40));
+    this.saveSessions();
   }
 
   clearHistory(): void {
     this.history = [];
     this.pendingAttachments = [];
-    void this.context.workspaceState.update('muse.chatHistory', []);
     // Xóa lịch sử thì phải đổi ID hội thoại, nếu không gateway sẽ tái
     // dùng thread Muse cũ phía server dù lịch sử cục bộ đã trống.
     this.conversationId = crypto.randomUUID();
-    void this.context.workspaceState.update('muse.conversationId', this.conversationId);
+    this.saveSessions();
     this.post('historyCleared', {});
+    this.postSessions();
   }
 
   async stopComputerControl(): Promise<string> {
@@ -225,16 +353,21 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')] };
     view.webview.html = this.html(view.webview);
-    view.webview.onDidReceiveMessage((m: { type?: string; text?: string }) => {
+    view.webview.onDidReceiveMessage((m: { type?: string; text?: string; id?: string }) => {
       if (m.type === 'send' && m.text) { void this.run(m.text); }
       else if (m.type === 'stop') { this.abort?.abort(); }
       else if (m.type === 'openSettings') { void vscode.commands.executeCommand('workbench.action.openSettings', 'muse.'); }
       else if (m.type === 'attach') { void this.attachFile(); }
       else if (m.type === 'clearHistory') { this.clearHistory(); }
+      else if (m.type === 'newSession') { this.newSession(); }
+      else if (m.type === 'switchSession' && m.id) { this.switchSession(m.id); }
+      else if (m.type === 'renameSession') { void this.renameSession(); }
+      else if (m.type === 'deleteSession') { void this.deleteSession(); }
       else if (m.type === 'importLogin') { void vscode.commands.executeCommand('muse.importDesktopLogin'); }
       else if (m.type === 'openDashboard') { void vscode.commands.executeCommand('muse.openGatewayDashboard'); }
       else if (m.type === 'selectComputerWindow') { void this.selectComputerWindow().then((msg) => this.post('status', { text: msg })); }
     });
+    this.postSessions();
     if (this.history.length > 0) {
       void view.webview.postMessage({
         type: 'history',
@@ -398,6 +531,15 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           else if (planner.raw) { this.post('message', { role: 'assistant', text: finalText, details: planner.raw }); }
           else { this.post('message', { role: 'assistant', text: finalText }); }
           this.post('status', { text: 'Xong.' });
+          // Đặt tên session tự động từ tin đầu tiên nếu session vẫn đang
+          // mang tên mặc định, để danh sách session đọc được ngay.
+          if (this.history.length === 0) {
+            const session = this.currentSession();
+            if (session.title === 'Hội thoại mới' || session.title === 'Hội thoại 1') {
+              session.title = userText.trim().slice(0, 40) || session.title;
+              this.postSessions();
+            }
+          }
           this.history.push({ role: 'user', content: userText }, { role: 'assistant', content: finalText });
           if (this.history.length > 40) { this.history.splice(0, this.history.length - 40); }
           this.saveHistory();
@@ -442,6 +584,13 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         // không phải lỗi key/cổng. Webview hiện nút hành động được thay vì
         // chỉ mã lỗi; việc nhập đăng nhập vẫn phải làm trên máy người dùng.
         this.post('accountError', { text: 'Gateway đã chạy nhưng chưa có tài khoản Muse nào khả dụng (lỗi no_account_available). Bạn chưa nhập đăng nhập vào gateway kèm theo, hoặc tài khoản đang cooling/invalid. Bấm một nút dưới đây, rồi gửi lại câu hỏi.' });
+      } else if (msg.includes('upstream_response_unavailable') || msg.includes('stopped responding without a completed reply')) {
+        // Lỗi 502 này khác 503/429: Muse web đã bắt đầu trả lời rồi dừng,
+        // nhưng gateway không xác định được một phản hồi hoàn tất gắn với
+        // yêu cầu này nên dừng chờ. Hội thoại được giữ nguyên, gateway
+        // KHÔNG tự gửi lại. Đừng tạo session mới hay xóa lịch sử vì sẽ
+        // mất ngữ cảnh; gửi tiếp một tin ngắn trong cùng session này.
+        this.post('error', { text: 'Muse web đã bắt đầu trả lời rồi dừng mà gateway không xác định được phản hồi hoàn tất (lỗi 502 upstream_response_unavailable). Đây không phải hết lượt hay hết tài khoản. Hội thoại hiện tại vẫn được giữ nguyên và gateway không tự gửi lại, nên bạn đừng tạo hội thoại mới hay xóa lịch sử. Hãy gửi tiếp một tin ngắn trong cùng hội thoại này, ví dụ: "Bạn vừa dừng mà chưa trả lời xong, hãy trả lời lại ngắn gọn." Nếu lỗi lặp lại nhiều lần, kiểm tra Output > Muse Gateway (dòng local_reply_poll) và thử lại sau ít phút.' });
       } else {
         this.post('error', { text: `Lỗi: ${msg}` });
       }

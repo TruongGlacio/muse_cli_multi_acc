@@ -6,6 +6,8 @@ button { background: var(--vscode-button-background); color: var(--vscode-button
 button:hover { background: var(--vscode-button-hoverBackground); }
 #chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 #chips button { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+#sessionBar { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+#sessionSelect { flex: 1; min-width: 140px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; padding: 5px; }
 #messages { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .bubble { padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
 .bubble.user { background: rgba(124, 92, 255, 0.18); align-self: flex-end; max-width: 92%; }
