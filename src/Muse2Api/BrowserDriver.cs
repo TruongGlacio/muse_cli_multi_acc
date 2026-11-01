@@ -593,10 +593,12 @@ public sealed class BrowserDriver : IMuseDriver
         var gotFirst = false;
         var finished = false;
         var diagnosticAt = 0d;
-        var progressAt = 0d;
-        string? progress = null;
         var sawGenerating = false;
         double? stoppedAt = null;
+        // v0.8.12: trạng thái mới nhất để ghi dòng chẩn đoán khi vòng
+        // chat kết thúc do user bấm Dừng (không ghi nội dung tin nhắn).
+        var lastBound = false;
+        var lastPartialChars = 0;
         // Fallback binding (v0.6.0): khi web đã dừng tạo mà phản hồi vẫn
         // không gắn được với request id (localReplyBound=false, thường do
         // DOM hydration/reorder), lastText sau user message mới vẫn có thể
@@ -607,27 +609,32 @@ public sealed class BrowserDriver : IMuseDriver
         var fallbackText = "";
         try
         {
+            // QUY TẮC CỨNG v0.8.12 (user chốt ngày 01/11, thay thế mọi
+                // đề xuất nâng timeout trước đó): vòng trả lời chat này
+                // KHÔNG có timeout nào. Chỉ dừng khi user tự bấm Dừng
+                // (req.Cancel ném OperationCanceledException, hội thoại
+                // được giữ nguyên qua finally như cũ). Web đã ra chữ rồi
+                // nhưng hơn 90 giây không có tiến triển DOM mới cũng
+                // KHÔNG được tự động cắt. Các lần ném theo thời gian đã
+                // gỡ khỏi vòng này: ChatTimeout (300s), FirstTokenTimeout
+                // (45s), ChatIdleTimeout (90s) và StallHints sau 15s.
+                // Các trường timeout vẫn còn trong Settings.cs vì code
+                // khác (media, profile) có thể còn dùng; chỉ ChatStream
+                // không còn dùng chúng để cắt câu trả lời. Trade-off đã
+                // ghi trong README: nếu web kẹt thật thì gateway chờ mãi
+                // cho tới khi bạn bấm Dừng, đây là hành vi theo yêu cầu
+                // chứ không phải lỗi treo mới.
             while (true)
             {
                 req.Cancel.ThrowIfCancellationRequested();
                 var elapsed = (DateTime.UtcNow - started).TotalSeconds;
-                if (elapsed > _settings.ChatTimeout) throw UpstreamException.Timeout("assistant reply timed out");
-                // Đừng để FirstTokenTimeout cắt ngang cửa sổ grace khi web
-                // vừa dừng tạo: phải chờ hết grace mới quyết định fallback
-                // binding hay 502, nếu không fallback không bao giờ tới lượt
-                // khi web tạo lâu rồi mới dừng.
-                var inStopGrace = sawGenerating && stoppedAt is { } graceAt && elapsed - graceAt <= _settings.ReplyRenderGrace;
-                if (!gotFirst && elapsed > _settings.FirstTokenTimeout && !inStopGrace)
-                    throw UpstreamException.ResponseUnavailable("No distinct assistant reply could be read from Muse web before timeout. Conversation retained; no automatic resend.");
                 await Task.Delay(TimeSpan.FromSeconds(PollInterval), req.Cancel);
                 var st = await ChatState(tab, req.Cancel, req.LocalTools ? submittedRequestId : null);
+                lastBound = BoolNode(st, "localReplyBound");
+                lastPartialChars = (Str(st, "lastText") ?? "").Length;
                 if (BoolNode(st, "generating")) { sawGenerating = true; stoppedAt = null; }
                 else if (sawGenerating) stoppedAt ??= elapsed;
                 var responseText = Str(st, req.LocalTools ? "localReplyText" : "lastText") ?? "";
-                var snapshot = BoolNode(st, "generating") + ":" + responseText;
-                if (snapshot != progress) { progress = snapshot; progressAt = elapsed; }
-                if (gotFirst && elapsed - progressAt > _settings.ChatIdleTimeout)
-                    throw UpstreamException.ResponseUnavailable("Muse web stopped making progress; no new response data. Conversation retained; no automatic resend.");
                 if (req.LocalTools && elapsed >= diagnosticAt)
                 {
                     Diagnostic?.Invoke($"local_reply_poll seconds={(int)elapsed} bubbles={IntNode(st, "agentCount")} baseline={baseCount} chars={responseText.Length} bound={BoolNode(st, "localReplyBound")} generating={BoolNode(st, "generating")}");
@@ -646,26 +653,38 @@ public sealed class BrowserDriver : IMuseDriver
                 {
                     if (stoppedAt is { } idleAt && elapsed - idleAt > _settings.ReplyRenderGrace)
                     {
-                        // Fallback binding: chỉ ở chế độ LocalTools, chỉ sau
-                        // khi đã dừng tạo + hết grace (không kích hoạt trong
-                        // lúc đang tạo). Điều kiện bám đúng spec: có bubble
-                        // assistant sau user message mới, user key mới khác
-                        // baseline, và lastText (bubble assistant mới nhất,
+                        // Fallback thô (v0.8.12, chỉ chế độ LocalTools, chỉ
+                        // sau khi web đã dừng tạo + hết grace 15s, không
+                        // kích hoạt trong lúc đang tạo). Quy tắc user chốt:
+                        // web đã dừng nhưng gateway không gắn được phản hồi
+                        // vào đúng yêu cầu đã gửi thì CŨNG PHẢI TỰ XỬ LÝ
+                        // VÀ TRẢ LẠI TIN NHẮN THÔ, không được vứt phần chữ
+                        // đã đọc chỉ vì gắn thất bại. Điều kiện duy nhất
+                        // để trả là lastText (bubble assistant mới nhất,
                         // không phải localReplyText vốn rỗng khi chưa bound)
-                        // khác rỗng và khác baseline. Sau khi kích hoạt,
-                        // đếm ổn định 4 poll như phản hồi thường rồi mới yield.
+                        // khác rỗng, khác baseline, và ổn định qua 4 poll
+                        // (0,6 giây) như đường thường để khỏi trả chữ đang
+                        // render dở. Cố ý BỎ các điều kiện gắn cũ:
+                        // localReplyBound=true, userKey khác baseline và
+                        // replyAfterUser=true — chính chúng là điểm hay
+                        // hỏng khi DOM thay đổi. Trả lastText nguyên văn
+                        // qua SSE như phản hồi thường, không cắt, không
+                        // tóm tắt, không tự sửa JSON bên trong. JSON tool
+                        // dở dang trong text thô này KHÔNG bị thực thi:
+                        // parseToolCalls của extension chỉ tạo
+                        // __parse_error__ cho JSON vỡ và vòng lặp không
+                        // thực thi lô có lỗi đó (xem README); JSON tool
+                        // hợp lệ hoàn chỉnh thì thực thi như bình thường.
                         if (req.LocalTools && !fallbackActive)
                         {
                             var candidate = Str(st, "lastText") ?? "";
-                            if (BoolNode(st, "replyAfterUser") && currentUserKey.Length > 0 && currentUserKey != baseUserKey
-                                && candidate.Length > 0 && candidate != baseText)
+                            if (DiagnosticLines.IsRawFallbackCandidate(candidate, baseText))
                             {
                                 fallbackActive = true;
                                 fallbackText = candidate;
                                 last = candidate;
                                 stable = 0;
                                 gotFirst = true;
-                                Diagnostic?.Invoke($"local_reply_fallback_binding chars={candidate.Length}");
                                 continue;
                             }
                         }
@@ -673,24 +692,24 @@ public sealed class BrowserDriver : IMuseDriver
                         {
                             var current = Str(st, "lastText") ?? "";
                             if (current.Length > 0 && current != fallbackText) { fallbackText = current; last = current; stable = 0; continue; }
-                            if (++stable >= StablePollsDone)
+                            stable++;
+                            if (DiagnosticLines.ShouldReturnRawFallback(fallbackText, baseText, stable, StablePollsDone))
                             {
-                                Diagnostic?.Invoke($"local_reply_fallback_complete chars={fallbackText.Length}");
+                                // Một dòng chẩn đoán duy nhất khi trả qua
+                                // đường thô: không ghi nội dung tin nhắn.
+                                Diagnostic?.Invoke($"local_reply_raw_fallback elapsed={(int)elapsed} gotFirst={gotFirst} bound={lastBound} chars={fallbackText.Length} reason=fallback");
                                 finished = true;
                                 yield return fallbackText;
                                 break;
                             }
                             continue;
                         }
-                        // Fallback cũng thất bại: giữ lỗi 502, nhưng ghi thêm
-                        // độ dài phần đã đọc được (chỉ số ký tự, KHÔNG đưa
-                        // nội dung partial vào lỗi vì có thể là JSON chưa
-                        // hoàn chỉnh làm hỏng planner).
-                        var partialChars = (Str(st, "lastText") ?? "").Length;
-                        throw UpstreamException.ResponseUnavailable($"Muse web stopped responding without a completed reply that the app could identify. Partial text read: {partialChars} chars (content not included). Conversation retained; no automatic resend.");
+                        // Chưa có phản hồi trả được (lastText rỗng hoặc
+                        // bằng baseline): KHÔNG ném 502 nữa, tiếp tục poll
+                        // chờ cho tới khi user bấm Dừng (quy tắc cứng
+                        // 0.8.12). Nhánh này cũng áp cho chế độ không
+                        // dùng tool cục bộ.
                     }
-                    if (elapsed > 15 && Dom.StallHints.Any(h => (Str(st, "tail") ?? "").Contains(h)))
-                        throw UpstreamException.Timeout("upstream workspace is stuck connecting");
                     continue;
                 }
                 gotFirst = true;
@@ -731,6 +750,15 @@ public sealed class BrowserDriver : IMuseDriver
         }
         finally
         {
+            // v0.8.12: vòng chat kết thúc do user bấm Dừng thì ghi một
+            // dòng chẩn đoán duy nhất (không ghi nội dung tin nhắn).
+            // Không dùng catch vì iterator không cho phép yield trong
+            // try có catch; nhận biết qua finished=false + Cancel đã
+            // được yêu cầu khi finally chạy lúc unwind. Hội thoại được
+            // giữ nguyên như hành vi finally hiện tại (Save với
+            // !finished, tab Stale).
+            if (!finished && req.Cancel.IsCancellationRequested)
+                Diagnostic?.Invoke($"chat_ended elapsed={(int)(DateTime.UtcNow - started).TotalSeconds} gotFirst={gotFirst} bound={lastBound} chars={lastPartialChars} reason=user_stop");
             try
             {
                 if (req.LocalTools)
@@ -988,7 +1016,10 @@ public sealed class BrowserDriver : IMuseDriver
     // khỏi khu vực chat thì GoBack và loại nút đó, không lấy số liệu
     // trang lạc; chẩn đoán từng trang giữ riêng số liệu trước khi
     // bấm (base_threads/base_links) để không mất số liệu gốc.
-    public async Task<WebThreadsScan> ListWebThreads(Account account)
+    // v0.8.12: forceTitles=true ép thăm dò nút sidebar bất kể quét link
+    // được bao nhiêu thread (lệnh ép cập nhật tiêu đề của extension);
+    // mặc định false giữ hành vi cũ.
+    public async Task<WebThreadsScan> ListWebThreads(Account account, bool forceTitles = false)
     {
         if (Upstream.MissingSessionCookies(account.Cookies) is { Count: > 0 })
             throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
@@ -1053,7 +1084,13 @@ public sealed class BrowserDriver : IMuseDriver
                 // kết quả nửa vời.
                 var probed = false;
                 var probeHitAuth = false;
-                if (scan.Threads.Count == 0)
+                // v0.8.12: thăm dò không chỉ khi 0 thread mà còn khi có
+                // thread title rỗng (regex) hoặc ở chế độ ép buộc; hàm
+                // ShouldProbeForTitles giữ đúng ba điều kiện này. Các
+                // giới hạn an toàn của thăm dò không đổi (30 nút,
+                // deadline chung 60 giây, chỉ nút đang hiển thị trong
+                // aside/nav, bỏ qua form/dialog, lạc trang thì GoBack).
+                if (DiagnosticLines.ShouldProbeForTitles(scan.Threads, forceTitles))
                 {
                     probed = true;
                     var (probeFound, hitAuth) = await ProbeHistoryButtonsAsync(page, scan, probeDeadline);
@@ -1319,6 +1356,11 @@ public sealed class BrowserDriver : IMuseDriver
         var found = new List<(string Url, string? Title)>(baseline.Threads);
         var seen = new HashSet<string>(found.Select(t => t.Url), StringComparer.OrdinalIgnoreCase);
         var clicked = 0;
+        // v0.8.12: true khi title của một thread ĐÃ CÓ trong baseline
+        // được ghi đè bằng title nút thật — trường hợp này số lượng
+        // thread không tăng nên điều kiện trả kết quả cũ (chỉ đếm số
+        // lượng) sẽ nuốt mất nâng cấp; cờ này giữ lại kết quả đó.
+        var upgraded = false;
         // v0.8.9: bảng token → text hiển thị của nút, giữ trong vòng
         // quét hiện tại để khi một cú bấm mở ra thread thì lấy text
         // của chính nút đó làm title (không lưu text ra ngoài vòng
@@ -1409,7 +1451,14 @@ public sealed class BrowserDriver : IMuseDriver
                     probeTexts.TryGetValue(token, out var buttonText);
                     var title = DiagnosticLines.CleanProbeButtonTitle(buttonText)
                         ?? DiagnosticLines.CleanThreadTitle(state.Title);
-                    if (seen.Add(url)) found.Add((url, title));
+                    // v0.8.12: thread đã có trong baseline thì title nút
+                    // GHI ĐÈ title cũ (anchor text hoặc rỗng) thay vì
+                    // bị bỏ qua vì seen.Add thất bại như trước; title
+                    // null thì giữ nguyên title cũ. Thread mới vẫn thêm
+                    // như cũ, không tạo trùng lặp.
+                    var alreadyKnown = !seen.Add(url);
+                    var titleChanged = DiagnosticLines.ApplyProbeTitle(found, url, title);
+                    if (alreadyKnown && titleChanged) upgraded = true;
                     try { await page.GoBackAsync(); } catch { }
                     await Task.Delay(TimeSpan.FromMilliseconds(800));
                     break;
@@ -1429,7 +1478,7 @@ public sealed class BrowserDriver : IMuseDriver
                     break;
             }
         }
-        if (found.Count > baseline.Threads.Count)
+        if (found.Count > baseline.Threads.Count || upgraded)
             return (new WebThreadsScan(found, baseline.PageUrl, baseline.LinkCount, baseline.LoginHint,
                 baseline.Title, baseline.HasLoginForm, baseline.ButtonCount, Groups: baseline.Groups), false);
         return (null, false);

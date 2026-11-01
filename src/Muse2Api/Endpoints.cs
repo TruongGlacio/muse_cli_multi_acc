@@ -7,7 +7,7 @@ namespace Muse2Api;
 
 public static class Endpoints
 {
-    public const string Version = "0.8.11";
+    public const string Version = "0.8.12";
 
     public static void Map(WebApplication app, AppState s)
     {
@@ -870,7 +870,12 @@ public static class Endpoints
         {
             RequireAdmin(ctx, s);
             var acc = s.Pool.Get(id) ?? throw MuseException.NotFound($"account '{id}' not found");
-            var scan = await s.Driver.ListWebThreads(acc);
+            // v0.8.12: ?forceTitles=true ép thăm dò nút sidebar bất kể
+            // quét link được bao nhiêu thread (lệnh ép cập nhật tiêu đề
+            // của extension); không có tham số thì false, giữ hành vi cũ.
+            var forceTitles = ctx.Request.Query.TryGetValue("forceTitles", out var fv)
+                && DiagnosticLines.ParseForceTitlesQuery(fv.ToString());
+            var scan = await s.Driver.ListWebThreads(acc, forceTitles);
             // v0.8.3: ghi dòng tóm tắt ra stdout gateway để user sao
             // chép được từ Output > Muse Gateway (popup đồng bộ trôi
             // nhanh). Từ v0.8.5 việc ghi log nằm trong ListWebThreads

@@ -30,6 +30,11 @@ export interface ChatSession {
   createdAt: number; updatedAt: number; workspacePath?: string;
   accountId?: string; accountLabel?: string; accountStatusAtSave?: string;
   threadUrl?: string; importedFromWeb?: boolean;
+  // v0.8.12: cờ tiêu đề sửa tay. Chỉ handler đổi tên mới đặt true;
+  // session mới/import từ web mặc định false. persist() sao chép cả
+  // session (...s) nên cờ này lưu cùng globalState như các trường khác;
+  // parseSessions dưới đây đọc lại nó nên không mất khi tải lại.
+  titleEditedManually?: boolean;
 }
 
 export interface StoreChange {
@@ -58,7 +63,7 @@ export class SessionStore {
           .filter((m) => typeof m.role === 'string' && typeof m.content === 'string')
           .map((m) => ({ role: m.role as string, content: m.content as string }))
           .slice(-40);
-        out.push({ id: s.id, title: typeof s.title === 'string' && s.title ? s.title : 'Hội thoại', conversationId: s.conversationId, messages, createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(), updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : Date.now(), workspacePath: typeof s.workspacePath === 'string' ? s.workspacePath : undefined, accountId: typeof s.accountId === 'string' && s.accountId ? s.accountId : undefined, accountLabel: typeof s.accountLabel === 'string' && s.accountLabel ? s.accountLabel : undefined, accountStatusAtSave: typeof s.accountStatusAtSave === 'string' ? s.accountStatusAtSave : undefined, threadUrl: typeof s.threadUrl === 'string' && s.threadUrl ? s.threadUrl : undefined, importedFromWeb: s.importedFromWeb === true });
+        out.push({ id: s.id, title: typeof s.title === 'string' && s.title ? s.title : 'Hội thoại', conversationId: s.conversationId, messages, createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(), updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : Date.now(), workspacePath: typeof s.workspacePath === 'string' ? s.workspacePath : undefined, accountId: typeof s.accountId === 'string' && s.accountId ? s.accountId : undefined, accountLabel: typeof s.accountLabel === 'string' && s.accountLabel ? s.accountLabel : undefined, accountStatusAtSave: typeof s.accountStatusAtSave === 'string' ? s.accountStatusAtSave : undefined, threadUrl: typeof s.threadUrl === 'string' && s.threadUrl ? s.threadUrl : undefined, importedFromWeb: s.importedFromWeb === true, titleEditedManually: s.titleEditedManually === true });
       }
       return out;
     };

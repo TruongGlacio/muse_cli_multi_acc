@@ -23,6 +23,7 @@
     "onCommand:muse.stopComputerControl",
     "onCommand:muse.clearChatHistory",
     "onCommand:muse.syncFromWeb",
+    "onCommand:muse.forceSyncTitles",
     "onCommand:muse.generateImage",
     "onCommand:muse.editImage",
     "onCommand:muse.generateVideo",
@@ -144,6 +145,10 @@
       {
         "command": "muse.syncFromWeb",
         "title": "Muse: Đồng bộ hội thoại từ web"
+      },
+      {
+        "command": "muse.forceSyncTitles",
+        "title": "Muse: Ép cập nhật tiêu đề hội thoại từ web"
       },
       {
         "command": "muse.generateImage",
@@ -285,7 +290,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.8.11",
+  "version": "0.8.12",
   "extensionKind": [
     "ui",
     "workspace"

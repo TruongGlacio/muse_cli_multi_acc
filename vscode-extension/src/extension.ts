@@ -5,9 +5,9 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { GatewayManager, GatewayConfig, GatewayState } from './gateway';
-import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, deleteGatewayAccount, formatAccountLine, fetchWebThreads, registerConversation, deleteGatewayConversation, fetchConversationOwner, fetchThreadMessages, resolveWebTitle, sessionMatchesAccountFilter } from './admin';
+import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, deleteGatewayAccount, formatAccountLine, fetchWebThreads, registerConversation, deleteGatewayConversation, fetchConversationOwner, fetchThreadMessages, resolveWebTitleUpdated, sessionMatchesAccountFilter } from './admin';
 import { BackgroundProcesses } from './processes';
-import { generateImages, editImage, createVideo, downloadMedia, dataUrlOfImageFile } from './media';
+import { generateImages, editImage, createVideo, downloadMedia, dataUrlOfImageFile, MAX_IMAGE_BYTES } from './media';
 import { ComputerHelper, COMPUTER_TOOLS, approveComputerAction, describeComputerCall } from './computer';
 import { MuseSettingsPanel } from './settings';
 import { SessionStore, ChatSession, ChatMsg, StoreChange } from './sessions';
@@ -45,6 +45,57 @@ import { SessionStore, ChatSession, ChatMsg, StoreChange } from './sessions';
 interface ToolCall { name: string; args: Record<string, unknown>; }
 type ChatContent = string | Array<Record<string, unknown>>;
 interface PendingAttachment { name: string; size: number; kind: 'image' | 'text' | 'video' | 'file'; kindLabel: string; dataUrl?: string; text?: string; note?: string; }
+
+// Danh sách đuôi dùng chung cho mọi đường đính kèm (v0.8.12): hộp chọn
+// file, kéo thả theo đường dẫn và kéo thả theo nội dung trong bộ nhớ đều
+// phân loại bằng đúng ba danh sách này, để không lệch nhau theo đường đi.
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+const VIDEO_EXTS = ['.mp4', '.mov', '.webm', '.avi', '.mkv'];
+const TEXT_EXTS = ['.txt', '.md', '.markdown', '.json', '.jsonc', '.csv', '.xml', '.html', '.htm', '.css', '.js', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.cs', '.java', '.c', '.h', '.cpp', '.go', '.rs', '.rb', '.php', '.sql', '.log', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.sh', '.ps1', '.bat'];
+
+// Ước lượng số byte giải mã của một data URL base64 (v0.8.12, hàm thuần
+// để test đơn vị trực tiếp từ out/extension.js): data URL không phải
+// base64, rỗng hoặc thiếu phần dữ liệu thì trả 0 để caller coi là lỗi
+// ảnh rỗng; ngược lại trừ padding '=' khỏi công thức len*3/4. Dùng cho
+// ảnh kéo thả từ ngoài hệ điều hành, vì đường này không có file trên
+// đĩa để dataUrlOfImageFile kiểm tra như đường theo đường dẫn.
+export function decodeDataUrlBytes(dataUrl: string): number {
+  if (!dataUrl || !dataUrl.startsWith('data:')) { return 0; }
+  const comma = dataUrl.indexOf(',');
+  if (comma < 0) { return 0; }
+  const meta = dataUrl.slice(5, comma);
+  const b64 = dataUrl.slice(comma + 1);
+  if (!meta.endsWith(';base64') || b64.length === 0) { return 0; }
+  let padding = 0;
+  if (b64.endsWith('==')) { padding = 2; } else if (b64.endsWith('=')) { padding = 1; }
+  return Math.floor(b64.length * 3 / 4) - padding;
+}
+
+// Hàm thuần đứng sau decodeDataUrlBytes, được addDroppedFileAttachment
+// gọi (xem comment ở đó). Trả PendingAttachment; ném lỗi chỉ cho ảnh
+// rỗng/quá lớn.
+export function buildDroppedAttachment(file: { name?: unknown; size?: unknown; dataUrl?: unknown; text?: unknown }): PendingAttachment {
+  const name = typeof file.name === 'string' && file.name ? file.name : 'tệp';
+  const size = typeof file.size === 'number' && file.size >= 0 ? file.size : 0;
+  const ext = path.extname(name).toLowerCase();
+  if (IMAGE_EXTS.includes(ext)) {
+    const dataUrl = typeof file.dataUrl === 'string' ? file.dataUrl : '';
+    const decodedBytes = decodeDataUrlBytes(dataUrl);
+    if (decodedBytes === 0 || decodedBytes > MAX_IMAGE_BYTES) {
+      throw new Error(`Ảnh ${name} phải khác rỗng và tối đa 20 MiB.`);
+    }
+    return { name, size, kind: 'image', kindLabel: 'Ảnh', dataUrl };
+  }
+  if (VIDEO_EXTS.includes(ext)) {
+    return { name, size, kind: 'file', kindLabel: 'Video', note: `Video ${name} (${Math.round(size / 1024)} KiB) chưa gửi được dưới dạng video vì gateway chat chỉ nhận ảnh và text, và video kéo thả từ ngoài hệ điều hành không trích được khung hình bằng ffmpeg. Hãy mô tả nội dung video hoặc đính kèm ảnh chụp khung hình thay thế.` };
+  }
+  if (typeof file.text === 'string') {
+    const limit = 500 * 1024;
+    const text = file.text.length > limit ? file.text.slice(0, limit) + `\n[Đã cắt nội dung ở 500 KiB, tệp gốc ${Math.round(size / 1024)} KiB.]` : file.text;
+    return { name, size, kind: 'text', kindLabel: 'Văn bản', text };
+  }
+  return { name, size, kind: 'file', kindLabel: 'Tệp', note: `Tệp ${name} (${Math.round(size / 1024)} KiB) là tệp nhị phân nên gateway chat không đọc được nội dung; chỉ gửi kèm tên và dung lượng để bạn mô tả thêm.` };
+}
 const SYSTEM_PROMPT = [
   'Bạn là Muse, trợ lý lập trình chạy trong VS Code, làm việc trực tiếp trên',
   'dự án người dùng đang mở. Nói tiếng Việt rõ ràng, ngắn gọn.',
@@ -773,7 +824,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // cũng không có thì bỏ qua ('skipped') và giữ session rỗng.
   // Trả 'ok' / 'empty' (endpoint trả rỗng) / 'error' / 'skipped'.
   // Chỉ ghi đè messages khi có nội dung thật; title chỉ đổi theo
-  // quy tắc resolveWebTitle (chỉ dự phòng -> tiêu đề thật).
+  // quy tắc nới lỏng v0.8.12 (resolveWebTitleUpdated, sửa tay thì giữ).
   private webHistoryLoading = new Set<string>();
 
   private async loadWebThreadHistory(session: ChatSession, force: boolean): Promise<'ok' | 'empty' | 'error' | 'skipped'> {
@@ -790,7 +841,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       if (result.messages.length === 0) { return 'empty'; }
       session.messages = result.messages.map((m) => ({ role: m.role, content: m.content }));
       session.updatedAt = Date.now();
-      const newTitle = resolveWebTitle(session.title, session.threadUrl, result.title);
+      const newTitle = resolveWebTitleUpdated(session.title, session.threadUrl, result.title, { titleEditedManually: session.titleEditedManually });
       if (newTitle) { session.title = newTitle; }
       if (session.id === this.currentSessionId) {
         this.history = session.messages;
@@ -966,6 +1017,11 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     const name = await vscode.window.showInputBox({ prompt: 'Đặt tên mới cho hội thoại hiện tại', value: session.title });
     if (!name || name.trim().length === 0) { return; }
     session.title = name.trim().slice(0, 80);
+    // v0.8.12: đổi tên tay đặt cờ bảo vệ — từ nay đồng bộ thường và
+    // lệnh ép buộc đều không ghi đè tiêu đề này. Lưu ý: hội thoại đổi
+    // tên tay TRƯỚC 0.8.12 không có cờ nên lần đồng bộ đầu sau khi lên
+    // 0.8.12 vẫn có thể bị ghi đè (xem README).
+    session.titleEditedManually = true;
     this.saveSessions();
     this.postSessions();
   }
@@ -1056,7 +1112,26 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // thì thread đó không tạo session, đếm lỗi và tiếp tục thread khác.
   // Trạng thái session mới tuân thủ đúng luật 0.5.0 vì postSessions
   // dùng chung sessionStatus theo accountId, không viết logic riêng.
-  async syncFromWeb(): Promise<void> {
+  // Lệnh palette v0.8.12 "Muse: Ép cập nhật tiêu đề hội thoại từ web":
+  // hỏi xác nhận bằng modal trước khi ghi đè, rồi chạy syncFromWeb ở
+  // chế độ ép buộc. Chỉ ép cho hội thoại import từ web; hội thoại sửa
+  // tay từ 0.8.12 trở đi không bị chạm tới (cờ titleEditedManually),
+  // nhưng hội thoại đổi tên tay TRƯỚC 0.8.12 không có cờ nên vẫn có
+  // thể bị ghi đè — thông báo nêu rõ điều này trước khi user xác nhận.
+  async forceSyncTitlesFromWeb(): Promise<void> {
+    const answer = await vscode.window.showWarningMessage(
+      'Ép cập nhật tiêu đề sẽ ghi đè tiêu đề của mọi hội thoại import từ web bằng tiêu đề web mới nhất, kể cả tiêu đề anchor trông như thật nhưng sai. Hội thoại bạn đã đổi tên tay từ v0.8.12 trở đi sẽ không bị chạm tới, nhưng hội thoại đổi tên tay TRƯỚC 0.8.12 không có cờ bảo vệ nên có thể bị ghi đè. Tiếp tục?',
+      { modal: true }, 'Ép cập nhật', 'Hủy');
+    if (answer !== 'Ép cập nhật') { return; }
+    await this.syncFromWeb(true);
+  }
+
+  // v0.8.12: forceTitles=true là chế độ ép buộc của lệnh palette
+  // "Muse: Ép cập nhật tiêu đề hội thoại từ web" — gateway thăm dò nút
+  // bất kể quét link được bao nhiêu thread, và extension ghi đè title
+  // của session import từ web (trừ sửa tay). Đồng bộ thường giữ
+  // forceTitles=false.
+  async syncFromWeb(forceTitles = false): Promise<void> {
     const normalizeUrl = (u: string): string => u.trim().replace(/\/+$/, '');
     const threadIdFromUrl = (u: string): string => {
       const noQuery = u.split(/[?#]/)[0].replace(/\/+$/, '');
@@ -1098,7 +1173,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           account = pick.account;
         }
       }
-      const webResult = await fetchWebThreads(info.baseUrl, info.apiKey, account.id);
+      const webResult = await fetchWebThreads(info.baseUrl, info.apiKey, account.id, forceTitles);
       const threads = webResult.threads;
       const debug = webResult.debug;
       // v0.7.0, điểm 4: CHỈ khử trùng theo threadUrl của session đã có
@@ -1132,10 +1207,15 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           // để hội thoại import từ bản trước cũng hiện title mà không
           // cần mở từng cái. Không đổi logic khử trùng/tombstone/
           // register: vẫn bỏ qua (skipped) như cũ, chỉ thêm cập nhật
-          // title khi đúng quy tắc resolveWebTitle.
+          // title khi đúng quy tắc resolveWebTitleUpdated (v0.8.12:
+          // chế độ ép buộc chỉ ép session import từ web, sửa tay thì
+          // resolver chặn trong mọi chế độ).
           const oldSession = existingByUrl.get(url);
           if (oldSession) {
-            const newTitle = resolveWebTitle(oldSession.title, url, thread.title);
+            const newTitle = resolveWebTitleUpdated(oldSession.title, url, thread.title, {
+            titleEditedManually: oldSession.titleEditedManually,
+            force: forceTitles && oldSession.importedFromWeb === true,
+          });
             if (newTitle) { oldSession.title = newTitle; titlesUpdated++; }
           }
           skipped++; continue;
@@ -1193,7 +1273,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       // và nếu gateway đọc được 0 thì nêu trang đã mở + tổng số link
       // đọc được để user biết lỗi ở khâu nào.
       let msg = `Đã thêm ${added} hội thoại mới từ web (gateway đọc được ${threads.length} thread), bỏ qua ${skipped} hội thoại đã có trong danh sách`;
-      if (titlesUpdated > 0) { msg += `, cập nhật ${titlesUpdated} tiêu đề thật cho hội thoại đã import trước đó`; }
+      if (titlesUpdated > 0) { msg += `, cập nhật ${titlesUpdated} tiêu đề thật cho hội thoại đã import trước đó${forceTitles ? ' (chế độ ép buộc, bỏ qua hội thoại sửa tay)' : ''}`; }
       if (tombstoned > 0) { msg += `, ${tombstoned} hội thoại đã xóa nên không nhập lại`; }
       if (errors > 0) { msg += `, ${errors} hội thoại lỗi khi đăng ký`; }
       if (added === 0 && debug) {
@@ -1274,11 +1354,31 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // nhận tin nên run/switch/delete đều tác động đúng bề mặt đó.
   // Điểm mới duy nhất so với sidebar cũ: 'openInNewTab' mở session
   // trong một WebviewPanel riêng (xem openSessionInPanel).
-  private onWebviewMessage(m: { type?: string; text?: string; id?: string; width?: number }): void {
+  private onWebviewMessage(m: { type?: string; text?: string; id?: string; width?: number; uris?: unknown; files?: unknown }): void {
     if (m.type === 'send' && m.text) { void this.run(m.text); }
     else if (m.type === 'stop') { this.abort?.abort(); }
     else if (m.type === 'openSettings') { this.openSettings(); }
     else if (m.type === 'attach') { void this.attachFile(); }
+    else if (m.type === 'dropUris') {
+      // Kéo thả từ Explorer của VS Code: webview gửi danh sách URI
+      // dạng text/uri-list; extension xử lý từng file bằng đúng hàm
+      // theo đường dẫn (kể cả trích khung hình video bằng ffmpeg),
+      // file nào lỗi thì hàm đó báo riêng và vẫn tiếp tục file khác.
+      const uris = Array.isArray(m.uris) ? m.uris.filter((u): u is string => typeof u === 'string' && u.length > 0) : [];
+      void (async () => {
+        for (const raw of uris) {
+          let filePath = raw;
+          try { if (raw.startsWith('file://')) { filePath = vscode.Uri.parse(raw).fsPath; } } catch { /* giữ nguyên chuỗi gốc, hàm xử lý sẽ báo lỗi riêng */ }
+          await this.processAttachmentFile(filePath);
+        }
+      })();
+    } else if (m.type === 'dropFiles') {
+      // Kéo thả từ ngoài hệ điều hành: webview chỉ đọc được nội dung
+      // qua File API nên gửi kèm dataUrl/text trong bộ nhớ; extension
+      // xử lý bằng addDroppedFileAttachment với cùng giới hạn cũ.
+      const files = Array.isArray(m.files) ? m.files.filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null) : [];
+      for (const f of files) { this.addDroppedFileAttachment(f); }
+    }
     else if (m.type === 'clearHistory') { this.clearHistory(); }
     else if (m.type === 'newSession') { void this.newSession(); }
     else if (m.type === 'switchSession' && m.id) { void this.switchSession(m.id); }
@@ -1342,24 +1442,35 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   //   và dung lượng video, không giả vờ đã gửi video.
   // - Tệp nhị phân khác: chỉ gửi ghi chú tên/dung lượng, không đọc nội
   //   dung. Không lưu nội dung đính kèm vào workspaceState cùng lịch sử.
+  // Hộp chọn file v0.8.12: chọn được NHIỀU file cùng lúc
+  // (canSelectMany:true); xử lý lần lượt từng file bằng đúng hàm
+  // processAttachmentFile dùng chung với đường kéo thả theo URI, file
+  // nào lỗi thì báo riêng file đó và vẫn tiếp tục các file còn lại.
   private async attachFile(): Promise<void> {
     const picked = await vscode.window.showOpenDialog({
-      canSelectMany: false,
+      canSelectMany: true,
       title: 'Chọn tệp đính kèm vào chat Muse (ảnh, văn bản, video)',
     });
     if (!picked || picked.length === 0) { return; }
-    const filePath = picked[0].fsPath;
+    for (const uri of picked) { await this.processAttachmentFile(uri.fsPath); }
+  }
+
+  // Xử lý MỘT file theo đường dẫn (v0.8.12, tách từ attachFile cũ để
+  // hộp chọn nhiều file và kéo thả theo URI dùng chung): ảnh qua
+  // dataUrlOfImageFile (tối đa 20 MiB/ảnh, rỗng thì lỗi), video trích
+  // khung hình giây 1 bằng ffmpeg nếu có (không có thì chỉ gửi note),
+  // text cắt ở 500 KiB kèm ghi chú, nhị phân chỉ gửi note tên +
+  // dung lượng. Lỗi của file này chỉ báo riêng file đó, không chặn
+  // file khác; thành công thì gửi message 'attached' để hiện chip riêng.
+  private async processAttachmentFile(filePath: string): Promise<void> {
     const name = path.basename(filePath);
     try {
       const size = fs.statSync(filePath).size;
       const ext = path.extname(filePath).toLowerCase();
-      const imageExts = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
-      const videoExts = ['.mp4', '.mov', '.webm', '.avi', '.mkv'];
-      const textExts = ['.txt', '.md', '.markdown', '.json', '.jsonc', '.csv', '.xml', '.html', '.htm', '.css', '.js', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.cs', '.java', '.c', '.h', '.cpp', '.go', '.rs', '.rb', '.php', '.sql', '.log', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.sh', '.ps1', '.bat'];
-      if (imageExts.includes(ext)) {
+      if (IMAGE_EXTS.includes(ext)) {
         const dataUrl = dataUrlOfImageFile(filePath);
         this.pendingAttachments.push({ name, size, kind: 'image', kindLabel: 'Ảnh', dataUrl });
-      } else if (videoExts.includes(ext)) {
+      } else if (VIDEO_EXTS.includes(ext)) {
         const frame = await this.extractVideoFrame(filePath);
         if (frame) {
           this.pendingAttachments.push({ name, size, kind: 'video', kindLabel: 'Video (khung hình)', dataUrl: frame, note: `Đây là khung hình ở giây thứ 1 trích từ video ${name}. Gateway chat chỉ nhận ảnh và text nên video gốc không được gửi dưới dạng video.` });
@@ -1368,7 +1479,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         }
       } else {
         const buf = fs.readFileSync(filePath);
-        const looksText = textExts.includes(ext) || (buf.length > 0 && !buf.includes(0));
+        const looksText = TEXT_EXTS.includes(ext) || (buf.length > 0 && !buf.includes(0));
         if (looksText) {
           const full = buf.toString('utf8');
           const limit = 500 * 1024;
@@ -1381,7 +1492,27 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       const last = this.pendingAttachments[this.pendingAttachments.length - 1];
       this.post('attached', { name, size, kindLabel: last.kindLabel });
     } catch (e) {
-      this.post('error', { text: `Không đính kèm được tệp: ${e instanceof Error ? e.message : String(e)}` });
+      this.post('error', { text: `Không đính kèm được tệp ${name}: ${e instanceof Error ? e.message : String(e)}` });
+    }
+  }
+
+  // Xây MỘT attachment từ file kéo thả trong bộ nhớ (v0.8.12, hàm thuần
+  // để test đơn vị trực tiếp từ out/extension.js): webview đã đọc sẵn
+  // dataUrl cho ảnh hoặc text cho tệp văn bản; hàm này áp cùng giới hạn
+  // cũ — ảnh kiểm tra dung lượng giải mã tối đa 20 MiB (MAX_IMAGE_BYTES,
+  // giống dataUrlOfImageFile) và khác rỗng, text cắt ở 500 KiB kèm ghi
+  // chú giống đường theo đường dẫn, video và nhị phân qua đường này
+  // KHÔNG trích được khung hình bằng ffmpeg nên chỉ tạo note như đường
+  // video không có ffmpeg hiện tại, tuyệt đối không bịa khung hình.
+  // Ném lỗi cho ảnh rỗng/quá lớn để caller báo riêng file đó.
+  private addDroppedFileAttachment(file: { name?: unknown; size?: unknown; dataUrl?: unknown; text?: unknown }): void {
+    try {
+      const att = buildDroppedAttachment(file);
+      this.pendingAttachments.push(att);
+      this.post('attached', { name: att.name, size: att.size, kindLabel: att.kindLabel });
+    } catch (e) {
+      const name = typeof file.name === 'string' && file.name ? file.name : 'tệp';
+      this.post('error', { text: `Không đính kèm được tệp ${name}: ${e instanceof Error ? e.message : String(e)}` });
     }
   }
 
@@ -2013,7 +2144,9 @@ function plannerReply(text: string): { display: string; raw: string } {
   return { display: text.trim(), raw: '' };
 }
 
-function parseToolCalls(text: string): ToolCall[] {
+// Export để test đơn vị từ out/extension.js (v0.8.12): hành vi runtime
+// không đổi, chỉ cho phép test trích hàm thật kiểm tra guard JSON vỡ.
+export function parseToolCalls(text: string): ToolCall[] {
   const calls: ToolCall[] = [];
   const fence = /```(?:tool|json)?[^\n]*\n([\s\S]*?)```/g;
   let m: RegExpExecArray | null;
@@ -2345,6 +2478,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('muse.renameSession', () => { void provider.renameSession(); }),
     vscode.commands.registerCommand('muse.deleteSession', () => { void provider.deleteSession(); }),
     vscode.commands.registerCommand('muse.syncFromWeb', () => { void provider.syncFromWeb(); }),
+    vscode.commands.registerCommand('muse.forceSyncTitles', () => { void provider.forceSyncTitlesFromWeb(); }),
     vscode.commands.registerCommand('muse.refreshGatewayAccounts', async () => {
       await provider.refreshAccounts();
       void vscode.window.showInformationMessage('Đã làm mới trạng thái tài khoản Muse, xem trong panel Cài đặt (Muse: Cài đặt) và trạng thái session trong khung chat.');

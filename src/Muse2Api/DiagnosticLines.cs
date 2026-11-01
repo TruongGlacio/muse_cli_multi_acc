@@ -201,6 +201,93 @@ public static class DiagnosticLines
     }
 
     /// <summary>
+    /// Có nên chạy thăm dò nút lịch sử cho một lần quét trang hay không
+    /// (v0.8.12, hàm thuần để test đơn vị). Trước 0.8.12 chỉ chạy khi
+    /// quét link được 0 thread; nay chạy thêm khi bất kỳ thread nào
+    /// quét được có title rỗng (trường hợp regex trên outerHTML thêm
+    /// thread với title "" — trước đây lần đồng bộ sau cũng không thăm
+    /// dò vì count &gt; 0 nên title rỗng kẹt mãi), và luôn chạy ở chế
+    /// độ ép buộc (forceTitles của lệnh ép cập nhật tiêu đề). Title
+    /// null cũng coi là rỗng. Hàm này chỉ quyết định có thăm dò hay
+    /// không; mọi giới hạn an toàn của thăm dò (30 nút, deadline 60
+    /// giây, chỉ nút đang hiển thị trong aside/nav, bỏ qua form/dialog)
+    /// vẫn nằm ở ProbeHistoryButtonsAsync, không đổi.
+    /// </summary>
+    public static bool ShouldProbeForTitles(
+        List<(string Url, string? Title)> threads, bool forceTitles)
+    {
+        if (forceTitles) return true;
+        if (threads.Count == 0) return true;
+        foreach (var (_, title) in threads)
+            if (string.IsNullOrWhiteSpace(title)) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Áp title nút thăm dò vào danh sách thread đã quét (v0.8.12, hàm
+    /// thuần để test đơn vị). Trước 0.8.12, cú bấm mở ra thread đã có
+    /// trong baseline thì seen.Add thất bại nên title nút bị bỏ qua;
+    /// nay: URL chưa có thì thêm mới; URL đã có và title nút đã làm
+    /// sạch là thật (khác null) thì GHI ĐÈ title cũ trong danh sách
+    /// kết quả — kể cả title cũ là anchor text hay rỗng — vì text nút
+    /// sidebar mới là nơi title thật nằm. Trả true khi danh sách đổi
+    /// (thêm mới hoặc ghi đè khác giá trị cũ); title null thì không
+    /// đổi gì. So khớp URL không phân biệt hoa thường. Hàm này không
+    /// ghi log, không chạm tới URL/thread nào khác.
+    /// </summary>
+    public static bool ApplyProbeTitle(
+        List<(string Url, string? Title)> found, string url, string? cleanedTitle)
+    {
+        var idx = found.FindIndex(t => string.Equals(t.Url, url, StringComparison.OrdinalIgnoreCase));
+        if (idx < 0)
+        {
+            found.Add((url, cleanedTitle));
+            return true;
+        }
+        if (cleanedTitle is null) return false;
+        if (string.Equals(found[idx].Title, cleanedTitle, StringComparison.Ordinal)) return false;
+        found[idx] = (found[idx].Url, cleanedTitle);
+        return true;
+    }
+
+    /// <summary>
+    /// Có phải ứng viên cho đường fallback thô hay không (v0.8.12, hàm
+    /// thuần để test đơn vị): chỉ yêu cầu lastText khác rỗng và khác
+    /// baseline. Cố ý KHÔNG xét localReplyBound, userKey hay
+    /// replyAfterUser — chính các kiểm tra gắn đó là điểm hay hỏng khi
+    /// DOM thay đổi, nên từ 0.8.12 chúng không còn là điều kiện để
+    /// được trả phản hồi nữa (xem ChatStream).
+    /// </summary>
+    public static bool IsRawFallbackCandidate(string? lastText, string? baseText)
+        => !string.IsNullOrEmpty(lastText)
+        && !string.Equals(lastText, baseText, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Có trả phản hồi qua đường fallback thô hay không (v0.8.12, hàm
+    /// thuần để test đơn vị): ứng viên hợp lệ (xem
+    /// IsRawFallbackCandidate) VÀ đã ổn định qua đủ số poll yêu cầu
+    /// (mặc định 4 poll × 0,15 giây = 0,6 giây như đường thường, để
+    /// khỏi trả chữ đang render dở). Không xét thêm điều kiện gắn nào.
+    /// </summary>
+    public static bool ShouldReturnRawFallback(string? lastText, string? baseText, int stablePolls, int requiredPolls = 4)
+        => IsRawFallbackCandidate(lastText, baseText) && stablePolls >= requiredPolls;
+
+    /// <summary>
+    /// Đọc tham số ép buộc từ query của endpoint web-threads (v0.8.12,
+    /// hàm thuần để test đơn vị): chỉ "true" hoặc "1" (không phân biệt
+    /// hoa thường, đã trim) mới là ép buộc; mọi giá trị khác, rỗng hay
+    /// thiếu đều là false để endpoint cũ không có tham số giữ hành vi
+    /// cũ. Endpoint dùng hàm này thay vì parse rải rác trong handler.
+    /// </summary>
+    public static bool ParseForceTitlesQuery(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var v = value.Trim();
+        return v.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || v.Equals("1", StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Dòng log của endpoint thread-messages (v0.8.8): CHỈ số lượng
     /// tin + id tài khoản, KHÔNG nội dung tin, KHÔNG tiêu đề hội
     /// thoại, KHÔNG URL thread. Caller ghi qua LogLocal nên tiền tố

@@ -108,7 +108,10 @@ public interface IMuseDriver
     // v0.6.0, mức 1: liệt kê thread web của tài khoản (danh sách + tiêu
     // đề từ sidebar muse.ai). Chỉ BrowserDriver cài đặt thật; các driver
     // khác dùng default này và gateway trả 501.
-    Task<WebThreadsScan> ListWebThreads(Account account)
+    // v0.8.12: forceTitles=true ép thăm dò nút sidebar bất kể quét link
+    // được bao nhiêu thread (lệnh ép cập nhật tiêu đề); mặc định false
+    // giữ hành vi cũ cho mọi caller không truyền tham số.
+    Task<WebThreadsScan> ListWebThreads(Account account, bool forceTitles = false)
         => throw MuseException.NotImplemented($"driver '{Name}' không hỗ trợ liệt kê hội thoại web");
     // v0.8.8: lấy toàn bộ lịch sử tin nhắn của một thread web (theo
     // thứ tự tài liệu, đã giới hạn). Chỉ BrowserDriver cài đặt thật;

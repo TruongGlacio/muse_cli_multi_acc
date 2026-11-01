@@ -73,5 +73,9 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 .chip { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 4px; padding: 4px 8px; font-size: 12px; }
 #status { color: var(--vscode-descriptionForeground); margin-bottom: 8px; min-height: 16px; }
 .composer textarea { width: 100%; box-sizing: border-box; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; padding: 8px; resize: vertical; }
+/* Kéo thả file vào ô soạn thảo (v0.8.12): vùng đang kéo qua hiện viền
+   focusBorder + nền nhẹ; chỉ trang trí, không đổi bố cục. */
+.composer.drag-over, #attachments.drag-over { outline: 2px solid var(--vscode-focusBorder); background: var(--vscode-editor-selectionBackground); border-radius: 4px; }
+.composer.drag-over textarea { border-color: var(--vscode-focusBorder); }
 .actions { display: flex; gap: 6px; margin-top: 6px; }
 .note { color: var(--vscode-descriptionForeground); font-size: 12px; }

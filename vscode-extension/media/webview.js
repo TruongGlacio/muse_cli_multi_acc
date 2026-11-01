@@ -230,6 +230,83 @@
   document.getElementById('attachBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'attach' });
   });
+  // Kéo thả file vào ô soạn thảo (v0.8.12): vùng nhận là khung soạn
+  // thảo (.composer: ô nhập + hàng nút) và danh sách chip đính kèm
+  // (#attachments). preventDefault ở dragover/drop là bắt buộc, nếu
+  // không trình duyệt sẽ mở file thay vì giao cho extension. Khi đang
+  // kéo qua thì thêm class drag-over (viền focusBorder, nền nhẹ) và gỡ
+  // khi rời/thả; bộ đếm dragenter/dragleave tránh nhấp nháy khi rê qua
+  // các phần tử con bên trong vùng. Thứ tự ưu tiên khi thả: (a) nếu
+  // kéo từ Explorer của VS Code mà đọc được danh sách URI dạng
+  // text/uri-list thì gửi URI về extension để xử lý theo đường dẫn
+  // (giữ được trích khung hình video bằng ffmpeg); (b) nếu không thì
+  // đọc File qua File API trong webview rồi gửi nội dung về extension
+  // (ảnh dạng dataUrl, văn bản dạng text, video/nhị phân không gửi
+  // nội dung để extension chỉ tạo note). Lưu ý chưa kiểm chứng được
+  // trên VS Code thật: webview có thể chặn hoàn toàn drop từ hệ điều
+  // hành, khi đó chỉ còn kéo từ Explorer + hộp chọn nhiều file là
+  // đường gửi nhiều file hoạt động được (xem README).
+  function readDroppedFile(file) {
+    return new Promise(function (resolve) {
+      var lower = (file.name || '').toLowerCase();
+      var isImage = (file.type || '').indexOf('image/') === 0
+        || /\.png$|\.jpg$|\.jpeg$|\.webp$|\.gif$/.test(lower);
+      var isVideo = (file.type || '').indexOf('video/') === 0
+        || /\.mp4$|\.mov$|\.webm$|\.avi$|\.mkv$/.test(lower);
+      if (isImage) {
+        var rd = new FileReader();
+        rd.onload = function () { resolve({ name: file.name, size: file.size, dataUrl: rd.result }); };
+        rd.onerror = function () { resolve({ name: file.name, size: file.size }); };
+        rd.readAsDataURL(file);
+        return;
+      }
+      if (isVideo) { resolve({ name: file.name, size: file.size }); return; }
+      var rt = new FileReader();
+      rt.onload = function () { resolve({ name: file.name, size: file.size, text: rt.result }); };
+      rt.onerror = function () { resolve({ name: file.name, size: file.size }); };
+      rt.readAsText(file);
+    });
+  }
+  function enableDropZone(el) {
+    if (!el) { return; }
+    var depth = 0;
+    el.addEventListener('dragenter', function (e) {
+      e.preventDefault();
+      depth++;
+      el.classList.add('drag-over');
+    });
+    el.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      if (e.dataTransfer) { e.dataTransfer.dropEffect = 'copy'; }
+      el.classList.add('drag-over');
+    });
+    el.addEventListener('dragleave', function (e) {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) { el.classList.remove('drag-over'); }
+    });
+    el.addEventListener('drop', function (e) {
+      e.preventDefault();
+      depth = 0;
+      el.classList.remove('drag-over');
+      var dt = e.dataTransfer;
+      if (!dt) { return; }
+      var uriList = '';
+      try { uriList = dt.getData('text/uri-list') || ''; } catch (err) { uriList = ''; }
+      var uris = uriList.split(/\r?\n/).map(function (s) { return s.trim(); })
+        .filter(function (s) { return s !== '' && s.charAt(0) !== '#'; });
+      if (uris.length > 0) {
+        vscode.postMessage({ type: 'dropUris', uris: uris });
+        return;
+      }
+      var files = dt.files ? Array.prototype.slice.call(dt.files) : [];
+      if (files.length === 0) { return; }
+      Promise.all(files.map(readDroppedFile)).then(function (items) {
+        vscode.postMessage({ type: 'dropFiles', files: items });
+      });
+    });
+  }
+  enableDropZone(document.querySelector('.composer'));
+  enableDropZone(attachmentsEl);
   document.getElementById('clearHistoryBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'clearHistory' });
   });

@@ -316,8 +316,12 @@ export interface WebThreadsResult { threads: WebThread[]; debug?: WebThreadsDebu
 // Đồng bộ web (v0.7.0, điểm 4): gateway trả thêm debug (chỉ số lượng,
 // không nội dung trang hay tiêu đề nhạy cảm) để thông báo "Đã thêm 0"
 // nêu rõ được lỗi ở khâu nào.
-export async function fetchWebThreads(baseUrl: string, apiKey: string, id: string): Promise<WebThreadsResult> {
-  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}/web-threads`, { method: 'POST' })) as Record<string, unknown>;
+// v0.8.12: forceTitles=true thêm ?forceTitles=true để gateway thăm dò
+// nút sidebar bất kể quét link được bao nhiêu thread (xem ListWebThreads
+// phía gateway); không có tham số thì giữ hành vi cũ.
+export async function fetchWebThreads(baseUrl: string, apiKey: string, id: string, forceTitles?: boolean): Promise<WebThreadsResult> {
+  const suffix = forceTitles ? '?forceTitles=true' : '';
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}/web-threads${suffix}`, { method: 'POST' })) as Record<string, unknown>;
   const arr = Array.isArray(data.data) ? data.data : [];
   const threads = arr
     .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null && typeof x.url === 'string')
@@ -394,6 +398,43 @@ export function resolveWebTitle(currentTitle: string, threadUrl: string, fetched
   if (!isFallbackWebTitle(currentTitle, threadUrl)) { return null; }
   if (fresh === fallbackWebTitle(threadUrl)) { return null; }
   return fresh.slice(0, 80);
+}
+
+// Quy tắc cập nhật title thread web, bản nới lỏng v0.8.12 (hàm thuần để
+// test đơn vị trực tiếp từ out/admin.js). Hàm cũ resolveWebTitle được
+// GIỮ NGUYÊN để không làm vỡ hành vi cũ một cách im lặng; các đường
+// đồng bộ/mở hội thoại từ 0.8.12 dùng hàm mới này.
+// - Title mới phải là thật: đã trim, khác rỗng, khác "Chat"/"Muse",
+//   khác chính dạng dự phòng của thread đó, khác title hiện tại
+//   (bằng nhau thì không có gì để đổi, trả null để khỏi đếm oan).
+// - Session có cờ sửa tay thì KHÔNG BAO GIỜ bị ghi đè tự động, kể cả
+//   ở chế độ ép buộc (force chỉ ép session import từ web chưa sửa tay).
+// - Chế độ thường: chỉ ghi đè khi title hiện tại là dự phòng
+//   "Hội thoại web <id>", rỗng, "Hội thoại mới" hoặc "Hội thoại 1".
+//   Title anchor trông như thật nhưng sai thì chế độ thường KHÔNG đổi,
+//   phải dùng lệnh ép buộc.
+// - Chế độ ép buộc: ghi đè mọi title hiện tại (trừ sửa tay) khi title
+//   mới là thật; caller vẫn phải tự giới hạn ép buộc cho session
+//   import từ web (xem syncFromWeb).
+export function resolveWebTitleUpdated(
+  currentTitle: string,
+  threadUrl: string,
+  fetchedTitle: string | null | undefined,
+  opts?: { titleEditedManually?: boolean; force?: boolean },
+): string | null {
+  if (opts?.titleEditedManually) { return null; }
+  if (!fetchedTitle) { return null; }
+  const fresh = fetchedTitle.trim();
+  if (!fresh) { return null; }
+  if (fresh.toLowerCase() === 'chat' || fresh.toLowerCase() === 'muse') { return null; }
+  if (fresh === fallbackWebTitle(threadUrl)) { return null; }
+  if (fresh === currentTitle) { return null; }
+  if (opts?.force) { return fresh.slice(0, 80); }
+  const current = (currentTitle || '').trim();
+  if (isFallbackWebTitle(currentTitle, threadUrl) || current === '' || current === 'Hội thoại mới' || current === 'Hội thoại 1') {
+    return fresh.slice(0, 80);
+  }
+  return null;
 }
 
 // Bộ lọc hiển thị hội thoại theo tài khoản (v0.8.8, hàm thuần):
