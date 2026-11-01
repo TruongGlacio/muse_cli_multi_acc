@@ -179,6 +179,28 @@ export async function deleteGatewayAccount(baseUrl: string, apiKey: string, id: 
   await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+export interface PurgeGatewayAccountResult {
+  deleted: string;
+  browserSessionDeleted: boolean;
+  mappingsDeleted: number;
+}
+
+// Xóa hoàn toàn (v0.8.0, DELETE /admin/accounts/{id}/purge): KHÁC
+// với Đăng xuất (DELETE /accounts/{id}) — purge còn xóa file browser
+// session và mọi mapping local-conversations của tài khoản đó trong
+// gateway. KHÔNG xóa tài khoản trên muse.ai, KHÔNG đăng xuất app Muse
+// desktop. Session trong extension do settings.ts xóa tiếp sau khi
+// purge trả về (xem purgeAccountSessions trong extension.ts).
+export async function purgeGatewayAccount(baseUrl: string, apiKey: string, id: string): Promise<PurgeGatewayAccountResult> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}/purge`, { method: 'DELETE' },
+    'Tài khoản này không còn trong pool của gateway (có thể đã bị xóa hoàn toàn trước đó).')) as Record<string, unknown>;
+  return {
+    deleted: String(data.deleted || id),
+    browserSessionDeleted: data.browser_session_deleted === true,
+    mappingsDeleted: typeof data.mappings_deleted === 'number' ? data.mappings_deleted : 0,
+  };
+}
+
 // Hồ sơ tài khoản (v0.7.0): cập nhật Email/Username/Phone best-effort
 // cho một tài khoản, không cần đăng nhập lại. Trả về account mới +
 // profileFound (có lấy được danh tính nào không). Email/phone trong

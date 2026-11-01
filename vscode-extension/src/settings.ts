@@ -21,7 +21,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { GatewayManager } from './gateway';
-import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, patchGatewayAccountLabel, deleteGatewayAccount, fetchGatewayAccountQuota, formatCooldown, startBrowserLogin, getBrowserLoginStatus, cancelBrowserLogin, refreshGatewayAccountProfile, mergeGatewayDuplicates } from './admin';
+import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, patchGatewayAccountLabel, deleteGatewayAccount, purgeGatewayAccount, fetchGatewayAccountQuota, formatCooldown, startBrowserLogin, getBrowserLoginStatus, cancelBrowserLogin, refreshGatewayAccountProfile, mergeGatewayDuplicates } from './admin';
 
 export interface SettingsSessionInfo {
   id: string;
@@ -59,6 +59,10 @@ export class MuseSettingsPanel {
     // v0.7.0: sau khi gộp trùng, khung chat đổi accountId của session
     // mình sang tài khoản chính (mergedIds -> primaryId/primaryLabel).
     onMerged?: (remap: Record<string, { primaryId: string; primaryLabel: string }>) => void,
+    // v0.8.0: sau khi gateway purge xong, extension xóa session của
+    // tài khoản đó khỏi store chung; callback trả số session đã xóa
+    // để hiện thông báo cụ thể (không chỉ "Đã xóa").
+    onPurged?: (accountId: string) => number,
   ): void {
     if (MuseSettingsPanel.current) {
       MuseSettingsPanel.current.panel.reveal(vscode.ViewColumn.Beside);
@@ -70,7 +74,7 @@ export class MuseSettingsPanel {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
     });
-    MuseSettingsPanel.current = new MuseSettingsPanel(panel, context, gateway, onAccountsChanged, getSessions, onMerged);
+    MuseSettingsPanel.current = new MuseSettingsPanel(panel, context, gateway, onAccountsChanged, getSessions, onMerged, onPurged);
     panel.onDidDispose(() => {
       const inst = MuseSettingsPanel.current;
       if (inst?.browserLoginTimer) { clearInterval(inst.browserLoginTimer); inst.browserLoginTimer = undefined; }
@@ -101,6 +105,7 @@ export class MuseSettingsPanel {
     private readonly onAccountsChanged: () => void,
     private readonly getSessions: () => SettingsSessionInfo[],
     private readonly onMerged?: (remap: Record<string, { primaryId: string; primaryLabel: string }>) => void,
+    private readonly onPurged?: (accountId: string) => number,
   ) {
     const base = vscode.Uri.joinPath(context.extensionUri, 'media');
     const read = (name: string): string => fs.readFileSync(vscode.Uri.joinPath(base, name).fsPath, 'utf8');
@@ -367,6 +372,22 @@ export class MuseSettingsPanel {
         if (answer !== 'Đăng xuất') { return; }
         await deleteGatewayAccount(info.baseUrl, info.apiKey, id);
         void vscode.window.showInformationMessage('Đã đăng xuất tài khoản khỏi gateway.');
+      } else if (action === 'purge') {
+        // Xóa hoàn toàn (v0.8.0) — RIÊNG BIỆT với Đăng xuất ở trên và
+        // không đổi hành vi của Đăng xuất. Hộp xác nhận phải liệt kê
+        // đúng những gì sẽ mất, và nói rõ hai điều KHÔNG xảy ra:
+        // không xóa tài khoản trên muse.ai, không đăng xuất app Muse
+        // desktop; chạy lại "Nhập đăng nhập từ app desktop" sẽ đưa
+        // tài khoản quay lại gateway (hành vi đúng của lệnh nhập).
+        const sessionsUsing = this.getSessions().filter((s) => s.accountId === id);
+        const answer = await vscode.window.showWarningMessage(
+          `Xóa hoàn toàn tài khoản này khỏi gateway và extension? Những thứ sau sẽ mất và không khôi phục được: (1) tài khoản khỏi pool của gateway và file lưu; (2) file phiên trình duyệt của tài khoản này trong gateway; (3) các mapping thread của tài khoản này trong gateway; (4) TOÀN BỘ ${sessionsUsing.length} session trong extension đang dùng tài khoản này, kèm lịch sử chat của chúng trong extension. Thao tác này KHÔNG xóa tài khoản của bạn trên muse.ai và KHÔNG đăng xuất app Muse desktop (app desktop giữ đăng nhập riêng của nó). Nếu sau này bạn chạy lại "Nhập đăng nhập từ app desktop" thì tài khoản này sẽ quay lại gateway — đó là hành vi đúng của lệnh nhập, không phải lỗi xóa chưa sạch.`,
+          { modal: true }, 'Xóa hoàn toàn', 'Hủy');
+        if (answer !== 'Xóa hoàn toàn') { return; }
+        const res = await purgeGatewayAccount(info.baseUrl, info.apiKey, id);
+        const removedSessions = this.onPurged ? this.onPurged(id) : 0;
+        void vscode.window.showInformationMessage(
+          `Đã xóa hoàn toàn tài khoản khỏi gateway và extension: file phiên trình duyệt ${res.browserSessionDeleted ? 'đã xóa' : 'vốn không có'}, ${res.mappingsDeleted} mapping thread trong gateway đã xóa, ${removedSessions} session trong extension đã xóa. Tài khoản trên muse.ai và app Muse desktop không bị ảnh hưởng.`);
       }
     } catch (e) {
       void vscode.window.showErrorMessage(`Không thực hiện được thao tác tài khoản: ${e instanceof Error ? e.message : String(e)}`);

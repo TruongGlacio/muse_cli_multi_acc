@@ -301,6 +301,20 @@
         badge.className = 'status-badge status-' + (s.accountStatus || 'stopped');
         badge.textContent = s.accountStatus === 'running' ? 'Đang chạy' : s.accountStatus === 'loggedout' ? 'Đã logout' : 'Đã dừng';
         item.appendChild(badge);
+        // Mở tab mới (v0.8.0, việc 3): span (không phải button lồng
+        // trong button) để mở session này trong một tab editor riêng,
+        // kéo sang nhóm bên cạnh để xem song song. stopPropagation để
+        // bấm nút này không đồng thời chuyển session của sidebar/panel
+        // hiện tại. Đóng tab không xóa session.
+        var openTab = document.createElement('span');
+        openTab.className = 'open-tab-btn';
+        openTab.textContent = '↗ Tab mới';
+        openTab.title = 'Mở hội thoại này trong tab mới (xem song song với hội thoại hiện tại)';
+        openTab.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          vscode.postMessage({ type: 'openInNewTab', id: s.id });
+        });
+        item.appendChild(openTab);
         item.addEventListener('click', function () {
           // Cột trái vẫn mở sau khi chuyển session (không còn drawer để đóng).
           vscode.postMessage({ type: 'switchSession', id: s.id });

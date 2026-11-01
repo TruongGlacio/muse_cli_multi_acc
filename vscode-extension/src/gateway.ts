@@ -93,7 +93,18 @@ export class GatewayManager {
   // Callback cho panel Nhật ký (v0.6.0): gọi cho mỗi dòng mới vào
   // buffer, để provider chat đẩy sang webview ngay khi dòng tới.
   // Provider đăng ký callback này; gateway không tự biết webview.
+  // v0.8.0: onLog là callback ĐƠN (giữ để tương thích), nhưng sidebar
+  // và mỗi tab chat đều cần nhận dòng log nên provider dùng
+  // addLogListener (nhiều listener, mỗi bề mặt tự hủy đăng ký khi
+  // panel đóng). Gán trực tiếp onLog sẽ GHI ĐÈ listener duy nhất cũ
+  // và làm các bề mặt khác mất log, nên từ v0.8.0 không bề mặt nào
+  // được gán onLog nữa — xem extension.ts.
   onLog?: (line: string) => void;
+  private logListeners = new Set<(line: string) => void>();
+  addLogListener(fn: (line: string) => void): () => void {
+    this.logListeners.add(fn);
+    return () => { this.logListeners.delete(fn); };
+  }
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -325,6 +336,9 @@ export class GatewayManager {
     this.lastLines.push(clean);
     if (this.lastLines.length > 1000) { this.lastLines.splice(0, this.lastLines.length - 1000); }
     this.onLog?.(clean);
+    for (const fn of [...this.logListeners]) {
+      try { fn(clean); } catch { /* một bề mặt lỗi không chặn log của bề mặt khác */ }
+    }
   }
 
   // Panel Nhật ký (v0.6.0): cửa sổ xem 1000 dòng gần nhất. Trả bản sao

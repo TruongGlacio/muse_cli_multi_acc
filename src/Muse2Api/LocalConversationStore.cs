@@ -69,6 +69,29 @@ public sealed class LocalConversationStore(string dataDirectory)
         return rewritten;
     }
 
+    // Xóa hoàn toàn (v0.8.0, DELETE /admin/accounts/{id}/purge): xóa
+    // CHỈ các file mà Entry.Account == Hash(accountId), tái dùng đúng
+    // hàm Hash nội bộ (giống ReassignAccount). File hỏng thì bỏ qua
+    // (không vỡ cả quá trình purge); file của tài khoản khác không
+    // đụng tới. Trả số file đã xóa thành công.
+    public int DeleteAccountMappings(string accountId)
+    {
+        var dir = Path.Combine(dataDirectory, "local-conversations");
+        if (!Directory.Exists(dir)) return 0;
+        var targetHash = Hash(accountId);
+        var deleted = 0;
+        foreach (var file in Directory.EnumerateFiles(dir, "*.json"))
+        {
+            Entry entry;
+            try { entry = JsonSerializer.Deserialize<Entry>(File.ReadAllText(file)) ?? throw new JsonException(); }
+            catch { continue; }
+            if (entry.Account != targetHash) continue;
+            try { File.Delete(file); deleted++; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* bỏ qua file không xóa được */ }
+        }
+        return deleted;
+    }
+
     public static bool IsThread(string url)
         => Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https"
             && uri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase) && uri.IsDefaultPort

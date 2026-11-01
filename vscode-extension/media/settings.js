@@ -141,6 +141,13 @@
       row.appendChild(actionBtn(a.enabled ? 'Tắt' : 'Bật', 'toggle', a.id));
       row.appendChild(actionBtn('Đổi tên nhãn', 'rename', a.id));
       row.appendChild(actionBtn('Đăng xuất', 'logout', a.id));
+      // Xóa hoàn toàn (v0.8.0) — nút RIÊNG BIỆT với Đăng xuất: mở hộp
+      // xác nhận liệt kê đúng những gì sẽ mất (xem settings.ts) rồi
+      // mới gọi purge. Không xóa tài khoản trên muse.ai, không đăng
+      // xuất app Muse desktop.
+      var purgeBtn = actionBtn('Xóa hoàn toàn', 'purge', a.id);
+      purgeBtn.title = 'Xóa tài khoản khỏi pool gateway + file phiên trình duyệt + mapping thread + toàn bộ session extension dùng tài khoản này. Không xóa tài khoản trên muse.ai, không đăng xuất app Muse desktop.';
+      row.appendChild(purgeBtn);
       card.appendChild(row);
       accountListEl.appendChild(card);
     });

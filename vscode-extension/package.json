@@ -25,7 +25,8 @@
     "onCommand:muse.syncFromWeb",
     "onCommand:muse.generateImage",
     "onCommand:muse.editImage",
-    "onCommand:muse.generateVideo"
+    "onCommand:muse.generateVideo",
+    "onCommand:muse.openSessionInNewTab"
   ],
   "categories": [
     "Other"
@@ -151,6 +152,10 @@
       {
         "command": "muse.generateVideo",
         "title": "Muse: Tạo video"
+      },
+      {
+        "command": "muse.openSessionInNewTab",
+        "title": "Muse: Mở hội thoại trong tab mới"
       }
     ],
     "configuration": {
@@ -255,7 +260,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.7.0",
+  "version": "0.8.0",
   "extensionKind": [
     "ui",
     "workspace"

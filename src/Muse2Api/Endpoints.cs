@@ -754,6 +754,35 @@ public static class Endpoints
             await s.Driver.InvalidateAccount(id);
             return Results.Json(new JsonObject { ["deleted"] = id });
         });
+        // ---------- xóa hoàn toàn tài khoản khỏi gateway (v0.8.0) ----------
+        // KHÁC với DELETE /accounts/{id} ("Đăng xuất", giữ nguyên hành
+        // vi cũ): purge còn xóa file browser session của tài khoản đó
+        // và mọi mapping local-conversations của nó. KHÔNG gọi bất kỳ
+        // API xóa tài khoản nào của muse.ai, KHÔNG đăng xuất app Muse
+        // desktop (app desktop giữ đăng nhập riêng của nó); chạy lại
+        // "Nhập đăng nhập từ app desktop" sẽ đưa tài khoản quay lại
+        // gateway — đó là hành vi đúng của lệnh nhập, không phải lỗi
+        // xóa chưa sạch. KHÔNG xóa file accounts.json.bak-* (chỉ là sao
+        // lưu toàn bộ file lúc nhập, không tự khôi phục). Thứ tự:
+        // Pool.Remove (đã Persist trong Remove) -> InvalidateAccount
+        // -> xóa file browser session (thiếu thì bỏ qua) -> xóa mapping.
+        // Purge lần 2 trên cùng id trả 404 (Pool.Remove false), không
+        // báo thành công giả. sessions trong extension do chính
+        // extension xóa sau khi purge trả về (xem purgeGatewayAccount).
+        admin.MapDelete("/accounts/{id}/purge", async (HttpContext ctx, string id) =>
+        {
+            RequireAdmin(ctx, s);
+            if (!s.Pool.Remove(id)) throw MuseException.NotFound($"account '{id}' not found");
+            await s.Driver.InvalidateAccount(id);
+            var browserSessionDeleted = new BrowserSessionStore(s.Settings.DataDir).DeleteById(id);
+            var mappingsDeleted = new LocalConversationStore(s.Settings.DataDir).DeleteAccountMappings(id);
+            return Results.Json(new JsonObject
+            {
+                ["deleted"] = id,
+                ["browser_session_deleted"] = browserSessionDeleted,
+                ["mappings_deleted"] = mappingsDeleted,
+            });
+        });
         admin.MapPost("/accounts/{id}/reset", (HttpContext ctx, string id) =>
         {
             RequireAdmin(ctx, s);
