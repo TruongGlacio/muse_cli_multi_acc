@@ -26,7 +26,9 @@
     "onCommand:muse.generateImage",
     "onCommand:muse.editImage",
     "onCommand:muse.generateVideo",
-    "onCommand:muse.openSessionInNewTab"
+    "onCommand:muse.openSessionInNewTab",
+    "onCommand:muse.allowReimportDeleted",
+    "onCommand:muse.toggleLocalTools"
   ],
   "categories": [
     "Other"
@@ -156,6 +158,14 @@
       {
         "command": "muse.openSessionInNewTab",
         "title": "Muse: Mở hội thoại trong tab mới"
+      },
+      {
+        "command": "muse.allowReimportDeleted",
+        "title": "Muse: Cho phép nhập lại các hội thoại đã xóa"
+      },
+      {
+        "command": "muse.toggleLocalTools",
+        "title": "Muse: Bật/Tắt tool cục bộ"
       }
     ],
     "configuration": {
@@ -169,6 +179,11 @@
           "default": false,
           "description": "Bật để tự duyệt mọi thao tác ghi tệp và chạy lệnh. Mặc định là tắt: mỗi thao tác ghi/chạy đều hỏi duyệt, và thao tác sửa tệp có nút Xem diff.",
           "type": "boolean"
+        },
+        "muse.localTools": {
+          "type": "boolean",
+          "default": true,
+          "description": "Bật tool cục bộ cho agent (đọc/sửa/chạy trong workspace). Tắt (false) thì agent chỉ trò chuyện: không dùng tool, không quét workspace, không gửi dữ liệu workspace lên model qua tool. Đổi nhanh bằng lệnh 'Muse: Bật/Tắt tool cục bộ'."
         },
         "muse.baseUrl": {
           "default": "http://127.0.0.1:18610/v1",
@@ -260,7 +275,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.8.1",
+  "version": "0.8.2",
   "extensionKind": [
     "ui",
     "workspace"

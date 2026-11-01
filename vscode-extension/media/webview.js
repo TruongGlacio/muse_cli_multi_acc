@@ -276,6 +276,10 @@
         empty.textContent = 'Chưa có hội thoại nào. Bấm "Hội thoại mới" để bắt đầu.';
         sessionListEl.appendChild(empty);
       }
+      if (sessions.length === 0) {
+        currentSessionLabel.textContent = 'Chưa có hội thoại nào.';
+        if (currentSessionAccountEl) { currentSessionAccountEl.textContent = ''; }
+      }
       sessions.forEach(function (s) {
         var item = document.createElement('button');
         item.className = 'session-item' + (s.id === m.currentId ? ' current' : '');
@@ -315,6 +319,19 @@
           vscode.postMessage({ type: 'openInNewTab', id: s.id });
         });
         item.appendChild(openTab);
+        // v0.8.2, việc 2a: nút xóa trên từng item (span, không lồng
+        // button trong button, như nút Tab mới). Bấm thì xác nhận rồi
+        // xóa ĐÚNG session đó, không cần mở nó trước; panel/tab đang
+        // mở session đó nhận notify và chuyển đi, không kẹt.
+        var delBtn = document.createElement('span');
+        delBtn.className = 'delete-session-btn';
+        delBtn.textContent = '✕ Xóa';
+        delBtn.title = 'Xóa hội thoại này (chỉ xóa trong extension và mapping gateway, thread gốc vẫn còn trên web muse.ai)';
+        delBtn.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          vscode.postMessage({ type: 'deleteSessionById', id: s.id });
+        });
+        item.appendChild(delBtn);
         item.addEventListener('click', function () {
           // Cột trái vẫn mở sau khi chuyển session (không còn drawer để đóng).
           vscode.postMessage({ type: 'switchSession', id: s.id });

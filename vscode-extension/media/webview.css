@@ -29,6 +29,9 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 /* Nút mở tab mới (v0.8.0): span trong item session (không lồng button
    trong button), đủ nhỏ để item không chật, vẫn bấm được riêng biệt. */
 .open-tab-btn { display: inline-block; margin-top: 4px; margin-left: 6px; padding: 1px 7px; border-radius: 10px; font-size: 11px; cursor: pointer; background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+/* Nút xóa trên từng item (v0.8.2, việc 2a): cùng kích cỡ nút Tab mới
+   để item không chật, nền đỏ nhạt để phân biệt thao tác xóa. */
+.delete-session-btn { display: inline-block; margin-top: 4px; margin-left: 6px; padding: 1px 7px; border-radius: 10px; font-size: 11px; cursor: pointer; background: rgba(255, 80, 80, 0.25); color: inherit; }
 .status-badge.status-loggedout { background: rgba(255, 80, 80, 0.25); color: inherit; }
 #messages { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 #logPanel { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; margin-bottom: 10px; }

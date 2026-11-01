@@ -1045,117 +1045,383 @@ public sealed class BrowserDriver : IMuseDriver
         return new WebThreadsScan(threads, page.Url, linkCount, loginHint);
     }
 
-    // ---------- lấy hồ sơ tài khoản, best-effort (v0.7.0) ----------
-    // Dùng page TẠM trong đúng context của tài khoản, như ListWebThreads:
-    // không dùng tab chat đang chạy, đóng page sau khi đọc. KHÔNG mở
-    // thread để tìm email (email trong hội thoại có thể là của người
-    // khác). Trong code hiện có KHÔNG có URL trang cài đặt tài khoản
-    // nào (chỉ có trang chủ và /thread/new), nên chỉ đọc trang chủ;
-    // không đoán URL cài đặt rồi coi 404 là lỗi.
-    // - Email: regex trong text trang chủ, ưu tiên vùng menu hồ sơ
-    //   (candidates) rồi tiêu đề, cuối cùng mới toàn bộ text.
-    // - Username/tên hiển thị: best-effort từ aria-label/innerText của
-    //   nút hồ sơ/avatar hoặc phần đầu tiêu đề trang; không xác định
-    //   được thì null (PHỎNG ĐOÁN về cấu trúc DOM thật của muse.ai,
-    //   chưa kiểm chứng bằng mắt trên Windows — xem README).
-    // - Phone: CHỈ khi có dòng gắn nhãn rõ ràng "Phone"/"Số điện thoại"/
-    //   "Điện thoại" kèm số, hoặc input type=tel; KHÔNG regex số tự do.
-    //   Trong đa số trường hợp phone vẫn là null.
-    // Không lấy được gì thì trả null (để nguyên tài khoản), không lỗi.
-    // Chỉ ném Auth khi bị đẩy về trang đăng nhập (phiên hết hạn thật).
-    // Email/phone lấy được KHÔNG được log (chỉ trả về caller để lưu
-    // vào Account và hiện trong panel Cài đặt).
+    // ---------- lấy hồ sơ tài khoản, best-effort (v0.8.2, viết lại từ v0.7.0) ----------
+    // Nguyên nhân lỗi 0.8.1: bản cũ chỉ mở trang chủ, chờ 2,5 giây, đọc
+    // innerText + vài nút hồ sơ mà KHÔNG bấm mở menu hồ sơ, KHÔNG vào
+    // trang cài đặt/tài khoản, KHÔNG đọc HTML nhúng hay localStorage,
+    // KHÔNG gọi API phiên. Trên trang chủ, email gần như chắc chắn
+    // không hiện dưới dạng text nhìn thấy (menu hồ sơ thường chỉ hiện
+    // avatar/tên, email chỉ hiện khi bấm mở menu hoặc vào trang cài
+    // đặt), nên regex email trên text trang chủ gần như luôn về rỗng.
+    // Bản này làm nhiều bước best-effort theo thứ tự, bước nào lấy
+    // được thì dùng, bước nào thất bại thì bỏ qua không lỗi cả quá
+    // trình, KHÔNG BAO GIỜ log email/phone hay toàn bộ JSON:
+    //  1. API phiên /api/session bằng HttpClient với cookie của tài
+    //     khoản: đọc toàn bộ JSON, tìm đệ quy các khóa user/email/
+    //     username/name/phone (chỉ lấy giá trị chuỗi).
+    //  2. Trang chủ như cũ (text + candidates) cộng regex email trên
+    //     toàn bộ outerHTML (bắt email trong JSON nhúng/hydration mà
+    //     innerText không thấy). Vẫn KHÔNG mở thread để tìm email.
+    //  3. Bấm mở menu hồ sơ (selector nút avatar/hồ sơ, xem script):
+    //     bấm không được thì bỏ qua, không lỗi.
+    //  4. Nếu menu đã mở, bấm mục menu Settings/Cài đặt/Account/Tài
+    //     khoản để vào trang cài đặt (đi theo menu thật, KHÔNG đoán
+    //     URL cài đặt rồi coi 404 là lỗi); đọc lại text + trường gắn
+    //     nhãn Phone/Số điện thoại/Điện thoại + input tel.
+    //  5. Quét localStorage của trang (đúng context của tài khoản) để
+    //     tìm email bằng regex trong các giá trị trông như đối tượng
+    //     user, làm bước cuối cùng.
+    //  6. Trả kèm ProfileDebug (chỉ tên bước, trạng thái, URL cuối,
+    //     menu/cài đặt có mở được không, số candidate — không chứa
+    //     email/phone) để endpoint profile-refresh trả về cho panel
+    //     Cài đặt hiện chẩn đoán ngắn gọn khi không lấy được gì.
+    // Phiên hết hạn thật thì vẫn lỗi Auth: API phiên trả 401/403, hoặc
+    // trang chủ bị đẩy khỏi muse.ai / hiện gợi ý đăng nhập trong khi
+    // API phiên cũng không xác nhận được phiên.
+    // Phone: chỉ khi trang cài đặt thực sự có trường phone gắn nhãn
+    // hoặc API phiên trả về phone; trong đa số trường hợp phone vẫn
+    // trống vì Muse không dùng số điện thoại làm thông tin hồ sơ — đó
+    // là hành vi đúng, không phải lỗi (xem README).
+    // Selector nút avatar/menu cài đặt là PHỎNG ĐOÁN về DOM thật của
+    // muse.ai, chưa kiểm chứng bằng mắt trên Windows — xem README.
     public async Task<ProfileInfo?> FetchProfile(Account account, CancellationToken cancel = default)
+        => (await FetchProfileDetailed(account, cancel)).Profile;
+
+    public async Task<(ProfileInfo? Profile, ProfileDebug Debug)> FetchProfileDetailed(Account account, CancellationToken cancel = default)
     {
         if (Upstream.MissingSessionCookies(account.Cookies) is { Count: > 0 })
             throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
-        var context = await GetContext(account);
-        var page = await context.NewPageAsync();
+        var attempted = new List<string>();
+        var succeeded = new List<string>();
+        var failed = new List<string>();
+        string? email = null;
+        string? username = null;
+        string? phone = null;
+        var candidateCount = 0;
+        var sessionApiOk = false;
+
+        // ---- Bước 1: API phiên ----
+        attempted.Add("session_api");
         try
         {
-            await page.GotoAsync(Upstream.Site,
-                new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-            await Task.Delay(TimeSpan.FromSeconds(2.5), cancel);
-            var result = await Eval(page, """
-                (() => {
-                  const seen = new Set();
-                  const candidates = [];
-                  const push = (v) => {
-                    const t = (v || '').trim().replace(/\s+/g, ' ');
-                    if (t && t.length <= 120 && !seen.has(t)) { seen.add(t); candidates.push(t); }
-                  };
-                  document.querySelectorAll('button[aria-label], [role="button"][aria-label]').forEach(e => push(e.getAttribute('aria-label')));
-                  document.querySelectorAll('[data-testid]').forEach(e => {
-                    const id = (e.getAttribute('data-testid') || '').toLowerCase();
-                    if (id.includes('profile') || id.includes('avatar') || id.includes('account') || id.includes('user')) push(e.innerText);
-                  });
-                  document.querySelectorAll('header button, header [role="button"]').forEach(e => push(e.innerText || e.getAttribute('aria-label')));
-                  const tel = document.querySelector('input[type="tel"]');
-                  return {
-                    text: (document.body ? document.body.innerText.slice(0, 12000) : ''),
-                    title: document.title || '',
-                    candidates: candidates.slice(0, 20),
-                    telValue: tel ? (tel.value || '') : '',
-                  };
-                })()
-                """, cancel);
-            if (result is not System.Text.Json.Nodes.JsonObject obj)
-                return null;
-            if (!Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
-                || !pageUri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase))
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            client.DefaultRequestHeaders.Add("User-Agent", Upstream.UserAgent);
+            client.DefaultRequestHeaders.Add("Accept", "application/json");
+            using var req = new HttpRequestMessage(HttpMethod.Get, Upstream.SessionApi);
+            req.Headers.Add("Cookie", Upstream.CookieHeader(account.Cookies));
+            req.Headers.Referrer = new Uri(Upstream.Site);
+            using var resp = await client.SendAsync(req, cancel);
+            if ((int)resp.StatusCode is 401 or 403)
                 throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
-            var text = Str(obj, "text") ?? "";
-            var head = text.Length > 2000 ? text[..2000].ToLowerInvariant() : text.ToLowerInvariant();
-            if (Dom.LoginHints.Any(h => head.Contains(h)))
-                throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
-            var email = FindEmail(Str(obj, "title") ?? "");
-            var candidates = new List<string>();
-            if (obj["candidates"] is System.Text.Json.Nodes.JsonArray arr)
-                foreach (var item in arr)
-                    if (item?.GetValue<string>() is { } c) candidates.Add(c);
-            foreach (var c in candidates)
+            if (resp.IsSuccessStatusCode)
             {
-                var found = FindEmail(c);
-                if (found is not null) { email = found; break; }
-            }
-            email ??= FindEmail(text);
-            string? username = null;
-            foreach (var c in candidates)
-            {
-                var cleaned = CleanProfileCandidate(c);
-                if (cleaned is not null) { username = cleaned; break; }
-            }
-            if (username is null)
-            {
-                // Tiêu đề dạng "Tên — Muse"/"Tên | Muse": lấy phần đầu
-                // nếu trông như tên hiển thị, không phải từ chung.
-                var title = Str(obj, "title") ?? "";
-                foreach (var sep in new[] { " — ", " - ", " | ", " · " })
+                var text = await resp.Content.ReadAsStringAsync(cancel);
+                string? nameFallback = null;
+                void Walk(System.Text.Json.Nodes.JsonNode? node)
                 {
-                    if (!title.Contains(sep)) continue;
-                    var first = title.Split(sep)[0].Trim();
-                    if (first.Length >= 3 && first.Length <= 60
-                        && !new[] { "muse", "home", "trang chủ", "chat" }.Contains(first.ToLowerInvariant()))
-                    { username = first; break; }
+                    if (node is System.Text.Json.Nodes.JsonObject obj)
+                    {
+                        foreach (var (key, value) in obj)
+                        {
+                            if (value is System.Text.Json.Nodes.JsonValue v
+                                && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s))
+                            {
+                                switch (key.ToLowerInvariant())
+                                {
+                                    case "email": email ??= s.Trim(); break;
+                                    case "username": username ??= s.Trim(); break;
+                                    case "name": nameFallback ??= s.Trim(); break;
+                                    case "phone": phone ??= s.Trim(); break;
+                                }
+                            }
+                            Walk(value);
+                        }
+                    }
+                    else if (node is System.Text.Json.Nodes.JsonArray arr)
+                    {
+                        foreach (var item in arr) Walk(item);
+                    }
+                }
+                try
+                {
+                    Walk(System.Text.Json.Nodes.JsonNode.Parse(text));
+                    username ??= nameFallback;
+                    sessionApiOk = true;
+                    succeeded.Add("session_api");
+                }
+                catch { failed.Add("session_api"); }
+            }
+            else failed.Add("session_api");
+        }
+        catch (UpstreamException) { throw; }
+        catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
+        catch { if (!failed.Contains("session_api")) failed.Add("session_api"); }
+
+        // ---- Các bước trình duyệt (trang tạm, đúng context) ----
+        var context = await GetContext(account);
+        var page = await context.NewPageAsync();
+        var finalUrl = Upstream.Site;
+        var menuOpened = false;
+        var settingsOpened = false;
+        var homeUsable = false;
+        try
+        {
+            // ---- Bước 2: trang chủ (+ outerHTML) ----
+            attempted.Add("home");
+            try
+            {
+                await page.GotoAsync(Upstream.Site,
+                    new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                await Task.Delay(TimeSpan.FromSeconds(2.5), cancel);
+                finalUrl = page.Url;
+                var read = await ReadProfilePage(page, cancel);
+                if (read is null) { failed.Add("home"); }
+                else
+                {
+                    if (!Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
+                        || !pageUri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!sessionApiOk)
+                            throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+                        failed.Add("home");
+                    }
+                    else
+                    {
+                        var head = (read.Text.Length > 2000 ? read.Text[..2000] : read.Text).ToLowerInvariant();
+                        if (Dom.LoginHints.Any(h => head.Contains(h)) && !sessionApiOk)
+                            throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+                        if (Dom.LoginHints.Any(h => head.Contains(h))) { failed.Add("home"); }
+                        else
+                        {
+                            MergeProfilePage(read, ref email, ref username, ref phone, ref candidateCount);
+                            homeUsable = true;
+                            succeeded.Add("home");
+                        }
+                    }
                 }
             }
-            string? phone = null;
-            var telValue = Str(obj, "telValue") ?? "";
-            if (IsPhoneLike(telValue)) phone = telValue.Trim();
-            if (phone is null)
+            catch (UpstreamException) { throw; }
+            catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
+            catch { if (!failed.Contains("home") && !succeeded.Contains("home")) failed.Add("home"); }
+
+            // ---- Bước 3: bấm mở menu hồ sơ ----
+            if (homeUsable)
             {
-                foreach (var line in text.Split('\n'))
+                attempted.Add("menu");
+                try
                 {
-                    var m = System.Text.RegularExpressions.Regex.Match(line,
-                        @"^\s*(Phone|Số điện thoại|Điện thoại)\s*[:：]\s*(.+?)\s*$",
-                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                    if (m.Success && IsPhoneLike(m.Groups[2].Value)) { phone = m.Groups[2].Value.Trim(); break; }
+                    var click = await Eval(page, """
+                        (() => {
+                          const els = [...document.querySelectorAll('button, [role="button"], a')];
+                          const isMenuBtn = (e) => {
+                            const label = (((e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || ''))).toLowerCase();
+                            const testid = (e.getAttribute('data-testid') || '').toLowerCase();
+                            if (label.includes('profile') || label.includes('account') || label.includes('user') || label.includes('hồ sơ') || label.includes('tài khoản')) return true;
+                            if (testid.includes('avatar') || testid.includes('profile') || testid.includes('account')) return true;
+                            if (e.querySelector('img') && e.closest('header')) return true;
+                            return false;
+                          };
+                          const btn = els.find(isMenuBtn);
+                          if (!btn) return { clicked: false };
+                          try { btn.click(); } catch { return { clicked: false }; }
+                          return { clicked: true };
+                        })()
+                        """, cancel);
+                    var clicked = click is System.Text.Json.Nodes.JsonObject clickObj
+                        && clickObj["clicked"] is System.Text.Json.Nodes.JsonValue cv
+                        && cv.TryGetValue<bool>(out var cb) && cb;
+                    if (!clicked) { failed.Add("menu"); }
+                    else
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(1.5), cancel);
+                        finalUrl = page.Url;
+                        var menuRead = await ReadProfilePage(page, cancel);
+                        if (menuRead is not null) MergeProfilePage(menuRead, ref email, ref username, ref phone, ref candidateCount);
+                        var menuCheck = await Eval(page, """
+                            (() => ({ menuFound: !!document.querySelector('[role="menu"], [role="menuitem"]') }))()
+                            """, cancel);
+                        menuOpened = menuCheck is System.Text.Json.Nodes.JsonObject mc
+                            && mc["menuFound"] is System.Text.Json.Nodes.JsonValue mv
+                            && mv.TryGetValue<bool>(out var mb) && mb;
+                        // Menu có thể mở mà không dùng role=menu: nếu
+                        // sau khi bấm mà đọc được thêm candidate chứa
+                        // Settings/Cài đặt thì cũng coi là đã mở.
+                        if (!menuOpened && menuRead is not null)
+                            menuOpened = menuRead.Candidates.Any(c =>
+                                c.Equals("Settings", StringComparison.OrdinalIgnoreCase)
+                                || c.Equals("Cài đặt", StringComparison.OrdinalIgnoreCase));
+                        if (menuOpened) succeeded.Add("menu"); else failed.Add("menu");
+                    }
                 }
+                catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
+                catch { if (!failed.Contains("menu") && !succeeded.Contains("menu")) failed.Add("menu"); }
             }
-            if (email is null && username is null && phone is null) return null;
-            return new ProfileInfo(email, username, phone);
+
+            // ---- Bước 4: bấm mục menu vào trang cài đặt ----
+            if (menuOpened)
+            {
+                attempted.Add("settings");
+                try
+                {
+                    var beforeUrl = page.Url;
+                    var click = await Eval(page, """
+                        (() => {
+                          const els = [...document.querySelectorAll('a, button, [role="menuitem"]')];
+                          const labelOf = (e) => ((e.innerText || '') + ' ' + (e.getAttribute('aria-label') || '')).trim().toLowerCase();
+                          const isSettings = (e) => {
+                            const t = labelOf(e);
+                            return t === 'settings' || t === 'cài đặt' || t === 'account' || t === 'tài khoản'
+                              || t.startsWith('settings ') || t.startsWith('cài đặt ');
+                          };
+                          const inMenu = els.filter(e => e.getAttribute('role') === 'menuitem' || e.closest('[role="menu"]'));
+                          const btn = inMenu.find(isSettings) || els.find(isSettings);
+                          if (!btn) return { clicked: false };
+                          try { btn.click(); } catch { return { clicked: false }; }
+                          return { clicked: true };
+                        })()
+                        """, cancel);
+                    var clicked = click is System.Text.Json.Nodes.JsonObject clickObj
+                        && clickObj["clicked"] is System.Text.Json.Nodes.JsonValue cv
+                        && cv.TryGetValue<bool>(out var cb) && cb;
+                    if (!clicked) { failed.Add("settings"); }
+                    else
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(2), cancel);
+                        finalUrl = page.Url;
+                        var settingsRead = await ReadProfilePage(page, cancel);
+                        if (settingsRead is not null) MergeProfilePage(settingsRead, ref email, ref username, ref phone, ref candidateCount);
+                        settingsOpened = !string.Equals(page.Url, beforeUrl, StringComparison.OrdinalIgnoreCase)
+                            || (settingsRead is not null && (settingsRead.Text.Contains("Settings") || settingsRead.Text.Contains("Cài đặt")));
+                        if (settingsOpened) succeeded.Add("settings"); else failed.Add("settings");
+                    }
+                }
+                catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
+                catch { if (!failed.Contains("settings") && !succeeded.Contains("settings")) failed.Add("settings"); }
+            }
+
+            // ---- Bước 5: quét localStorage (bước cuối) ----
+            if (homeUsable)
+            {
+                attempted.Add("local_storage");
+                try
+                {
+                    var ls = await Eval(page, """
+                        (() => {
+                          const vals = [];
+                          try {
+                            for (let i = 0; i < localStorage.length; i++) {
+                              const v = localStorage.getItem(localStorage.key(i)) || '';
+                              if (v.length <= 20000) vals.push(v);
+                            }
+                          } catch {}
+                          return { values: vals.slice(0, 50) };
+                        })()
+                        """, cancel);
+                    var found = false;
+                    if (ls is System.Text.Json.Nodes.JsonObject lsObj
+                        && lsObj["values"] is System.Text.Json.Nodes.JsonArray vals)
+                    {
+                        foreach (var item in vals)
+                        {
+                            if (item?.GetValue<string>() is not { } v) continue;
+                            if (!v.Contains('@')) continue;
+                            if (!(v.Contains("\"email\"") || v.Contains("\"user\"") || v.Contains('{'))) continue;
+                            var foundEmail = FindEmail(v);
+                            if (foundEmail is not null) { email ??= foundEmail; found = true; break; }
+                        }
+                    }
+                    if (found) succeeded.Add("local_storage"); else failed.Add("local_storage");
+                }
+                catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
+                catch { failed.Add("local_storage"); }
+            }
         }
         finally { try { await page.CloseAsync(); } catch { } }
+
+        var debug = new ProfileDebug(attempted, succeeded, failed, finalUrl, menuOpened, settingsOpened, candidateCount);
+        if (email is null && username is null && phone is null) return (null, debug);
+        return (new ProfileInfo(email, username, phone), debug);
+    }
+
+    // Một lần đọc trang cho profile: text + tiêu đề + candidates +
+    // input tel + outerHTML (để regex email trong JSON nhúng).
+    private sealed record ProfilePageRead(string Text, string Title, List<string> Candidates, string TelValue, string Html);
+
+    private async Task<ProfilePageRead?> ReadProfilePage(IPage page, CancellationToken cancel)
+    {
+        var result = await Eval(page, """
+            (() => {
+              const seen = new Set();
+              const candidates = [];
+              const push = (v) => {
+                const t = (v || '').trim().replace(/\s+/g, ' ');
+                if (t && t.length <= 120 && !seen.has(t)) { seen.add(t); candidates.push(t); }
+              };
+              document.querySelectorAll('button[aria-label], [role="button"][aria-label]').forEach(e => push(e.getAttribute('aria-label')));
+              document.querySelectorAll('[data-testid]').forEach(e => {
+                const id = (e.getAttribute('data-testid') || '').toLowerCase();
+                if (id.includes('profile') || id.includes('avatar') || id.includes('account') || id.includes('user')) push(e.innerText);
+              });
+              document.querySelectorAll('header button, header [role="button"]').forEach(e => push(e.innerText || e.getAttribute('aria-label')));
+              const tel = document.querySelector('input[type="tel"]');
+              return {
+                text: (document.body ? document.body.innerText.slice(0, 12000) : ''),
+                title: document.title || '',
+                candidates: candidates.slice(0, 20),
+                telValue: tel ? (tel.value || '') : '',
+                html: (document.documentElement ? document.documentElement.outerHTML.slice(0, 500000) : ''),
+              };
+            })()
+            """, cancel);
+        if (result is not System.Text.Json.Nodes.JsonObject obj) return null;
+        var candidates = new List<string>();
+        if (obj["candidates"] is System.Text.Json.Nodes.JsonArray arr)
+            foreach (var item in arr)
+                if (item?.GetValue<string>() is { } c) candidates.Add(c);
+        return new ProfilePageRead(Str(obj, "text") ?? "", Str(obj, "title") ?? "",
+            candidates, Str(obj, "telValue") ?? "", Str(obj, "html") ?? "");
+    }
+
+    // Gộp kết quả một lần đọc trang vào email/username/phone tích lũy.
+    // Thứ tự email: candidates -> tiêu đề -> outerHTML -> text.
+    private static void MergeProfilePage(ProfilePageRead read, ref string? email, ref string? username, ref string? phone, ref int candidateCount)
+    {
+        foreach (var c in read.Candidates)
+        {
+            var found = FindEmail(c);
+            if (found is not null) { email ??= found; break; }
+        }
+        email ??= FindEmail(read.Title);
+        email ??= FindEmail(read.Html);
+        email ??= FindEmail(read.Text);
+        foreach (var c in read.Candidates)
+        {
+            var cleaned = CleanProfileCandidate(c);
+            if (cleaned is not null) { username ??= cleaned; break; }
+        }
+        if (username is null)
+        {
+            foreach (var sep in new[] { " — ", " - ", " | ", " · " })
+            {
+                if (!read.Title.Contains(sep)) continue;
+                var first = read.Title.Split(sep)[0].Trim();
+                if (first.Length >= 3 && first.Length <= 60
+                    && !new[] { "muse", "home", "trang chủ", "chat" }.Contains(first.ToLowerInvariant()))
+                { username = first; break; }
+            }
+        }
+        if (phone is null && IsPhoneLike(read.TelValue)) phone = read.TelValue.Trim();
+        if (phone is null)
+        {
+            foreach (var line in read.Text.Split('\n'))
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(line,
+                    @"^\s*(Phone|Số điện thoại|Điện thoại)\s*[:：]\s*(.+?)\s*$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (m.Success && IsPhoneLike(m.Groups[2].Value)) { phone = m.Groups[2].Value.Trim(); break; }
+            }
+        }
+        candidateCount += read.Candidates.Count;
     }
 
     private static string? FindEmail(string text)

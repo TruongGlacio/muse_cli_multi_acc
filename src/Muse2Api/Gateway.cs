@@ -20,10 +20,15 @@ public sealed class Gateway
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(req.Cancel, cancel);
         req = req with { Cancel = linked.Token };
+        // v0.8.2: session đã chọn tài khoản thì ép đúng tài khoản đó
+        // (AcquirePinnedAsync, không failover sang tài khoản khác).
+        var pinned = !string.IsNullOrWhiteSpace(req.AccountId);
         var tried = new List<string>();
         for (var attempt = 0; attempt <= _maxFailover; attempt++)
         {
-            using var lease = await LeaseFor(tried, req.ConversationHint, "chat", linked.Token);
+            using var lease = pinned
+                ? await _pool.AcquirePinnedAsync(req.AccountId!, req.ConversationHint, "chat", linked.Token)
+                : await LeaseFor(tried, req.ConversationHint, "chat", linked.Token);
             // An abandoned stream is neither a successful request nor an
             // upstream failure. Only mark success after full enumeration.
             lease.Fail(new OperationCanceledException());
@@ -49,6 +54,9 @@ public sealed class Gateway
                 }
             }
             if (failure is null) { lease.Error = null; yield break; }
+            // v0.8.2: tài khoản đã ép thì lỗi là lỗi của đúng tài khoản
+            // đó, KHÔNG retry sang tài khoản khác rồi im lặng.
+            if (pinned) throw failure;
             tried.Add(lease.Account.Id);
             // Local operations must stay in their original conversation. Even a
             // buffered response may already have been submitted upstream.

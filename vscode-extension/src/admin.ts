@@ -201,13 +201,61 @@ export async function purgeGatewayAccount(baseUrl: string, apiKey: string, id: s
   };
 }
 
-// Hồ sơ tài khoản (v0.7.0): cập nhật Email/Username/Phone best-effort
-// cho một tài khoản, không cần đăng nhập lại. Trả về account mới +
-// profileFound (có lấy được danh tính nào không). Email/phone trong
-// kết quả này chỉ dùng trong panel Cài đặt, không log, không thông báo.
-export async function refreshGatewayAccountProfile(baseUrl: string, apiKey: string, id: string): Promise<{ account: GatewayAccountSummary; profileFound: boolean }> {
+// Chẩn đoán profile-refresh (v0.8.2): chỉ tên bước + cờ + số lượng,
+// KHÔNG BAO GIỜ chứa email/phone.
+export interface ProfileRefreshDebug {
+  attempted: string[];
+  succeeded: string[];
+  failed: string[];
+  finalUrl: string;
+  menuOpened: boolean;
+  settingsOpened: boolean;
+  candidateCount: number;
+}
+
+function asProfileDebug(obj: unknown): ProfileRefreshDebug | undefined {
+  if (!obj || typeof obj !== 'object') { return undefined; }
+  const d = obj as Record<string, unknown>;
+  const arr = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  return {
+    attempted: arr(d.attempted),
+    succeeded: arr(d.succeeded),
+    failed: arr(d.failed),
+    finalUrl: typeof d.final_url === 'string' ? d.final_url : '',
+    menuOpened: d.menu_opened === true,
+    settingsOpened: d.settings_opened === true,
+    candidateCount: typeof d.candidate_count === 'number' ? d.candidate_count : 0,
+  };
+}
+
+// Hồ sơ tài khoản (v0.7.0, debug v0.8.2): cập nhật Email/Username/Phone
+// best-effort cho một tài khoản, không cần đăng nhập lại. Trả về
+// account mới + profileFound + debug. Email/phone trong kết quả này
+// chỉ dùng trong panel Cài đặt, không log, không thông báo; debug
+// không chứa email/phone nên được phép hiện trong thông báo chẩn đoán.
+export async function refreshGatewayAccountProfile(baseUrl: string, apiKey: string, id: string): Promise<{ account: GatewayAccountSummary; profileFound: boolean; debug?: ProfileRefreshDebug }> {
   const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}/profile-refresh`, { method: 'POST' })) as Record<string, unknown>;
-  return { account: asAccount((data.account || {}) as Record<string, unknown>), profileFound: data.profile_found === true };
+  return { account: asAccount((data.account || {}) as Record<string, unknown>), profileFound: data.profile_found === true, debug: asProfileDebug(data.debug) };
+}
+
+// Xóa mapping gateway của một session (v0.8.2, việc 2b): DELETE
+// /admin/conversations/{hint}, hint = conversationId. Trả true nếu
+// file mapping đã xóa, false nếu file vốn không có. Lỗi HTTP thì ném
+// để extension báo rõ "mapping gateway chưa xóa được".
+export async function deleteGatewayConversation(baseUrl: string, apiKey: string, hint: string): Promise<boolean> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/conversations/${encodeURIComponent(hint)}`, { method: 'DELETE' },
+    'Gateway chưa có endpoint xóa mapping hội thoại (gateway cũ).')) as Record<string, unknown>;
+  return data.mapping_deleted === true;
+}
+
+// Tìm chủ sở hữu mapping (v0.8.2, việc 3): GET
+// /admin/conversations/by-hint/{hint} trả Public của tài khoản sở hữu.
+// 404 (không có mapping / tài khoản không còn trong pool) thì ném lỗi
+// để caller giữ nguyên "Chưa xác định", không chặn chat.
+export async function fetchConversationOwner(baseUrl: string, apiKey: string, hint: string): Promise<GatewayAccountSummary> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/conversations/by-hint/${encodeURIComponent(hint)}`, {},
+    'Không tìm thấy mapping cho hội thoại này (chưa từng chat qua gateway hoặc mapping đã mất).')) as Record<string, unknown>;
+  return asAccount((data.account || {}) as Record<string, unknown>);
 }
 
 export interface MergeDuplicatesResult {

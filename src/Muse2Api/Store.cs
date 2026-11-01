@@ -278,6 +278,49 @@ public sealed class AccountPool
         }
     }
 
+    // v0.8.2: lấy lease cho ĐÚNG một tài khoản đã chọn (chat của
+    // session có accountId). KHÔNG BAO GIỜ tự chọn tài khoản khác:
+    // tài khoản không còn trong pool, đang tắt, Invalid hoặc đang
+    // cooling (chưa hết cooldown) thì lỗi ngay với thông điệp nêu rõ
+    // id tài khoản đó. Chỉ chờ khi tài khoản khả dụng nhưng đang bận
+    // (inflight >= MaxConcurrency), hết AcquireTimeout thì lỗi nêu rõ
+    // id thay vì chọn tài khoản khác. Affinity của hint cũng được ghim
+    // về tài khoản này để các lần gọi không kèm account_id (nếu có)
+    // vẫn không trôi sang tài khoản khác.
+    public async Task<Lease> AcquirePinnedAsync(string accountId, string? hint, string? kind, CancellationToken cancel)
+    {
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            cancel.ThrowIfCancellationRequested();
+            lock (_lock)
+            {
+                var acc = _accounts.GetValueOrDefault(accountId)
+                    ?? throw MuseException.NotFound($"Tài khoản đã chọn '{accountId}' không còn trong pool, không tự chọn tài khoản khác.");
+                var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                if (!acc.Enabled)
+                    throw MuseException.NoAccount($"Tài khoản đã chọn '{accountId}' đang tắt, không tự chọn tài khoản khác.");
+                if (acc.Status == AccountStatus.Invalid)
+                    throw MuseException.NoAccount($"Tài khoản đã chọn '{accountId}' đã hết hạn (Invalid), không tự chọn tài khoản khác.");
+                if (acc.Status == AccountStatus.Cooling && now < acc.CooldownUntil)
+                    throw MuseException.NoAccount($"Tài khoản đã chọn '{accountId}' đang cooling, không tự chọn tài khoản khác.");
+                if (KindBlocked(acc, kind, now))
+                    throw MuseException.NoAccount($"Tài khoản đã chọn '{accountId}' đang bị chặn cho loại yêu cầu này, không tự chọn tài khoản khác.");
+                if (_inflight.GetValueOrDefault(acc.Id) < MaxConcurrency)
+                {
+                    _inflight[acc.Id] = _inflight.GetValueOrDefault(acc.Id) + 1;
+                    acc.LastUsedAt = now;
+                    if (hint is not null) _affinity[hint] = acc.Id;
+                    return new Lease(this, acc);
+                }
+            }
+            var remaining = AcquireTimeout - timer.Elapsed.TotalSeconds;
+            if (remaining <= 0)
+                throw MuseException.NoAccount($"Tài khoản đã chọn '{accountId}' đang bận quá lâu, không tự chọn tài khoản khác.");
+            await Task.Delay(TimeSpan.FromSeconds(Math.Min(0.05, remaining)), cancel);
+        }
+    }
+
     public bool HasAlternative(IEnumerable<string> exclude)
     {
         var excluded = exclude.ToHashSet();

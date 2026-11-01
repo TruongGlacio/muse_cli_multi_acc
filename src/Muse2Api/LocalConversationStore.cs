@@ -9,7 +9,36 @@ public sealed class LocalConversationStore(string dataDirectory)
 {
     public sealed record Entry(string Account, string Url, bool Pending = false, string ImageHash = "");
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+    // v0.8.2: hash tài khoản dùng để đối chiếu Entry.Account với pool
+    // trong endpoint by-hint. Chỉ dùng nội bộ gateway, KHÔNG trả hash
+    // ra ngoài qua API (endpoint chỉ trả Public của tài khoản tìm được).
+    public static string HashAccount(string accountId) => Hash(accountId);
     private string FileFor(string hint) => Path.Combine(dataDirectory, "local-conversations", Hash(hint) + ".json");
+
+    // v0.8.2: đọc mapping theo hint mà KHÔNG kiểm tra tài khoản sở
+    // hữu (dùng cho endpoint by-hint: chính endpoint sẽ đối chiếu
+    // Entry.Account với Hash của từng tài khoản trong pool). File
+    // không tồn tại hoặc hỏng thì trả null, không lỗi.
+    public Entry? LoadByHint(string hint)
+    {
+        if (string.IsNullOrWhiteSpace(hint)) return null;
+        var file = FileFor(hint);
+        if (!File.Exists(file)) return null;
+        try { return JsonSerializer.Deserialize<Entry>(File.ReadAllText(file)); }
+        catch { return null; }
+    }
+
+    // v0.8.2: xóa mapping của đúng một hint (xóa session, DELETE
+    // /admin/conversations/{hint}). File không tồn tại thì trả false,
+    // không lỗi — session chưa từng chat thì vốn không có mapping.
+    public bool DeleteByHint(string hint)
+    {
+        if (string.IsNullOrWhiteSpace(hint)) return false;
+        var file = FileFor(hint);
+        if (!File.Exists(file)) return false;
+        try { File.Delete(file); return true; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+    }
 
     public Entry? Load(string accountId, string hint)
     {

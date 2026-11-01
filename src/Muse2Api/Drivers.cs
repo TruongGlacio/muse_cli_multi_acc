@@ -5,7 +5,7 @@ namespace Muse2Api;
 
 public sealed record InputImage(byte[] Data, string Mime = "image/png");
 public sealed record ChatRequest(string Prompt, string Model, List<InputImage> Images,
-    string? ConversationHint, List<(string Role, string Text)> Turns, CancellationToken Cancel, bool LocalTools = false, string? ImageBatchId = null);
+    string? ConversationHint, List<(string Role, string Text)> Turns, CancellationToken Cancel, bool LocalTools = false, string? ImageBatchId = null, string? AccountId = null);
 public sealed record ImageRequest(string Prompt, string Model, string? Size, int N,
     List<InputImage> References, Action<int>? OnProgress = null, CancellationToken Cancel = default);
 public sealed record VideoRequest(string Prompt, string Model, string? Size, int? Duration,
@@ -18,6 +18,12 @@ public sealed record SessionInfo(bool Ok, Dictionary<string, string> Cookies,
 // thì null, không bao giờ bịa. Phone thường là null vì trang chủ hiếm
 // khi hiện trường Phone gắn nhãn rõ ràng.
 public sealed record ProfileInfo(string? Email, string? Username, string? Phone);
+// Chẩn đoán profile-refresh (v0.8.2): CHỈ chứa tên bước + trạng thái +
+// URL cuối + cờ menu/cài đặt + số candidate, KHÔNG BAO GIỜ chứa
+// email/phone hay nội dung trang. Attempted/Succeeded/Failed dùng tên
+// bước ổn định: session_api, home, menu, settings, local_storage.
+public sealed record ProfileDebug(List<string> Attempted, List<string> Succeeded, List<string> Failed,
+    string FinalUrl, bool MenuOpened, bool SettingsOpened, int CandidateCount);
 // Kết quả quét thread web (v0.7.0, điểm 4): danh sách + chẩn đoán chỉ
 // gồm số lượng (pageUrl, linkCount, threadCount), không nội dung trang.
 public sealed record WebThreadsScan(List<(string Url, string Title)> Threads, string PageUrl, int LinkCount, bool LoginHint = false);
@@ -51,6 +57,13 @@ public interface IMuseDriver
     // trình duyệt trả null (không lấy được gì), không lỗi.
     Task<ProfileInfo?> FetchProfile(Account account, CancellationToken cancel = default)
         => Task.FromResult<ProfileInfo?>(null);
+    // v0.8.2: như FetchProfile nhưng kèm ProfileDebug (không chứa
+    // email/phone). Driver mặc định suy ra debug rỗng từ FetchProfile.
+    async Task<(ProfileInfo? Profile, ProfileDebug Debug)> FetchProfileDetailed(Account account, CancellationToken cancel = default)
+    {
+        var profile = await FetchProfile(account, cancel);
+        return (profile, new ProfileDebug(new List<string>(), new List<string>(), new List<string>(), "", false, false, 0));
+    }
     Task<Dictionary<string, object?>> Health()
         => Task.FromResult(new Dictionary<string, object?> { ["driver"] = Name, ["ok"] = true });
 }

@@ -141,6 +141,7 @@ export class MuseSettingsPanel {
       items: [
         { key: 'muse.apiKey', value: c.get<string>('apiKey') ? 'Đã đặt (không hiển thị giá trị)' : 'Chưa đặt — extension tự sinh key cho gateway kèm theo' },
         { key: 'muse.autoApprove', value: String(c.get<boolean>('autoApprove') || false) },
+        { key: 'muse.localTools', value: c.get<boolean>('localTools') !== false ? 'Bật (agent dùng tool cục bộ)' : 'Tắt (chỉ trò chuyện, không gửi dữ liệu workspace lên model qua tool)' },
         { key: 'muse.gatewayMode', value: c.get<string>('gatewayMode') || 'auto' },
         { key: 'muse.baseUrl', value: c.get<string>('baseUrl') || 'http://127.0.0.1:18610/v1' },
         { key: 'muse.model', value: c.get<string>('model') || 'muse-chat' },
@@ -300,9 +301,20 @@ export class MuseSettingsPanel {
     try {
       const info = await this.gateway.ensureStarted();
       const res = await refreshGatewayAccountProfile(info.baseUrl, info.apiKey, id);
-      void vscode.window.showInformationMessage(res.profileFound
-        ? 'Đã cập nhật thông tin hồ sơ của tài khoản.'
-        : 'Không lấy được thông tin hồ sơ từ trang Muse (tài khoản giữ nguyên). Hãy thử lại sau khi tài khoản đã đăng nhập lại.');
+      // v0.8.2: khi profile_found=false thì thông báo kèm debug ngắn
+      // gọn (chỉ tên bước + cờ, không chứa email/phone) thay vì chỉ
+      // nói chung chung "không lấy được".
+      if (res.profileFound) {
+        void vscode.window.showInformationMessage('Đã cập nhật thông tin hồ sơ của tài khoản.');
+      } else {
+        const d = res.debug;
+        const stepName = (s: string): string => s === 'session_api' ? 'API phiên' : s === 'home' ? 'trang chủ' : s === 'menu' ? 'menu hồ sơ' : s === 'settings' ? 'trang cài đặt' : s === 'local_storage' ? 'localStorage' : s;
+        const tried = d && d.attempted.length > 0 ? d.attempted.map(stepName).join(' + ') : 'trang chủ';
+        const extra = d
+          ? ` (đã thử ${tried}; menu hồ sơ ${d.menuOpened ? 'mở được' : 'không mở được'}; trang cài đặt ${d.settingsOpened ? 'vào được' : 'không vào được'}; đọc được ${d.candidateCount} candidate)`
+          : '';
+        void vscode.window.showInformationMessage(`Không lấy được thông tin hồ sơ từ trang Muse (tài khoản giữ nguyên)${extra}. Hãy thử lại sau khi tài khoản đã đăng nhập lại.`);
+      }
     } catch (e) {
       void vscode.window.showErrorMessage(`Không cập nhật được thông tin hồ sơ: ${e instanceof Error ? e.message : String(e)}`);
     }

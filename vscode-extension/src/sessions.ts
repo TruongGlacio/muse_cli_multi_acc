@@ -74,6 +74,10 @@ export class SessionStore {
       void this.context.workspaceState.update('muse.sessions', []);
     }
     const parsed = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    // v0.8.2, việc 2d: danh sách được phép rỗng. Chỉ tạo session từ
+    // lịch sử legacy khi legacy còn tin nhắn thật; legacy trống (kể cả
+    // chỉ còn conversationId cũ) thì KHÔNG tạo "Hội thoại 1" — nếu tạo
+    // thì lần khởi động sau sẽ làm sống lại danh sách user vừa xóa hết.
     if (parsed.length === 0) {
       const legacy = this.context.workspaceState.get<Array<{ role?: unknown; content?: unknown }>>('muse.chatHistory', [])
         .filter((m) => typeof m.role === 'string' && typeof m.content === 'string')
@@ -81,6 +85,11 @@ export class SessionStore {
         .slice(-40);
       const legacyId = this.context.workspaceState.get<string>('muse.conversationId', '');
       const firstUser = legacy.find((m) => m.role === 'user');
+      if (legacy.length === 0) {
+        // Không tạo session nào: provider hiện trạng thái trống.
+        this.sessions = parsed;
+        return;
+      }
       parsed.push({
         id: crypto.randomUUID(),
         title: firstUser ? String(firstUser.content).trim().slice(0, 40) || 'Hội thoại 1' : 'Hội thoại 1',

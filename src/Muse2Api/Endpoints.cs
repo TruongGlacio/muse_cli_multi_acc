@@ -168,7 +168,11 @@ public static class Endpoints
         var images = await JsonHelp.LoadImageRefs(flat.Images, ctx.RequestAborted);
         var localTools = JsonHelp.Bool(body["_muse_local_tools"]);
         var req = new ChatRequest(localTools && s.Driver.Name == "browser" ? Prompt.ForLocalExecutor(msgObjs) : flat.Text, spec.Id, images,
-            JsonHelp.Str(body["user"]), Prompt.MessageTurns(msgObjs), ctx.RequestAborted, localTools, Prompt.ImageBatchId(msgObjs));
+            JsonHelp.Str(body["user"]), Prompt.MessageTurns(msgObjs), ctx.RequestAborted, localTools, Prompt.ImageBatchId(msgObjs),
+            // v0.8.2: extension gửi account_id của session đã chọn.
+            // Gateway cũ bỏ qua trường lạ này; gateway mới ép đúng tài
+            // khoản đó (xem Gateway.ChatStream + AcquirePinnedAsync).
+            AccountId: JsonHelp.Str(body["account_id"]));
         var stream = JsonHelp.Bool(body["stream"]);
         ctx.Items["stream"] = stream;
         var completionId = "chatcmpl-" + Guid.NewGuid().ToString("N")[..24];
@@ -302,7 +306,8 @@ public static class Endpoints
             throw MuseException.Invalid("input contains no text or images");
         var images = await JsonHelp.LoadImageRefs(flat.Images, ctx.RequestAborted);
         var req = new ChatRequest(flat.Text, spec.Id, images,
-            JsonHelp.Str(body["user"]), Prompt.MessageTurns(messages), ctx.RequestAborted);
+            JsonHelp.Str(body["user"]), Prompt.MessageTurns(messages), ctx.RequestAborted,
+            AccountId: JsonHelp.Str(body["account_id"]));
         var respId = "resp_" + Guid.NewGuid().ToString("N")[..24];
         var msgId = "msg_" + Guid.NewGuid().ToString("N")[..24];
         var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -864,7 +869,10 @@ public static class Endpoints
         {
             RequireAdmin(ctx, s);
             var acc = s.Pool.Get(id) ?? throw MuseException.NotFound($"account '{id}' not found");
-            var profile = await s.Driver.FetchProfile(acc);
+            // v0.8.2: FetchProfileDetailed kèm debug (không chứa
+            // email/phone) để panel Cài đặt hiện chẩn đoán ngắn gọn
+            // khi profile_found=false thay vì chỉ nói chung chung.
+            var (profile, debug) = await s.Driver.FetchProfileDetailed(acc);
             var found = false;
             if (profile is not null)
             {
@@ -882,7 +890,17 @@ public static class Endpoints
                     found = true;
                 if (found) s.Pool.Upsert(acc);
             }
-            return Results.Json(new JsonObject { ["account"] = acc.Public(), ["profile_found"] = found });
+            var debugJson = new JsonObject
+            {
+                ["attempted"] = new JsonArray(debug.Attempted.Select(v => JsonValue.Create(v)).ToArray()),
+                ["succeeded"] = new JsonArray(debug.Succeeded.Select(v => JsonValue.Create(v)).ToArray()),
+                ["failed"] = new JsonArray(debug.Failed.Select(v => JsonValue.Create(v)).ToArray()),
+                ["final_url"] = debug.FinalUrl,
+                ["menu_opened"] = debug.MenuOpened,
+                ["settings_opened"] = debug.SettingsOpened,
+                ["candidate_count"] = debug.CandidateCount,
+            };
+            return Results.Json(new JsonObject { ["account"] = acc.Public(), ["profile_found"] = found, ["debug"] = debugJson });
         });
         // merge-duplicates: CHỈ chạy khi user bấm nút và xác nhận ở
         // panel Cài đặt — không tự động gộp khi mở panel hay đăng nhập,
@@ -998,6 +1016,37 @@ public static class Endpoints
                 }
             }
             return Results.Json(new JsonObject { ["data"] = arr });
+        });
+        // ---------- xóa mapping + tìm chủ sở hữu mapping (v0.8.2) ----------
+        // DELETE /admin/conversations/{hint}: xóa file mapping của
+        // đúng hint đó (hint = conversationId của session trong
+        // extension). File không tồn tại thì mapping_deleted=false,
+        // không lỗi. KHÔNG xóa thread trên web muse.ai (đồng bộ mức 1
+        // không có tính năng xóa web, gateway không có API xóa thread).
+        admin.MapDelete("/conversations/{hint}", (HttpContext ctx, string hint) =>
+        {
+            RequireAdmin(ctx, s);
+            var deleted = new LocalConversationStore(s.Settings.DataDir).DeleteByHint(hint);
+            return Results.Json(new JsonObject { ["hint"] = hint, ["mapping_deleted"] = deleted });
+        });
+        // GET /admin/conversations/by-hint/{hint}: tìm tài khoản sở
+        // hữu mapping của hint để extension backfill accountId cho
+        // session đã chat nhưng chưa có accountId. Đọc file mapping,
+        // lấy Entry.Account (là hash), đối chiếu với Hash của từng
+        // tài khoản đang trong pool. KHÔNG trả hash ra ngoài, KHÔNG
+        // đảo ngược hash bằng cách khác. Không tìm thấy file, file
+        // hỏng, hoặc tài khoản không còn trong pool thì 404.
+        admin.MapGet("/conversations/by-hint/{hint}", (HttpContext ctx, string hint) =>
+        {
+            RequireAdmin(ctx, s);
+            var entry = new LocalConversationStore(s.Settings.DataDir).LoadByHint(hint);
+            if (entry is null)
+                throw MuseException.NotFound($"không tìm thấy mapping cho hint này");
+            var owner = s.Pool.All().FirstOrDefault(a =>
+                LocalConversationStore.HashAccount(a.Id) == entry.Account);
+            if (owner is null)
+                throw MuseException.NotFound($"tài khoản sở hữu mapping này không còn trong pool");
+            return Results.Json(new JsonObject { ["account"] = owner.Public() });
         });
         // ---------- đăng nhập qua trình duyệt (v0.5.0) ----------
         // Mở cửa sổ Chromium có đầu của chính gateway để user đăng nhập
