@@ -18,12 +18,17 @@ public sealed record SessionInfo(bool Ok, Dictionary<string, string> Cookies,
 // thì null, không bao giờ bịa. Phone thường là null vì trang chủ hiếm
 // khi hiện trường Phone gắn nhãn rõ ràng.
 public sealed record ProfileInfo(string? Email, string? Username, string? Phone);
-// Chẩn đoán profile-refresh (v0.8.2): CHỈ chứa tên bước + trạng thái +
-// URL cuối + cờ menu/cài đặt + số candidate, KHÔNG BAO GIỜ chứa
+// Chẩn đoán profile-refresh (v0.8.2, nguồn giá trị thêm ở v0.8.3):
+// CHỈ chứa tên bước + trạng thái + URL cuối + cờ menu/cài đặt + số
+// candidate + tên bước nguồn của email/username, KHÔNG BAO GIỜ chứa
 // email/phone hay nội dung trang. Attempted/Succeeded/Failed dùng tên
 // bước ổn định: session_api, home, menu, settings, local_storage.
+// EmailSource/UsernameSource là tên bước đã đặt giá trị đó lần đầu
+// (null khi bước đó không đặt được gì) — để chẩn đoán lần sau biết
+// bước nào sinh ra giá trị sai.
 public sealed record ProfileDebug(List<string> Attempted, List<string> Succeeded, List<string> Failed,
-    string FinalUrl, bool MenuOpened, bool SettingsOpened, int CandidateCount);
+    string FinalUrl, bool MenuOpened, bool SettingsOpened, int CandidateCount,
+    string? EmailSource = null, string? UsernameSource = null);
 // Kết quả quét thread web (v0.7.0, điểm 4): danh sách + chẩn đoán chỉ
 // gồm số lượng (pageUrl, linkCount, threadCount), không nội dung trang.
 public sealed record WebThreadsScan(List<(string Url, string Title)> Threads, string PageUrl, int LinkCount, bool LoginHint = false);

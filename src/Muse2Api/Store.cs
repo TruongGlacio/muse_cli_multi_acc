@@ -138,18 +138,24 @@ public sealed class AccountPool
         return acc;
     }
 
-    // Chuẩn hóa email để so khớp danh tính: trim + lowercase. Username
-    // chỉ trim (so khớp không phân biệt hoa/thường ở bước 3).
+    // Chuẩn hóa email để so khớp danh tính: trim + lowercase. Giá trị
+    // không hợp lệ (v0.8.3: tên file ảnh như calendar@2x.png, chuỗi
+    // rác) coi như không có email — để gộp trùng và khớp phiên không
+    // bao giờ nhóm tài khoản theo rác.
     public static string? NormalizeEmail(string? email)
     {
         if (string.IsNullOrWhiteSpace(email)) return null;
-        return email.Trim().ToLowerInvariant();
+        var v = email.Trim();
+        return ProfileValidation.IsValidEmail(v) ? v.ToLowerInvariant() : null;
     }
 
+    // Chuẩn hóa username để so khớp: trim. Giá trị không hợp lệ
+    // (v0.8.3: UUID, hex dài, tên file, URL) coi như không có username.
     public static string? NormalizeUsername(string? username)
     {
         if (string.IsNullOrWhiteSpace(username)) return null;
-        return username.Trim();
+        var v = username.Trim();
+        return ProfileValidation.IsValidUsername(v) ? v : null;
     }
 
     // Điền danh tính từ tài khoản vào vào tài khoản cũ, CHỈ khi trường

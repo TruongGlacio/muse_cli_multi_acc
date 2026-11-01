@@ -1094,10 +1094,11 @@ public sealed class BrowserDriver : IMuseDriver
         var attempted = new List<string>();
         var succeeded = new List<string>();
         var failed = new List<string>();
-        string? email = null;
-        string? username = null;
-        string? phone = null;
-        var candidateCount = 0;
+        // v0.8.3: tích lũy quét hồ sơ — giá trị chấp nhận + nguồn chi
+        // tiết (bước:trường) + rác bị loại (chỉ rác đầu tiên mỗi
+        // trường). Nguồn chi tiết dùng cho dòng profile_detail ở cuối
+        // hàm; nguồn tên bước dùng cho JSON debug (không giá trị).
+        var scan = new ProfileScan();
         var sessionApiOk = false;
 
         // ---- Bước 1: API phiên ----
@@ -1126,12 +1127,41 @@ public sealed class BrowserDriver : IMuseDriver
                             if (value is System.Text.Json.Nodes.JsonValue v
                                 && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s))
                             {
+                                // v0.8.3: chỉ nhận giá trị qua kiểm tra
+                                // hợp lệ — API phiên cũng có thể trả id
+                                // kỹ thuật (UUID) hay chuỗi trông như
+                                // email nhưng thực ra là tên file. Rác
+                                // bị loại cũng ghi lại nguồn (khóa JSON)
+                                // để dòng profile_detail chỉ rõ nó từ
+                                // đâu tới, thay vì chỉ biết là không lấy
+                                // được.
                                 switch (key.ToLowerInvariant())
                                 {
-                                    case "email": email ??= s.Trim(); break;
-                                    case "username": username ??= s.Trim(); break;
-                                    case "name": nameFallback ??= s.Trim(); break;
-                                    case "phone": phone ??= s.Trim(); break;
+                                    case "email":
+                                        if (scan.Email is null && ProfileValidation.IsValidEmail(s))
+                                            { scan.Email = s.Trim(); scan.EmailDetail ??= "session_api:email"; scan.EmailSource ??= "session_api"; }
+                                        else if (scan.Email is null && scan.EmailRejectedValue is null
+                                            && s.Contains('@') && !ProfileValidation.IsValidEmail(s))
+                                            { scan.EmailRejectedSource = "session_api:email:rejected"; scan.EmailRejectedValue = s.Trim(); }
+                                        break;
+                                    case "username":
+                                        if (scan.Username is null && ProfileValidation.IsValidUsername(s))
+                                            { scan.Username = s.Trim(); scan.UsernameDetail ??= "session_api:username"; scan.UsernameSource ??= "session_api"; }
+                                        else if (scan.Username is null && scan.UsernameRejectedValue is null
+                                            && ProfileValidation.IsTechnicalId(s))
+                                            { scan.UsernameRejectedSource = "session_api:username:rejected"; scan.UsernameRejectedValue = s.Trim(); }
+                                        break;
+                                    case "name":
+                                        if (nameFallback is null && ProfileValidation.IsValidUsername(s))
+                                            nameFallback = s.Trim();
+                                        else if (scan.Username is null && scan.UsernameRejectedValue is null
+                                            && ProfileValidation.IsTechnicalId(s))
+                                            { scan.UsernameRejectedSource = "session_api:name:rejected"; scan.UsernameRejectedValue = s.Trim(); }
+                                        break;
+                                    case "phone":
+                                        if (scan.Phone is null)
+                                            { scan.Phone = s.Trim(); scan.PhoneDetail ??= "session_api:phone"; }
+                                        break;
                                 }
                             }
                             Walk(value);
@@ -1145,7 +1175,8 @@ public sealed class BrowserDriver : IMuseDriver
                 try
                 {
                     Walk(System.Text.Json.Nodes.JsonNode.Parse(text));
-                    username ??= nameFallback;
+                    if (scan.Username is null && nameFallback is not null)
+                        { scan.Username = nameFallback; scan.UsernameDetail ??= "session_api:name"; scan.UsernameSource ??= "session_api"; }
                     sessionApiOk = true;
                     succeeded.Add("session_api");
                 }
@@ -1193,7 +1224,7 @@ public sealed class BrowserDriver : IMuseDriver
                         if (Dom.LoginHints.Any(h => head.Contains(h))) { failed.Add("home"); }
                         else
                         {
-                            MergeProfilePage(read, ref email, ref username, ref phone, ref candidateCount);
+                            MergeProfilePage(read, "home", scan);
                             homeUsable = true;
                             succeeded.Add("home");
                         }
@@ -1236,7 +1267,7 @@ public sealed class BrowserDriver : IMuseDriver
                         await Task.Delay(TimeSpan.FromSeconds(1.5), cancel);
                         finalUrl = page.Url;
                         var menuRead = await ReadProfilePage(page, cancel);
-                        if (menuRead is not null) MergeProfilePage(menuRead, ref email, ref username, ref phone, ref candidateCount);
+                        if (menuRead is not null) MergeProfilePage(menuRead, "menu", scan);
                         var menuCheck = await Eval(page, """
                             (() => ({ menuFound: !!document.querySelector('[role="menu"], [role="menuitem"]') }))()
                             """, cancel);
@@ -1289,7 +1320,7 @@ public sealed class BrowserDriver : IMuseDriver
                         await Task.Delay(TimeSpan.FromSeconds(2), cancel);
                         finalUrl = page.Url;
                         var settingsRead = await ReadProfilePage(page, cancel);
-                        if (settingsRead is not null) MergeProfilePage(settingsRead, ref email, ref username, ref phone, ref candidateCount);
+                        if (settingsRead is not null) MergeProfilePage(settingsRead, "settings", scan);
                         settingsOpened = !string.Equals(page.Url, beforeUrl, StringComparison.OrdinalIgnoreCase)
                             || (settingsRead is not null && (settingsRead.Text.Contains("Settings") || settingsRead.Text.Contains("Cài đặt")));
                         if (settingsOpened) succeeded.Add("settings"); else failed.Add("settings");
@@ -1307,27 +1338,38 @@ public sealed class BrowserDriver : IMuseDriver
                 {
                     var ls = await Eval(page, """
                         (() => {
-                          const vals = [];
+                          const entries = [];
                           try {
                             for (let i = 0; i < localStorage.length; i++) {
-                              const v = localStorage.getItem(localStorage.key(i)) || '';
-                              if (v.length <= 20000) vals.push(v);
+                              const k = localStorage.key(i) || '';
+                              const v = localStorage.getItem(k) || '';
+                              if (v.length <= 20000) entries.push({ k, v });
                             }
                           } catch {}
-                          return { values: vals.slice(0, 50) };
+                          return { entries: entries.slice(0, 50) };
                         })()
                         """, cancel);
                     var found = false;
                     if (ls is System.Text.Json.Nodes.JsonObject lsObj
-                        && lsObj["values"] is System.Text.Json.Nodes.JsonArray vals)
+                        && lsObj["entries"] is System.Text.Json.Nodes.JsonArray entries)
                     {
-                        foreach (var item in vals)
+                        foreach (var item in entries)
                         {
-                            if (item?.GetValue<string>() is not { } v) continue;
+                            if (item is not System.Text.Json.Nodes.JsonObject e) continue;
+                            if (e["v"]?.GetValue<string>() is not { } v) continue;
                             if (!v.Contains('@')) continue;
                             if (!(v.Contains("\"email\"") || v.Contains("\"user\"") || v.Contains('{'))) continue;
-                            var foundEmail = FindEmail(v);
-                            if (foundEmail is not null) { email ??= foundEmail; found = true; break; }
+                            var foundEmail = ProfileValidation.FindEmail(v);
+                            if (foundEmail is not null)
+                            {
+                                if (scan.Email is null)
+                                {
+                                    scan.Email = foundEmail;
+                                    scan.EmailDetail ??= "local_storage:" + (e["k"]?.GetValue<string>() ?? "?");
+                                    scan.EmailSource ??= "local_storage";
+                                }
+                                found = true; break;
+                            }
                         }
                     }
                     if (found) succeeded.Add("local_storage"); else failed.Add("local_storage");
@@ -1338,9 +1380,19 @@ public sealed class BrowserDriver : IMuseDriver
         }
         finally { try { await page.CloseAsync(); } catch { } }
 
-        var debug = new ProfileDebug(attempted, succeeded, failed, finalUrl, menuOpened, settingsOpened, candidateCount);
-        if (email is null && username is null && phone is null) return (null, debug);
-        return (new ProfileInfo(email, username, phone), debug);
+        var debug = new ProfileDebug(attempted, succeeded, failed, finalUrl, menuOpened, settingsOpened, scan.CandidateCount, scan.EmailSource, scan.UsernameSource);
+        // v0.8.3: dòng chi tiết mapping — CÓ chứa giá trị khớp được thật
+        // (kể cả rác bị loại, kèm nguồn bước:trường), chỉ in ra stdout
+        // gateway cục bộ (Output > Muse Gateway) theo yêu cầu chẩn đoán
+        // của user; KHÔNG đưa vào JSON debug, popup hay panel Cài đặt.
+        // Dòng tóm tắt profile_refresh (không giá trị) vẫn giữ nguyên để
+        // sao chép thoải mái.
+        Diagnostic?.Invoke(DiagnosticLines.ProfileDetailLine(account.Id,
+            scan.Email, scan.EmailDetail, scan.EmailRejectedSource, scan.EmailRejectedValue,
+            scan.Username, scan.UsernameDetail, scan.UsernameRejectedSource, scan.UsernameRejectedValue,
+            scan.Phone, scan.PhoneDetail));
+        if (scan.Email is null && scan.Username is null && scan.Phone is null) return (null, debug);
+        return (new ProfileInfo(scan.Email, scan.Username, scan.Phone), debug);
     }
 
     // Một lần đọc trang cho profile: text + tiêu đề + candidates +
@@ -1382,24 +1434,79 @@ public sealed class BrowserDriver : IMuseDriver
             candidates, Str(obj, "telValue") ?? "", Str(obj, "html") ?? "");
     }
 
-    // Gộp kết quả một lần đọc trang vào email/username/phone tích lũy.
-    // Thứ tự email: candidates -> tiêu đề -> outerHTML -> text.
-    private static void MergeProfilePage(ProfilePageRead read, ref string? email, ref string? username, ref string? phone, ref int candidateCount)
+    // Tích lũy quét hồ sơ trong một lần FetchProfileDetailed: giá trị
+    // chấp nhận + nguồn chi tiết (bước:trường, cho dòng profile_detail)
+    // + nguồn tên bước (cho JSON debug, không giá trị) + rác bị loại
+    // đầu tiên mỗi trường (để chẩn đoán rác cũ từng từ đâu tới).
+    private sealed class ProfileScan
+    {
+        public string? Email;
+        public string? Username;
+        public string? Phone;
+        public string? EmailSource;
+        public string? UsernameSource;
+        public string? EmailDetail;
+        public string? UsernameDetail;
+        public string? PhoneDetail;
+        public string? EmailRejectedSource;
+        public string? EmailRejectedValue;
+        public string? UsernameRejectedSource;
+        public string? UsernameRejectedValue;
+        public int CandidateCount;
+    }
+
+    // Gộp kết quả một lần đọc trang vào scan tích lũy.
+    // Thứ tự email: candidates -> tiêu đề -> outerHTML (đã lược giá trị
+    // src/href để tên file ảnh không thành ứng viên) -> text. Giá trị
+    // chấp nhận ghi nguồn chi tiết bước:trường; rác email-like chỉ ghi
+    // lại rác đầu tiên (nguồn kèm ":rejected") để chẩn đoán.
+    private static void MergeProfilePage(ProfilePageRead read, string step, ProfileScan scan)
     {
         foreach (var c in read.Candidates)
         {
-            var found = FindEmail(c);
-            if (found is not null) { email ??= found; break; }
+            var found = ProfileValidation.FindEmail(c);
+            if (found is not null)
+            {
+                if (scan.Email is null)
+                    { scan.Email = found; scan.EmailDetail ??= step + ":candidate"; scan.EmailSource ??= step; }
+                break;
+            }
+            NoteRejectedEmail(c, step, "candidate", scan);
         }
-        email ??= FindEmail(read.Title);
-        email ??= FindEmail(read.Html);
-        email ??= FindEmail(read.Text);
+        if (scan.Email is null)
+        {
+            var f = ProfileValidation.FindEmail(read.Title);
+            if (f is not null) { scan.Email = f; scan.EmailDetail ??= step + ":title"; scan.EmailSource ??= step; }
+            else NoteRejectedEmail(read.Title, step, "title", scan);
+        }
+        if (scan.Email is null)
+        {
+            var stripped = ProfileValidation.StripUrlAttributes(read.Html);
+            var f = ProfileValidation.FindEmail(stripped);
+            if (f is not null) { scan.Email = f; scan.EmailDetail ??= step + ":outerHTML"; scan.EmailSource ??= step; }
+            else NoteRejectedEmail(stripped, step, "outerHTML", scan);
+        }
+        if (scan.Email is null)
+        {
+            var f = ProfileValidation.FindEmail(read.Text);
+            if (f is not null) { scan.Email = f; scan.EmailDetail ??= step + ":text"; scan.EmailSource ??= step; }
+            else NoteRejectedEmail(read.Text, step, "text", scan);
+        }
         foreach (var c in read.Candidates)
         {
             var cleaned = CleanProfileCandidate(c);
-            if (cleaned is not null) { username ??= cleaned; break; }
+            if (cleaned is not null)
+            {
+                if (scan.Username is null)
+                    { scan.Username = cleaned; scan.UsernameDetail ??= step + ":candidate"; scan.UsernameSource ??= step; }
+                break;
+            }
+            var trimmed = TrimCandidate(c);
+            if (scan.Username is null && scan.UsernameRejectedValue is null
+                && ProfileValidation.IsTechnicalId(trimmed))
+                { scan.UsernameRejectedSource = step + ":candidate:rejected"; scan.UsernameRejectedValue = trimmed; }
         }
-        if (username is null)
+        if (scan.Username is null)
         {
             foreach (var sep in new[] { " — ", " - ", " | ", " · " })
             {
@@ -1407,28 +1514,40 @@ public sealed class BrowserDriver : IMuseDriver
                 var first = read.Title.Split(sep)[0].Trim();
                 if (first.Length >= 3 && first.Length <= 60
                     && !new[] { "muse", "home", "trang chủ", "chat" }.Contains(first.ToLowerInvariant()))
-                { username = first; break; }
+                {
+                    if (ProfileValidation.IsValidUsername(first))
+                        { scan.Username = first; scan.UsernameDetail ??= step + ":title"; scan.UsernameSource ??= step; }
+                    else if (scan.UsernameRejectedValue is null && ProfileValidation.IsTechnicalId(first))
+                        { scan.UsernameRejectedSource = step + ":title:rejected"; scan.UsernameRejectedValue = first; }
+                    break;
+                }
             }
         }
-        if (phone is null && IsPhoneLike(read.TelValue)) phone = read.TelValue.Trim();
-        if (phone is null)
+        if (scan.Phone is null && IsPhoneLike(read.TelValue))
+            { scan.Phone = read.TelValue.Trim(); scan.PhoneDetail ??= step + ":tel_input"; }
+        if (scan.Phone is null)
         {
             foreach (var line in read.Text.Split('\n'))
             {
                 var m = System.Text.RegularExpressions.Regex.Match(line,
                     @"^\s*(Phone|Số điện thoại|Điện thoại)\s*[:：]\s*(.+?)\s*$",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                if (m.Success && IsPhoneLike(m.Groups[2].Value)) { phone = m.Groups[2].Value.Trim(); break; }
+                if (m.Success && IsPhoneLike(m.Groups[2].Value))
+                    { scan.Phone = m.Groups[2].Value.Trim(); scan.PhoneDetail ??= step + ":labeled_line"; break; }
             }
         }
-        candidateCount += read.Candidates.Count;
+        scan.CandidateCount += read.Candidates.Count;
     }
 
-    private static string? FindEmail(string text)
+    private static void NoteRejectedEmail(string text, string step, string field, ProfileScan scan)
     {
-        var m = System.Text.RegularExpressions.Regex.Match(text,
-            @"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}");
-        return m.Success ? m.Value : null;
+        if (scan.Email is not null || scan.EmailRejectedValue is not null) return;
+        var like = ProfileValidation.FirstEmailLike(text);
+        if (like is not null && !ProfileValidation.IsValidEmail(like))
+        {
+            scan.EmailRejectedSource = step + ":" + field + ":rejected";
+            scan.EmailRejectedValue = like;
+        }
     }
 
     private static bool IsPhoneLike(string value)
@@ -1438,15 +1557,24 @@ public sealed class BrowserDriver : IMuseDriver
             && System.Text.RegularExpressions.Regex.IsMatch(value.Trim(), @"^[+\d][\d\s\-().]*$");
     }
 
-    private static string? CleanProfileCandidate(string raw)
+    private static string TrimCandidate(string raw)
     {
         var t = raw.Trim();
         foreach (var prefix in new[] { "Open ", "Mở ", "Show ", "Hiện " })
             if (t.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) t = t[prefix.Length..].Trim();
         foreach (var suffix in new[] { " menu", " Menu" })
             if (t.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) t = t[..^suffix.Length].Trim();
+        return t;
+    }
+
+    private static string? CleanProfileCandidate(string raw)
+    {
+        var t = TrimCandidate(raw);
         if (t.Length < 3 || t.Length > 80) return null;
         if (t.Contains('@')) return null; // đó là email, không phải username
+        // v0.8.3: chặn id kỹ thuật lọt thành username (UUID, hex dài,
+        // tên file, URL) — kiểm tra chung trong ProfileValidation.
+        if (!ProfileValidation.IsValidUsername(t)) return null;
         var lower = t.ToLowerInvariant();
         if (new[] { "profile", "account", "settings", "menu", "user", "avatar",
             "hồ sơ", "tài khoản", "cài đặt", "đăng xuất", "log out", "sign out",

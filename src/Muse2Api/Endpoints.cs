@@ -844,6 +844,10 @@ public static class Endpoints
             RequireAdmin(ctx, s);
             var acc = s.Pool.Get(id) ?? throw MuseException.NotFound($"account '{id}' not found");
             var scan = await s.Driver.ListWebThreads(acc);
+            // v0.8.3: ghi dòng tóm tắt ra stdout gateway để user sao
+            // chép được từ Output > Muse Gateway (popup đồng bộ trôi
+            // nhanh). Chỉ số lượng + trang, không tiêu đề/URL thread.
+            s.LogLocal(DiagnosticLines.WebThreadsLine(id, scan.Threads.Count, scan.LinkCount, scan.PageUrl, scan.LoginHint));
             var arr = new JsonArray();
             foreach (var (url, title) in scan.Threads)
                 arr.Add(new JsonObject { ["url"] = url, ["title"] = title });
@@ -873,6 +877,14 @@ public static class Endpoints
             // email/phone) để panel Cài đặt hiện chẩn đoán ngắn gọn
             // khi profile_found=false thay vì chỉ nói chung chung.
             var (profile, debug) = await s.Driver.FetchProfileDetailed(acc);
+            // v0.8.3: dọn rác đã lưu TRƯỚC khi gộp hồ sơ mới. Rác (email
+            // dạng tên file ảnh, username dạng UUID) từ bản cũ phải bị
+            // coi là rỗng để lần lấy mới hợp lệ ghi đè được; nếu lần
+            // lấy mới không tìm được gì hợp lệ thì trường ở trạng thái
+            // rỗng ("Chưa xác định") chứ không giữ rác. Dọn xong vẫn
+            // phải Persist kể cả khi không lấy được gì mới — nếu không
+            // lần mở panel sau rác lại hiện ra.
+            var cleaned = ProfileValidation.SanitizeStoredIdentity(acc);
             var found = false;
             if (profile is not null)
             {
@@ -888,8 +900,13 @@ public static class Endpoints
                 // nhất một trường hồ sơ (kể cả đã có sẵn) sau khi đọc.
                 if (!found && (profile.Email is not null || profile.Username is not null || profile.Phone is not null))
                     found = true;
-                if (found) s.Pool.Upsert(acc);
+                if (found || cleaned) s.Pool.Upsert(acc);
             }
+            else if (cleaned) s.Pool.Upsert(acc);
+            // v0.8.3: ghi dòng tóm tắt ra stdout gateway để user sao
+            // chép được từ Output > Muse Gateway. Chỉ tên bước + cờ,
+            // không email/phone/username hay giá trị nào.
+            s.LogLocal(DiagnosticLines.ProfileRefreshLine(id, found, debug));
             var debugJson = new JsonObject
             {
                 ["attempted"] = new JsonArray(debug.Attempted.Select(v => JsonValue.Create(v)).ToArray()),
@@ -899,6 +916,9 @@ public static class Endpoints
                 ["menu_opened"] = debug.MenuOpened,
                 ["settings_opened"] = debug.SettingsOpened,
                 ["candidate_count"] = debug.CandidateCount,
+                // v0.8.3: tên bước nguồn của giá trị (không chứa giá trị).
+                ["email_source"] = debug.EmailSource is null ? null : JsonValue.Create(debug.EmailSource),
+                ["username_source"] = debug.UsernameSource is null ? null : JsonValue.Create(debug.UsernameSource),
             };
             return Results.Json(new JsonObject { ["account"] = acc.Public(), ["profile_found"] = found, ["debug"] = debugJson });
         });
@@ -932,6 +952,22 @@ public static class Endpoints
                 }
                 catch { /* bỏ qua tài khoản này, không dừng cả quá trình */ }
             }
+            all = s.Pool.All();
+            // v0.8.3 (bổ sung theo user): dọn rác đã lưu trên MỌI tài
+            // khoản TRƯỚC khi tính khóa nhóm — kể cả tài khoản sẽ thành
+            // tài khoản chính sau gộp. Nếu không, tài khoản chính giữ
+            // nguyên username UUID của nó sau gộp, và nhóm có thể tính
+            // theo khóa rác. Gộp KHÔNG copy danh tính từ tài khoản phụ
+            // sang tài khoản chính (chỉ xóa phụ + viết lại mapping
+            // hội thoại), nên rác không lan theo đường đó; đường lan
+            // còn lại là vòng điền FetchProfile ở trên, mà giá trị
+            // FetchProfile nay đã qua kiểm tra hợp lệ tại nguồn.
+            // Sau bước này, lần refresh sau gộp vẫn xóa được username
+            // UUID của tài khoản chính nhờ đường dọn rác của
+            // profile-refresh (độc lập với gộp).
+            foreach (var acc in all)
+                if (ProfileValidation.SanitizeStoredIdentity(acc))
+                    s.Pool.Upsert(acc);
             all = s.Pool.All();
             var groups = new Dictionary<string, List<Account>>(StringComparer.Ordinal);
             var skipped = new List<string>();

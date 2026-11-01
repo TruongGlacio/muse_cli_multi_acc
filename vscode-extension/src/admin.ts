@@ -211,6 +211,9 @@ export interface ProfileRefreshDebug {
   menuOpened: boolean;
   settingsOpened: boolean;
   candidateCount: number;
+  // v0.8.3: tên bước nguồn của giá trị (không chứa giá trị).
+  emailSource?: string;
+  usernameSource?: string;
 }
 
 function asProfileDebug(obj: unknown): ProfileRefreshDebug | undefined {
@@ -225,6 +228,8 @@ function asProfileDebug(obj: unknown): ProfileRefreshDebug | undefined {
     menuOpened: d.menu_opened === true,
     settingsOpened: d.settings_opened === true,
     candidateCount: typeof d.candidate_count === 'number' ? d.candidate_count : 0,
+    emailSource: typeof d.email_source === 'string' ? d.email_source : undefined,
+    usernameSource: typeof d.username_source === 'string' ? d.username_source : undefined,
   };
 }
 

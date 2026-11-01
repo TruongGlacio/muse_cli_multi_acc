@@ -22,6 +22,12 @@ public sealed class AppState
     private static readonly HashSet<BrowserDriver> DiagnosticSubscribed = new();
     private static readonly object DiagnosticLock = new();
 
+    // Ghi một dòng chẩn đoán ra stdout của gateway (tiền tố "[local] "
+    // giống dòng Diagnostic của BrowserDriver) để user sao chép được từ
+    // Output > Muse Gateway. CHỈ ghi số lượng/tên bước/cờ — không bao
+    // giờ ghi email/phone/username, tiêu đề thread hay URL thread.
+    public void LogLocal(string msg) => Console.WriteLine("[local] " + msg);
+
     public AppState(Settings settings, IMuseDriver? driver = null)
     {
         settings.Validate();
@@ -34,7 +40,7 @@ public sealed class AppState
             lock (DiagnosticLock)
             {
                 if (DiagnosticSubscribed.Add(browserDriver))
-                    browserDriver.Diagnostic += msg => Console.WriteLine("[local] " + msg);
+                    browserDriver.Diagnostic += LogLocal;
             }
         }
         Pool = new AccountPool(settings.AccountsFile, settings.PoolStrategy,

@@ -311,7 +311,7 @@ export class MuseSettingsPanel {
         const stepName = (s: string): string => s === 'session_api' ? 'API phiên' : s === 'home' ? 'trang chủ' : s === 'menu' ? 'menu hồ sơ' : s === 'settings' ? 'trang cài đặt' : s === 'local_storage' ? 'localStorage' : s;
         const tried = d && d.attempted.length > 0 ? d.attempted.map(stepName).join(' + ') : 'trang chủ';
         const extra = d
-          ? ` (đã thử ${tried}; menu hồ sơ ${d.menuOpened ? 'mở được' : 'không mở được'}; trang cài đặt ${d.settingsOpened ? 'vào được' : 'không vào được'}; đọc được ${d.candidateCount} candidate)`
+          ? ` (đã thử ${tried}; menu hồ sơ ${d.menuOpened ? 'mở được' : 'không mở được'}; trang cài đặt ${d.settingsOpened ? 'vào được' : 'không vào được'}; đọc được ${d.candidateCount} candidate${d.emailSource ? `; email từ bước ${d.emailSource}` : ''}${d.usernameSource ? `; username từ bước ${d.usernameSource}` : ''})`
           : '';
         void vscode.window.showInformationMessage(`Không lấy được thông tin hồ sơ từ trang Muse (tài khoản giữ nguyên)${extra}. Hãy thử lại sau khi tài khoản đã đăng nhập lại.`);
       }
