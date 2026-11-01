@@ -7,7 +7,7 @@ namespace Muse2Api;
 
 public static class Endpoints
 {
-    public const string Version = "0.8.10";
+    public const string Version = "0.8.11";
 
     public static void Map(WebApplication app, AppState s)
     {

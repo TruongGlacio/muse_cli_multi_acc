@@ -158,6 +158,11 @@
     html = html.replace(/\u0000(\d+)\u0000/g, function (_m, i) { return parts[Number(i)]; });
     return html;
   }
+  // Cuộn độc lập (v0.8.11): tin nhắn mới nhất luôn cuộn đúng vùng
+  // #messages, không cuộn theo trang (body đã overflow hidden nên
+  // scrollIntoView cũ không còn cuộn được body, nhưng ghi rõ đích
+  // để khỏi phụ thuộc hành vi cuộn tổ tiên).
+  function scrollMessagesToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
   function addBubble(cls, text, details) {
     var div = document.createElement('div');
     div.className = 'bubble ' + cls;
@@ -173,7 +178,7 @@
       div.appendChild(det);
     }
     messagesEl.appendChild(div);
-    div.scrollIntoView();
+    scrollMessagesToBottom();
     return div;
   }
   function addLoginBubble(text, isWarning) {
@@ -188,7 +193,7 @@
     row.appendChild(settingsBtn);
     div.appendChild(row);
     messagesEl.appendChild(div);
-    div.scrollIntoView();
+    scrollMessagesToBottom();
   }
   function addAccountErrorBubble(text) {
     var div = document.createElement('div');
@@ -210,7 +215,7 @@
     row.appendChild(settingsBtn);
     div.appendChild(row);
     messagesEl.appendChild(div);
-    div.scrollIntoView();
+    scrollMessagesToBottom();
   }
   function send() {
     var text = inputEl.value.trim();
@@ -323,12 +328,13 @@
       banner.className = 'imported-banner';
       banner.textContent = m.text || '';
       messagesEl.insertBefore(banner, messagesEl.firstChild);
-      banner.scrollIntoView();
+      // Banner nằm đầu danh sách nên cuộn #messages về đầu (v0.8.11).
+      messagesEl.scrollTop = 0;
     }
     else if (m.type === 'streamStart') { streamRaw = ''; streamBubble = addBubble('assistant', ''); }
     else if (m.type === 'streamDelta') {
       streamRaw += m.text || '';
-      if (streamBubble) { streamBubble.innerHTML = render(streamRaw); streamBubble.scrollIntoView(); }
+      if (streamBubble) { streamBubble.innerHTML = render(streamRaw); scrollMessagesToBottom(); }
     }
     else if (m.type === 'streamEnd') { streamBubble = null; streamRaw = ''; }
     else if (m.type === 'streamFinal') {
@@ -344,7 +350,7 @@
           det.appendChild(pre);
           streamBubble.appendChild(det);
         }
-        streamBubble.scrollIntoView();
+        scrollMessagesToBottom();
       } else { addBubble('assistant', m.text || '', m.details || ''); }
       streamBubble = null; streamRaw = '';
     }

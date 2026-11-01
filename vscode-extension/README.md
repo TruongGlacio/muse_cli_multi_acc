@@ -1,7 +1,11 @@
-# Muse cho VS Code (v0.8.10)
+# Muse cho VS Code (v0.8.11)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.8.11: scroll độc lập cho từng thành phần
+
+Trước đây khung chat và cột quản lý hội thoại dùng chung một scroll của trang nên khi tin nhắn dài ra thì trang cuộn chung và cột quản lý hội thoại bị trôi lên trên, trôi khỏi màn hình. Bản này tách scroll: trang webview không cuộn chung nữa (html/body cao 100%, body overflow hidden); cột quản lý hội thoại thành flex column cao 100% và chỉ danh sách hội thoại cuộn (tiêu đề, nút tạo/đổi tên/xóa/đồng bộ, dropdown lọc tài khoản và ghi chú đứng yên); khung chat chính thành flex column cao 100% và chỉ tin nhắn cuộn (header, chips, panel Nhật ký và khung soạn thảo đứng yên, khung soạn thảo dính đáy). Panel Nhật ký giữ nguyên scroll riêng max-height 220px đã có. Logic cuộn trong webview.js cũng đổi theo: tin nhắn mới/stream cuộn đúng vùng tin nhắn về cuối, banner nhập khẩu cuộn vùng tin nhắn về đầu, không còn lệnh cuộn theo trang nào. Tay kéo đổi chiều rộng cột của 0.8.10 vẫn hoạt động (kéo, kẹp 160–480px và 50% khung, nhấp đúp về 230px, lưu globalState); vì sidebar nay có overflow hidden nên tay kéo chuyển sang nằm trọn trong mép phải (right 0) thay vì straddling ra ngoài — vẫn đủ 6px để nắm, nằm trên vùng padding nên không đè nội dung. Panel Cài đặt: section tài khoản thành flex column có trần 55vh và danh sách tài khoản cuộn độc lập trong khi tiêu đề, trạng thái và các nút thao tác đứng yên; trang panel vẫn cuộn chung để tới các section dưới vì không cấu trúc lại panel. Chưa kiểm chứng được: cảm giác cuộn độc lập trên webview thật của VS Code vẫn cần user thử (máy build Linux không chạy được webview thật).
 
 ## Mới trong v0.8.10: kéo đổi chiều rộng cột danh sách hội thoại
 

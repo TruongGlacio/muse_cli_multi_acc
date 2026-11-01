@@ -8,6 +8,13 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 .note { color: var(--vscode-descriptionForeground); font-size: 12px; }
 .warning { background: rgba(255, 180, 0, 0.12); border: 1px solid rgba(255, 180, 0, 0.4); border-radius: 4px; padding: 8px; }
 .account-card { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+/* Vùng cuộn độc lập cho danh sách tài khoản (v0.8.11): section tài
+   khoản thành flex column có trần, #accountList cuộn riêng trong khi
+   tiêu đề, trạng thái và các nút thao tác đứng yên. Không cấu trúc
+   lại panel nên trang vẫn cuộn chung để tới các section dưới (thêm
+   tài khoản, cấu hình); chỉ riêng danh sách tài khoản là cuộn độc lập. */
+.account-section { display: flex; flex-direction: column; max-height: 55vh; }
+#accountList { flex: 1; overflow-y: auto; min-height: 0; }
 .account-card summary { cursor: pointer; font-weight: 700; }
 .account-card .acc-meta { font-size: 12px; color: var(--vscode-descriptionForeground); margin: 4px 0; word-break: break-word; }
 .account-card .detail { margin-top: 8px; font-size: 12px; }

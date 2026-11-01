@@ -1,19 +1,27 @@
-body { font-family: var(--vscode-font-family); color: var(--vscode-editor-foreground); background: var(--vscode-sideBar-background); margin: 0; padding: 10px; font-size: 13px; }
+/* Scroll độc lập (v0.8.11): trang webview không cuộn chung nữa — khung
+   chat và cột quản lý hội thoại mỗi vùng cuộn riêng, không còn trôi
+   khỏi màn hình khi tin nhắn dài ra. html/body cao 100% khung,
+   body overflow hidden (box-sizing border-box để padding 10px không
+   làm tràn), #layout cao 100% và stretch thay vì flex-start. */
+html { height: 100%; }
+body { font-family: var(--vscode-font-family); color: var(--vscode-editor-foreground); background: var(--vscode-sideBar-background); margin: 0; padding: 10px; font-size: 13px; height: 100%; overflow: hidden; box-sizing: border-box; }
 /* Layout 2 cột (v0.6.0): cột trái là danh sách hội thoại, cột phải là
    khung chat chính. Drawer nằm dưới header của 0.5.0 đã xóa hoàn toàn. */
-#layout { display: flex; flex-direction: row; gap: 10px; align-items: flex-start; }
-#sidebar { position: relative; width: 230px; flex: 0 0 230px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; box-sizing: border-box; }
+#layout { display: flex; flex-direction: row; gap: 10px; align-items: stretch; height: 100%; }
+#sidebar { position: relative; width: 230px; flex: 0 0 230px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; box-sizing: border-box; display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
 @media (max-width: 600px) { #sidebar { width: 200px !important; flex-basis: 200px !important; } }
 body.sidebar-collapsed #sidebar { display: none; }
 /* Tay kéo đổi chiều rộng cột hội thoại (v0.8.10): vùng bắt pointer 6px
-   straddling mép phải sidebar (3px trong + 3px ngoài, nằm trong khe 10px
-   giữa hai cột nên không đè nội dung), chỉ hiện rõ khi hover/active;
-   khi sidebar thu gọn thì ẩn theo. */
-#sidebarResizer { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; touch-action: none; z-index: 2; border-radius: 3px; }
+   ở mép phải sidebar, chỉ hiện rõ khi hover/active; khi sidebar thu
+   gọn thì ẩn theo. Từ v0.8.11 sidebar có overflow hidden nên tay kéo
+   nằm trọn trong mép phải (right 0) thay vì straddling ra ngoài như
+   trước — vẫn đủ 6px để nắm, nằm trên vùng padding 8px nên không đè
+   nội dung. */
+#sidebarResizer { position: absolute; top: 0; right: 0; width: 6px; height: 100%; cursor: col-resize; touch-action: none; z-index: 2; border-radius: 3px; }
 #sidebarResizer:hover, #sidebarResizer:active { background: var(--vscode-focusBorder); }
 body.sidebar-collapsed #sidebarResizer { display: none; }
 body.sidebar-resizing { user-select: none; cursor: col-resize; }
-#chatColumn { flex: 1 1 auto; min-width: 0; }
+#chatColumn { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
 .sidebar-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .sidebar-title { font-size: 14px; font-weight: 700; }
 .header { margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -28,7 +36,7 @@ button { background: var(--vscode-button-background); color: var(--vscode-button
 button:hover { background: var(--vscode-button-hoverBackground); }
 #chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 #chips button { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
-#sessionList { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; margin-top: 8px; }
+#sessionList { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; margin-top: 8px; flex: 1; min-height: 0; }
 /* Dropdown lọc hội thoại theo tài khoản (v0.8.8), ngay trên danh sách. */
 .account-filter { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; }
 .account-filter select { flex: 1; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 4px; padding: 3px 4px; }
@@ -44,7 +52,7 @@ button:hover { background: var(--vscode-button-hoverBackground); }
    để item không chật, nền đỏ nhạt để phân biệt thao tác xóa. */
 .delete-session-btn { display: inline-block; margin-top: 4px; margin-left: 6px; padding: 1px 7px; border-radius: 10px; font-size: 11px; cursor: pointer; background: rgba(255, 80, 80, 0.25); color: inherit; }
 .status-badge.status-loggedout { background: rgba(255, 80, 80, 0.25); color: inherit; }
-#messages { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+#messages { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; flex: 1; overflow-y: auto; min-height: 0; }
 #logPanel { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; margin-bottom: 10px; }
 #logLines { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; margin-top: 8px; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; white-space: pre-wrap; word-break: break-all; }
 .log-line { padding: 1px 4px; border-radius: 3px; }
