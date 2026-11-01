@@ -21,10 +21,20 @@
     html = html.replace(/\u0000(\d+)\u0000/g, function (_m, i) { return parts[Number(i)]; });
     return html;
   }
-  function addBubble(cls, text) {
+  function addBubble(cls, text, details) {
     var div = document.createElement('div');
     div.className = 'bubble ' + cls;
     div.innerHTML = render(text);
+    if (details) {
+      var det = document.createElement('details');
+      var sum = document.createElement('summary');
+      sum.textContent = 'Chi tiết (JSON gốc)';
+      det.appendChild(sum);
+      var pre = document.createElement('pre');
+      pre.textContent = details;
+      det.appendChild(pre);
+      div.appendChild(det);
+    }
     messagesEl.appendChild(div);
     div.scrollIntoView();
     return div;
@@ -77,7 +87,7 @@
   });
   window.addEventListener('message', function (event) {
     var m = event.data || {};
-    if (m.type === 'message') { addBubble(m.role === 'user' ? 'user' : 'assistant', m.text || ''); }
+    if (m.type === 'message') { addBubble(m.role === 'user' ? 'user' : 'assistant', m.text || '', m.details || ''); }
     else if (m.type === 'tool') { addBubble('tool', 'Công cụ: ' + (m.name || '') + ' — ' + (m.detail || '')); }
     else if (m.type === 'toolResult') { addBubble('tool', 'Kết quả ' + (m.name || '') + ': ' + (m.detail || '')); }
     else if (m.type === 'status') { statusEl.textContent = m.text || ''; }
@@ -89,10 +99,27 @@
       if (streamBubble) { streamBubble.innerHTML = render(streamRaw); streamBubble.scrollIntoView(); }
     }
     else if (m.type === 'streamEnd') { streamBubble = null; streamRaw = ''; }
+    else if (m.type === 'streamFinal') {
+      if (streamBubble) {
+        streamBubble.innerHTML = render(m.text || '');
+        if (m.details) {
+          var det = document.createElement('details');
+          var sum = document.createElement('summary');
+          sum.textContent = 'Chi tiết (JSON gốc)';
+          det.appendChild(sum);
+          var pre = document.createElement('pre');
+          pre.textContent = m.details;
+          det.appendChild(pre);
+          streamBubble.appendChild(det);
+        }
+        streamBubble.scrollIntoView();
+      } else { addBubble('assistant', m.text || '', m.details || ''); }
+      streamBubble = null; streamRaw = '';
+    }
     else if (m.type === 'attached') {
       var chip = document.createElement('div');
       chip.className = 'chip';
-      chip.textContent = 'Đã đính kèm: ' + (m.name || 'ảnh') + ' (' + Math.round((m.size || 0) / 1024) + ' KiB) — sẽ gửi kèm lượt chat tiếp theo.';
+      chip.textContent = 'Đã đính kèm: ' + (m.name || 'tệp') + ' (' + (m.kindLabel || 'tệp') + ', ' + Math.round((m.size || 0) / 1024) + ' KiB) — sẽ gửi kèm lượt chat tiếp theo.';
       attachmentsEl.appendChild(chip);
     }
     else if (m.type === 'attachmentsCleared') { attachmentsEl.innerHTML = ''; }

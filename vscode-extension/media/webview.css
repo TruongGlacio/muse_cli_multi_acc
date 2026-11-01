@@ -13,6 +13,9 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 .bubble.tool { background: transparent; border: 1px dashed var(--vscode-panel-border); font-size: 12px; color: var(--vscode-descriptionForeground); align-self: stretch; }
 .bubble.error { background: rgba(255, 80, 80, 0.15); border: 1px solid rgba(255, 80, 80, 0.4); align-self: stretch; }
 .bubble pre { background: var(--vscode-textCodeBlock-background); padding: 8px; overflow-x: auto; white-space: pre; }
+.bubble details { margin-top: 8px; }
+.bubble details summary { cursor: pointer; color: var(--vscode-textLink-foreground); }
+.bubble details pre { white-space: pre-wrap; word-break: break-all; }
 .bubble code { font-family: var(--vscode-editor-font-family); }
 #attachments { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .chip { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 4px; padding: 4px 8px; font-size: 12px; }

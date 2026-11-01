@@ -10,8 +10,8 @@ import { BackgroundProcesses } from './processes';
 import { generateImages, editImage, createVideo, downloadMedia, dataUrlOfImageFile } from './media';
 import { ComputerHelper, COMPUTER_TOOLS, approveComputerAction, describeComputerCall } from './computer';
 
-// Muse cho VS Code, v0.3.1.
-// V0.3.1 vá lỗi 400: gửi user=conversationId ổn định khi dùng local tools.
+// Muse cho VS Code, v0.3.2.
+// V0.3.2: hiện summary dạng chat + Chi tiết JSON, đính kèm video/tệp.
 // Kiến trúc: extension này là GIAO DIỆN CHAT trong VS Code. Nó gọi gateway
 // Muse2Api qua API tương thích OpenAI (/v1/chat/completions), rồi tự thực
 // thi các tool cục bộ bằng API của VS Code / Node trong đúng workspace
@@ -35,7 +35,7 @@ import { ComputerHelper, COMPUTER_TOOLS, approveComputerAction, describeComputer
 interface ToolCall { name: string; args: Record<string, unknown>; }
 type ChatContent = string | Array<Record<string, unknown>>;
 interface ChatMsg { role: string; content: ChatContent; }
-interface PendingAttachment { name: string; size: number; dataUrl: string; }
+interface PendingAttachment { name: string; size: number; kind: 'image' | 'text' | 'video' | 'file'; kindLabel: string; dataUrl?: string; text?: string; note?: string; }
 
 const SYSTEM_PROMPT = [
   'Bạn là Muse, trợ lý lập trình chạy trong VS Code, làm việc trực tiếp trên',
@@ -229,7 +229,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       if (m.type === 'send' && m.text) { void this.run(m.text); }
       else if (m.type === 'stop') { this.abort?.abort(); }
       else if (m.type === 'openSettings') { void vscode.commands.executeCommand('workbench.action.openSettings', 'muse.'); }
-      else if (m.type === 'attach') { void this.attachImage(); }
+      else if (m.type === 'attach') { void this.attachFile(); }
       else if (m.type === 'clearHistory') { this.clearHistory(); }
       else if (m.type === 'importLogin') { void vscode.commands.executeCommand('muse.importDesktopLogin'); }
       else if (m.type === 'openDashboard') { void vscode.commands.executeCommand('muse.openGatewayDashboard'); }
@@ -255,25 +255,72 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
 
   stop(): void { this.abort?.abort(); }
 
-  // Đính kèm ảnh vào lượt chat tiếp theo. Ảnh được đọc thành data URL
-  // (đúng dạng gateway chấp nhận cho chat: part image_url, xem
-  // Prompt.ContentToText trong Models.cs) và chỉ giữ trong bộ nhớ của
-  // phiên này; không lưu data URL vào workspaceState cùng lịch sử.
-  private async attachImage(): Promise<void> {
+  // Đính kèm tệp vào lượt chat tiếp theo. Gateway chat chỉ nhận text và
+  // ảnh (part text / image_url, xem Prompt.ContentToText trong Models.cs),
+  // không có part video hay file, nên extension phân loại thật và nói rõ:
+  // - Ảnh: gửi đúng dạng image_url data URL, chỉ giữ trong bộ nhớ phiên.
+  // - Tệp văn bản (txt/md/json/code/log...): gửi nội dung dạng text kèm
+  //   tên tệp, tối đa 500 KiB (quá thì cắt và ghi rõ đã cắt).
+  // - Video: thử trích 1 khung hình bằng ffmpeg (nếu máy có ffmpeg) và
+  //   gửi khung hình đó dạng ảnh, kèm ghi chú đó chỉ là khung hình chứ
+  //   không phải video gốc; nếu không có ffmpeg thì chỉ gửi ghi chú tên
+  //   và dung lượng video, không giả vờ đã gửi video.
+  // - Tệp nhị phân khác: chỉ gửi ghi chú tên/dung lượng, không đọc nội
+  //   dung. Không lưu nội dung đính kèm vào workspaceState cùng lịch sử.
+  private async attachFile(): Promise<void> {
     const picked = await vscode.window.showOpenDialog({
       canSelectMany: false,
-      filters: { 'Ảnh': ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
-      title: 'Chọn ảnh đính kèm vào chat Muse',
+      title: 'Chọn tệp đính kèm vào chat Muse (ảnh, văn bản, video)',
     });
     if (!picked || picked.length === 0) { return; }
+    const filePath = picked[0].fsPath;
+    const name = path.basename(filePath);
     try {
-      const dataUrl = dataUrlOfImageFile(picked[0].fsPath);
-      const size = fs.statSync(picked[0].fsPath).size;
-      this.pendingAttachments.push({ name: path.basename(picked[0].fsPath), size, dataUrl });
-      this.post('attached', { name: path.basename(picked[0].fsPath), size });
+      const size = fs.statSync(filePath).size;
+      const ext = path.extname(filePath).toLowerCase();
+      const imageExts = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+      const videoExts = ['.mp4', '.mov', '.webm', '.avi', '.mkv'];
+      const textExts = ['.txt', '.md', '.markdown', '.json', '.jsonc', '.csv', '.xml', '.html', '.htm', '.css', '.js', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.cs', '.java', '.c', '.h', '.cpp', '.go', '.rs', '.rb', '.php', '.sql', '.log', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.sh', '.ps1', '.bat'];
+      if (imageExts.includes(ext)) {
+        const dataUrl = dataUrlOfImageFile(filePath);
+        this.pendingAttachments.push({ name, size, kind: 'image', kindLabel: 'Ảnh', dataUrl });
+      } else if (videoExts.includes(ext)) {
+        const frame = await this.extractVideoFrame(filePath);
+        if (frame) {
+          this.pendingAttachments.push({ name, size, kind: 'video', kindLabel: 'Video (khung hình)', dataUrl: frame, note: `Đây là khung hình ở giây thứ 1 trích từ video ${name}. Gateway chat chỉ nhận ảnh và text nên video gốc không được gửi dưới dạng video.` });
+        } else {
+          this.pendingAttachments.push({ name, size, kind: 'file', kindLabel: 'Video', note: `Video ${name} (${Math.round(size / 1024)} KiB) chưa gửi được dưới dạng video vì gateway chat chỉ nhận ảnh và text, và máy này không có ffmpeg để trích khung hình. Hãy mô tả nội dung video hoặc đính kèm ảnh chụp khung hình thay thế.` });
+        }
+      } else {
+        const buf = fs.readFileSync(filePath);
+        const looksText = textExts.includes(ext) || (buf.length > 0 && !buf.includes(0));
+        if (looksText) {
+          const full = buf.toString('utf8');
+          const limit = 500 * 1024;
+          const text = full.length > limit ? full.slice(0, limit) + `\n[Đã cắt nội dung ở 500 KiB, tệp gốc ${Math.round(size / 1024)} KiB.]` : full;
+          this.pendingAttachments.push({ name, size, kind: 'text', kindLabel: 'Văn bản', text });
+        } else {
+          this.pendingAttachments.push({ name, size, kind: 'file', kindLabel: 'Tệp', note: `Tệp ${name} (${Math.round(size / 1024)} KiB) là tệp nhị phân nên gateway chat không đọc được nội dung; chỉ gửi kèm tên và dung lượng để bạn mô tả thêm.` });
+        }
+      }
+      const last = this.pendingAttachments[this.pendingAttachments.length - 1];
+      this.post('attached', { name, size, kindLabel: last.kindLabel });
     } catch (e) {
-      this.post('error', { text: `Không đính kèm được ảnh: ${e instanceof Error ? e.message : String(e)}` });
+      this.post('error', { text: `Không đính kèm được tệp: ${e instanceof Error ? e.message : String(e)}` });
     }
+  }
+
+  private extractVideoFrame(filePath: string): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      const tmp = path.join(os.tmpdir(), `muse-frame-${crypto.randomUUID()}.png`);
+      execFile('ffmpeg', ['-y', '-ss', '1', '-i', filePath, '-vframes', '1', '-q:v', '2', tmp], () => {
+        try {
+          if (!fs.existsSync(tmp)) { resolve(undefined); return; }
+          const dataUrl = dataUrlOfImageFile(tmp);
+          resolve(dataUrl);
+        } catch { resolve(undefined); } finally { try { fs.unlinkSync(tmp); } catch { /* bỏ qua */ } }
+      });
+    });
   }
 
   private post(type: string, payload: Record<string, unknown> = {}): void {
@@ -321,10 +368,15 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       const attachments = this.pendingAttachments;
       this.pendingAttachments = [];
       if (attachments.length > 0) { this.post('attachmentsCleared', {}); }
-      this.post('message', { role: 'user', text: attachments.length > 0 ? `${userText}\n[Đã đính kèm ${attachments.length} ảnh: ${attachments.map((a) => a.name).join(', ')}]` : userText });
-      const userContent: ChatContent = attachments.length > 0
-        ? [{ type: 'text', text: userText }, ...attachments.map((a) => ({ type: 'image_url', image_url: { url: a.dataUrl } }))]
-        : userText;
+      this.post('message', { role: 'user', text: attachments.length > 0 ? `${userText}\n[Đã đính kèm: ${attachments.map((a) => `${a.name} (${a.kindLabel})`).join(', ')}]` : userText });
+      const textBlocks = [userText,
+        ...attachments.filter((a) => a.kind === 'text').map((a) => `[Nội dung tệp đính kèm: ${a.name}]\n${a.text}`),
+        ...attachments.filter((a) => a.note).map((a) => a.note as string)];
+      const combinedText = textBlocks.filter((t) => t.length > 0).join('\n\n');
+      const imageParts = attachments.filter((a) => a.dataUrl).map((a) => ({ type: 'image_url', image_url: { url: a.dataUrl as string } }));
+      const userContent: ChatContent = imageParts.length > 0
+        ? [{ type: 'text', text: combinedText }, ...imageParts]
+        : combinedText;
       const request: ChatMsg[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...this.history, { role: 'user', content: userContent }];
       let malformed = 0;
       for (let step = 0; step < conf.maxSteps; step++) {
@@ -334,8 +386,16 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         const calls = parseToolCalls(reply);
         request.push({ role: 'assistant', content: reply });
         if (calls.length === 0) {
-          const finalText = reply.trim() || '(Muse không trả lời gì.)';
-          if (this.lastStreamed) { this.post('streamEnd', {}); }
+          // Trả lời dạng chat, không hiện JSON thô: gateway ở chế độ
+          // local tools bắt model trả JSON kế hoạch {"status":...,
+          // "summary":...} (xem PlannerReply của desktop). Extension
+          // trước 0.3.2 hiện nguyên JSON đó trong khung chat. Từ 0.3.2,
+          // hiển thị summary/reply dạng chat, còn JSON gốc chỉ nằm trong
+          // mục "Chi tiết" mà user bấm mới mở ra.
+          const planner = plannerReply(reply);
+          const finalText = planner.display || '(Muse không trả lời gì.)';
+          if (this.lastStreamed) { this.post('streamFinal', { text: finalText, details: planner.raw || '' }); }
+          else if (planner.raw) { this.post('message', { role: 'assistant', text: finalText, details: planner.raw }); }
           else { this.post('message', { role: 'assistant', text: finalText }); }
           this.post('status', { text: 'Xong.' });
           this.history.push({ role: 'user', content: userText }, { role: 'assistant', content: finalText });
@@ -732,6 +792,31 @@ function describe(call: ToolCall): string {
       if (call.name.startsWith('computer_')) { return describeComputerCall(call.name, call.args); }
       return call.name;
   }
+}
+
+// Trích câu trả lời dạng chat từ JSON kế hoạch của gateway, đúng logic
+// PlannerReply của desktop: JSON có status completed/done/needs_input
+// và trường reply/summary thì hiển thị trường đó, JSON gốc giữ lại để
+// hiện trong mục Chi tiết. Trả về raw rỗng nếu không phải dạng này.
+function plannerReply(text: string): { display: string; raw: string } {
+  const candidates: string[] = [];
+  const fence = /```(?:json)?[^\n]*\n([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = fence.exec(text)) !== null) { candidates.push(m[1].trim()); }
+  candidates.push(text.trim());
+  for (const candidate of candidates) {
+    try {
+      const obj = JSON.parse(candidate) as Record<string, unknown>;
+      if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) { continue; }
+      const status = obj.status;
+      if (status !== 'completed' && status !== 'done' && status !== 'needs_input') { continue; }
+      const reply = obj.reply ?? obj.summary;
+      if (typeof reply === 'string' && reply.trim().length > 0) {
+        return { display: reply, raw: JSON.stringify(obj, null, 2) };
+      }
+    } catch { /* không phải JSON kế hoạch */ }
+  }
+  return { display: text.trim(), raw: '' };
 }
 
 function parseToolCalls(text: string): ToolCall[] {

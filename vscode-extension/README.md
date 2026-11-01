@@ -1,7 +1,12 @@
-# Muse cho VS Code (v0.3.1)
+# Muse cho VS Code (v0.3.2)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.3.2: chat dạng chat + đính kèm video/tệp
+
+- Trả lời dạng chat: gateway ở chế độ local tools bắt model trả JSON kế hoạch `{"status":...,"summary":...}` nên các bản trước hiện nguyên JSON trong khung chat. Từ 0.3.2, khung chat hiện câu `summary`/`reply` dạng chat bình thường, còn JSON gốc nằm trong mục **Chi tiết (JSON gốc)** mà bạn bấm mới mở ra. Lịch sử lưu cũng là câu chat, không phải JSON.
+- Đính kèm tệp (nút đổi từ "Đính kèm ảnh" thành "Đính kèm tệp"): ảnh gửi dạng ảnh như cũ; tệp văn bản gửi nội dung dạng text (tối đa 500 KiB, quá thì cắt và ghi rõ); video thử trích 1 khung hình bằng ffmpeg nếu máy có ffmpeg và gửi khung hình đó dạng ảnh kèm ghi chú, nếu không có ffmpeg thì chỉ gửi ghi chú tên/dung lượng. Lưu ý thật: gateway chat chỉ nhận text và ảnh, không có part video hay file, nên extension không giả vờ đã gửi video gốc hay nội dung tệp nhị phân.
 
 ## Mới trong v0.3.1: vá lỗi 400 conversation ID
 
