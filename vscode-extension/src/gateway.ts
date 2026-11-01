@@ -45,10 +45,31 @@ export interface GatewayInfo {
 
 export type GatewayState = 'running' | 'starting' | 'stopped' | 'error';
 
+// Kết quả kiểm tra trình duyệt cho gateway (v0.6.0, kiểm tra chủ động):
+// system = Edge/Chrome hệ thống qua findChromium(); playwright = Chromium
+// của Playwright đã cài trong thư mục ms-playwright; none = cả hai đều
+// không có, gateway không mở được muse.ai.
+export interface BrowserCheckResult {
+  kind: 'system' | 'playwright' | 'none';
+  systemPath?: string;
+  playwrightPath?: string;
+  label: string;
+}
+
 const SECRET_KEY = 'muse.gatewayApiKey';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Che giá trị nhạy cảm trước khi đưa một dòng vào buffer log (v0.6.0):
+// gateway không in cookie/key, nhưng nếu một dòng nào đó có dạng gán
+// cookie/key/token/password/secret hay "Bearer ..." thì che giá trị,
+// chỉ giữ tên trường. Xử lý đơn giản theo chuỗi, không parser phức tạp.
+function redactLogLine(line: string): string {
+  return line
+    .replace(/((?:cookie|api[_-]?key|token|password|secret)\s*[:=]\s*)([^\s;]+)/gi, '$1***')
+    .replace(/(Bearer\s+)[^\s]+/gi, '$1***');
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Promise<Response> {
@@ -69,6 +90,10 @@ export class GatewayManager {
   private lastLines: string[] = [];
   private state: GatewayState = 'stopped';
   private detail = 'Chưa khởi động';
+  // Callback cho panel Nhật ký (v0.6.0): gọi cho mỗi dòng mới vào
+  // buffer, để provider chat đẩy sang webview ngay khi dòng tới.
+  // Provider đăng ký callback này; gateway không tự biết webview.
+  onLog?: (line: string) => void;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -146,6 +171,112 @@ export class GatewayManager {
     return candidates.find((p) => fs.existsSync(p));
   }
 
+  // Chromium của Playwright (v0.6.0): Playwright .NET cài trình duyệt
+  // vào thư mục ms-playwright (mặc định: Windows %LOCALAPPDATA%,
+  // macOS ~/Library/Caches, Linux ~/.cache; hoặc PLAYWRIGHT_BROWSERS_PATH
+  // nếu có). Quét thư mục này nhanh và không spawn process, đáng tin hơn
+  // việc thử khởi động gateway rồi bắt lỗi — vì vậy kiểm tra chủ động
+  // dùng cách này, không làm cả hai cách chồng chéo gây chậm khởi động.
+  // Giới hạn: chỉ kiểm tra có file chạy Chromium hay không, không kiểm
+  // tra đúng revision Playwright của gateway; nếu revision lệch thì
+  // gateway vẫn thất bại và luồng hỏi cài khi thất bại sẽ bắt lại.
+  findPlaywrightChromium(): string | undefined {
+    const roots: string[] = [];
+    const envRoot = process.env.PLAYWRIGHT_BROWSERS_PATH;
+    if (envRoot) { roots.push(envRoot); }
+    else if (process.platform === 'win32') {
+      if (process.env.LOCALAPPDATA) { roots.push(path.join(process.env.LOCALAPPDATA, 'ms-playwright')); }
+      if (process.env.USERPROFILE) { roots.push(path.join(process.env.USERPROFILE, 'AppData', 'Local', 'ms-playwright')); }
+    } else if (process.platform === 'darwin') {
+      if (process.env.HOME) { roots.push(path.join(process.env.HOME, 'Library', 'Caches', 'ms-playwright')); }
+    } else if (process.env.HOME) {
+      roots.push(path.join(process.env.HOME, '.cache', 'ms-playwright'));
+    }
+    const exeCandidates = process.platform === 'win32'
+      ? ['chrome-win/chrome.exe', 'chrome-win/headless_shell.exe']
+      : process.platform === 'darwin'
+        ? ['chrome-mac/Chromium.app/Contents/MacOS/Chromium', 'chrome-mac/headless_shell']
+        : ['chrome-linux/chrome', 'chrome-linux/headless_shell'];
+    for (const root of roots) {
+      if (!fs.existsSync(root)) { continue; }
+      let entries: string[] = [];
+      try { entries = fs.readdirSync(root); } catch { continue; }
+      for (const entry of entries) {
+        if (!entry.startsWith('chromium')) { continue; }
+        for (const exe of exeCandidates) {
+          const p = path.join(root, entry, exe);
+          if (fs.existsSync(p)) { return p; }
+        }
+      }
+    }
+    return undefined;
+  }
+
+  // Kiểm tra trình duyệt chủ động (v0.6.0): tái dùng findChromium()
+  // hiện có cho trình duyệt hệ thống, không viết lại danh sách đường dẫn.
+  // Có Edge/Chrome hệ thống thì không cần Chromium Playwright.
+  checkBrowser(): BrowserCheckResult {
+    const system = this.findChromium();
+    if (system) {
+      const base = path.basename(system).toLowerCase();
+      const name = base.includes('msedge') ? 'Edge hệ thống' : base.includes('chrome') ? 'Chrome hệ thống' : 'Chromium hệ thống';
+      return { kind: 'system', systemPath: system, label: `Trình duyệt gateway: ${name} (${system})` };
+    }
+    const playwright = this.findPlaywrightChromium();
+    if (playwright) {
+      return { kind: 'playwright', playwrightPath: playwright, label: 'Trình duyệt gateway: Chromium của Playwright (đã cài)' };
+    }
+    return { kind: 'none', label: 'Trình duyệt gateway: Chưa có trình duyệt — bấm Cài Chromium cho gateway' };
+  }
+
+  // Dòng trạng thái trình duyệt cho panel Cài đặt. Gateway ngoài thì
+  // trình duyệt nằm ở máy chạy gateway ngoài, extension không kiểm tra
+  // hay cài ở máy VS Code nên báo rõ như vậy.
+  browserStatusLabel(): string {
+    if (this.getConfig().gatewayMode === 'external') {
+      return 'Trình duyệt gateway: gateway ngoài tự lo trình duyệt ở máy chạy gateway đó (extension không kiểm tra/cài ở máy này)';
+    }
+    return this.checkBrowser().label;
+  }
+
+  // Cờ chống nag trong cùng phiên VS Code: mỗi lý do chỉ hỏi một lần.
+  // "Để sau" ở lần khởi động không chặn lần hỏi lại khi gateway thất bại
+  // thật vì thiếu trình duyệt (sự kiện thất bại mới, không phải nag),
+  // và ngược lại; sang phiên VS Code sau thì hỏi lại bình thường.
+  private browserStartupPromptDone = false;
+  private browserFailurePromptDone = false;
+
+  // Hỏi cài Chromium khi cả hai nguồn trình duyệt đều không có (v0.6.0).
+  // KHÔNG tự tải ngầm: chỉ sau khi user bấm "Cài ngay" mới chạy
+  // installBrowser() hiện có, cài xong thì tự khởi động lại gateway
+  // (không bắt user chạy thêm lệnh). Có trình duyệt hệ thống thì hàm này
+  // im lặng hoàn toàn, không hiện thông báo.
+  async promptBrowserInstallIfMissing(reason: 'startup' | 'gatewayFailure'): Promise<void> {
+    if (this.getConfig().gatewayMode === 'external') { return; }
+    if (reason === 'startup' && this.browserStartupPromptDone) { return; }
+    if (reason === 'gatewayFailure' && this.browserFailurePromptDone) { return; }
+    if (this.checkBrowser().kind !== 'none') { return; }
+    if (reason === 'startup') { this.browserStartupPromptDone = true; }
+    else { this.browserFailurePromptDone = true; }
+    const answer = await vscode.window.showWarningMessage(
+      'Máy này chưa có Edge/Chrome và chưa có Chromium cho gateway nên gateway không mở được muse.ai. Bạn có muốn cài Chromium cho gateway ngay không? (Tải một lần, khoảng hơn 100 MB, cần PowerShell trên Windows.)',
+      { modal: true }, 'Cài ngay', 'Để sau');
+    if (answer !== 'Cài ngay') { return; }
+    this.output.show(true);
+    this.output.appendLine('[Muse] Đang cài Chromium cho gateway, vui lòng chờ…');
+    const result = await this.installBrowserDetailed((line) => this.output.appendLine(line));
+    if (!result.ok) {
+      void vscode.window.showErrorMessage(`Cài Chromium thất bại: ${result.message} Hãy cài Edge hoặc Chrome rồi khởi động lại gateway.`);
+      return;
+    }
+    try {
+      await this.restart();
+      void vscode.window.showInformationMessage('Đã cài Chromium cho gateway và khởi động lại gateway thành công.');
+    } catch (e) {
+      void vscode.window.showErrorMessage(`Đã cài Chromium nhưng khởi động lại gateway thất bại: ${e instanceof Error ? e.message : String(e)} Hãy dùng lệnh "Muse: Khởi động lại gateway".`);
+    }
+  }
+
   // ---------------- Kiểm tra sức khỏe ----------------
   async healthOk(origin: string): Promise<boolean> {
     try {
@@ -184,11 +315,40 @@ export class GatewayManager {
   }
 
   private log(line: string): void {
-    const clean = line.replace(/\r/g, '').trimEnd();
+    const clean = redactLogLine(line.replace(/\r/g, '').trimEnd());
     if (!clean) { return; }
     this.output.appendLine(clean);
+    this.pushLogLine(clean);
+  }
+
+  private pushLogLine(clean: string): void {
     this.lastLines.push(clean);
-    if (this.lastLines.length > 300) { this.lastLines.splice(0, this.lastLines.length - 300); }
+    if (this.lastLines.length > 1000) { this.lastLines.splice(0, this.lastLines.length - 1000); }
+    this.onLog?.(clean);
+  }
+
+  // Panel Nhật ký (v0.6.0): cửa sổ xem 1000 dòng gần nhất. Trả bản sao
+  // để webview không sửa được buffer thật.
+  getLogLines(): string[] {
+    return [...this.lastLines];
+  }
+
+  clearLogLines(): void {
+    this.lastLines = [];
+  }
+
+  showOutput(): void {
+    this.output.show(true);
+  }
+
+  // Ghi một dòng lỗi phía extension vào cùng buffer với log gateway:
+  // ra OutputChannel với tiền tố [Muse] và gọi onLog như dòng gateway,
+  // để panel log có lỗi ngay cả khi gateway stdout im lặng.
+  appendLogLine(line: string): void {
+    const clean = redactLogLine(line.replace(/\r/g, '').trimEnd());
+    if (!clean) { return; }
+    this.output.appendLine(`[Muse] ${clean}`);
+    this.pushLogLine(clean);
   }
 
   private lastLogTail(): string {
@@ -265,8 +425,10 @@ export class GatewayManager {
     if (chromium) { env.MUSE2API_CHROMIUM_PATH = chromium; }
 
     this.setStatus('starting', `Đang khởi động gateway kèm theo (cổng ${port})…`);
-    this.output.appendLine(`[Muse] Khởi động gateway: ${bin}`);
-    this.output.appendLine(`[Muse] Cổng ${port}, dữ liệu tại ${dataDir}, trình duyệt: ${chromium || '(Playwright Chromium, nếu đã cài)'}`);
+    // Các dòng khởi động này đi qua log() (v0.6.0) thay vì appendLine
+    // trực tiếp như trước, để chúng cũng vào ring buffer và panel log.
+    this.log(`[Muse] Khởi động gateway: ${bin}`);
+    this.log(`[Muse] Cổng ${port}, dữ liệu tại ${dataDir}, trình duyệt: ${chromium || '(Playwright Chromium, nếu đã cài)'}`);
     this.stopping = false;
     const child = spawn(bin, [], { env, cwd: path.dirname(bin), windowsHide: true });
     this.child = child;
@@ -284,6 +446,13 @@ export class GatewayManager {
     while (Date.now() < deadline) {
       if (child.exitCode !== null) {
         const tail = this.lastLogTail();
+        const browserMissing = tail.includes('Playwright Chromium') || tail.includes('playwright.ps1');
+        if (browserMissing) {
+          // Hỏi lại khi gateway thất bại thật vì thiếu trình duyệt
+          // (sự kiện mới, không phải nag của lần hỏi lúc khởi động).
+          // prompt tự im lặng nếu lúc này đã có trình duyệt.
+          void this.promptBrowserInstallIfMissing('gatewayFailure');
+        }
         const msg = `Gateway kèm theo thoát ngay khi khởi động (mã ${child.exitCode}). ${tail.includes('Playwright Chromium') || tail.includes('playwright.ps1')
           ? 'Nguyên nhân thường gặp: chưa có Chromium. Hãy chạy lệnh "Muse: Cài Chromium cho gateway" một lần, hoặc cài Edge/Chrome rồi khởi động lại gateway.'
           : `Xem Output > Muse Gateway để biết lý do. Log cuối:\n${tail}`}`;
@@ -358,32 +527,41 @@ export class GatewayManager {
   }
 
   // ---------------- Cài Chromium cho Playwright ----------------
-  async installBrowser(onProgress: (line: string) => void): Promise<string> {
+  // Bản chi tiết (v0.6.0): luồng hỏi cài tự động cần biết cài thành công
+  // hay không để tự khởi động lại gateway; lệnh palette cũ dùng wrapper
+  // installBrowser() bên dưới nên hành vi tay không đổi.
+  async installBrowserDetailed(onProgress: (line: string) => void): Promise<{ ok: boolean; message: string }> {
     const binDir = this.bundledBinaryDir() || (this.getConfig().gatewayPath.trim() ? path.dirname(this.getConfig().gatewayPath.trim()) : undefined);
-    if (!binDir) { return 'Không tìm thấy thư mục gateway kèm theo để chạy playwright.ps1.'; }
+    if (!binDir) { return { ok: false, message: 'Không tìm thấy thư mục gateway kèm theo để chạy playwright.ps1.' }; }
     const script = path.join(binDir, 'playwright.ps1');
-    if (!fs.existsSync(script)) { return `Không tìm thấy ${script}. Hãy cài Edge hoặc Chrome rồi khởi động lại gateway thay vì dùng Chromium của Playwright.`; }
+    if (!fs.existsSync(script)) { return { ok: false, message: `Không tìm thấy ${script}. Hãy cài Edge hoặc Chrome rồi khởi động lại gateway thay vì dùng Chromium của Playwright.` }; }
     if (process.platform === 'win32') {
       const ps = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'powershell.exe';
-      return await new Promise<string>((resolve) => {
+      return await new Promise<{ ok: boolean; message: string }>((resolve) => {
         const child = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, 'install', 'chromium'], { cwd: binDir, windowsHide: false });
         child.stdout?.on('data', (d: Buffer) => onProgress(String(d)));
         child.stderr?.on('data', (d: Buffer) => onProgress(String(d)));
         child.on('exit', (code) => resolve(code === 0
-          ? 'Đã cài Chromium cho gateway. Hãy dùng lệnh "Muse: Khởi động lại gateway" rồi gửi yêu cầu.'
-          : `Cài Chromium thất bại (mã ${code}). Hãy cài Edge hoặc Chrome rồi khởi động lại gateway.`));
-        child.on('error', (e) => resolve(`Không chạy được PowerShell để cài Chromium: ${e.message}. Hãy cài Edge hoặc Chrome rồi khởi động lại gateway.`));
+          ? { ok: true, message: 'Đã cài Chromium cho gateway.' }
+          : { ok: false, message: `Cài Chromium thất bại (mã ${code}).` }));
+        child.on('error', (e) => resolve({ ok: false, message: `Không chạy được PowerShell để cài Chromium: ${e.message}.` }));
       });
     }
     // Linux/macOS: cần pwsh. Nếu không có pwsh, hướng dẫn cài trình duyệt hệ thống.
-    return await new Promise<string>((resolve) => {
+    return await new Promise<{ ok: boolean; message: string }>((resolve) => {
       const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-File', script, 'install', 'chromium'], { cwd: binDir });
       child.stdout?.on('data', (d: Buffer) => onProgress(String(d)));
       child.stderr?.on('data', (d: Buffer) => onProgress(String(d)));
       child.on('exit', (code) => resolve(code === 0
-        ? 'Đã cài Chromium cho gateway. Hãy dùng lệnh "Muse: Khởi động lại gateway" rồi gửi yêu cầu.'
-        : `Cài Chromium thất bại (mã ${code}). Hãy cài Chromium/Chrome hệ thống rồi khởi động lại gateway.`));
-      child.on('error', () => resolve('Không tìm thấy pwsh trên máy này. Hãy cài Chromium hoặc Chrome hệ thống rồi khởi động lại gateway.'));
+        ? { ok: true, message: 'Đã cài Chromium cho gateway.' }
+        : { ok: false, message: `Cài Chromium thất bại (mã ${code}).` }));
+      child.on('error', () => resolve({ ok: false, message: 'Không tìm thấy pwsh trên máy này. Hãy cài Chromium hoặc Chrome hệ thống rồi khởi động lại gateway.' }));
     });
+  }
+
+  async installBrowser(onProgress: (line: string) => void): Promise<string> {
+    const result = await this.installBrowserDetailed(onProgress);
+    if (result.ok) { return 'Đã cài Chromium cho gateway. Hãy dùng lệnh "Muse: Khởi động lại gateway" rồi gửi yêu cầu.'; }
+    return result.message.includes('Hãy cài') ? result.message : `${result.message} Hãy cài Edge hoặc Chrome rồi khởi động lại gateway.`;
   }
 }

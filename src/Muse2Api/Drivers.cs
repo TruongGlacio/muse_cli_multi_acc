@@ -35,6 +35,11 @@ public interface IMuseDriver
         => throw MuseException.NotImplemented($"driver '{Name}' does not support session renewal");
     Task<Dictionary<string, object?>> Quota(Account account)
         => throw MuseException.NotImplemented($"driver '{Name}' does not support quota lookup");
+    // v0.6.0, mức 1: liệt kê thread web của tài khoản (danh sách + tiêu
+    // đề từ sidebar muse.ai). Chỉ BrowserDriver cài đặt thật; các driver
+    // khác dùng default này và gateway trả 501.
+    Task<List<(string Url, string Title)>> ListWebThreads(Account account)
+        => throw MuseException.NotImplemented($"driver '{Name}' không hỗ trợ liệt kê hội thoại web");
     Task<Dictionary<string, object?>> Health()
         => Task.FromResult(new Dictionary<string, object?> { ["driver"] = Name, ["ok"] = true });
 }

@@ -597,6 +597,14 @@ public sealed class BrowserDriver : IMuseDriver
         string? progress = null;
         var sawGenerating = false;
         double? stoppedAt = null;
+        // Fallback binding (v0.6.0): khi web đã dừng tạo mà phản hồi vẫn
+        // không gắn được với request id (localReplyBound=false, thường do
+        // DOM hydration/reorder), lastText sau user message mới vẫn có thể
+        // là phản hồi thật. Chỉ kích hoạt sau khi dừng + hết grace, và
+        // vẫn đi qua đường ổn định 4 poll như phản hồi thường. Không tự
+        // gửi lại, không tạo hội thoại mới, không xóa lịch sử.
+        var fallbackActive = false;
+        var fallbackText = "";
         try
         {
             while (true)
@@ -604,7 +612,12 @@ public sealed class BrowserDriver : IMuseDriver
                 req.Cancel.ThrowIfCancellationRequested();
                 var elapsed = (DateTime.UtcNow - started).TotalSeconds;
                 if (elapsed > _settings.ChatTimeout) throw UpstreamException.Timeout("assistant reply timed out");
-                if (!gotFirst && elapsed > _settings.FirstTokenTimeout)
+                // Đừng để FirstTokenTimeout cắt ngang cửa sổ grace khi web
+                // vừa dừng tạo: phải chờ hết grace mới quyết định fallback
+                // binding hay 502, nếu không fallback không bao giờ tới lượt
+                // khi web tạo lâu rồi mới dừng.
+                var inStopGrace = sawGenerating && stoppedAt is { } graceAt && elapsed - graceAt <= _settings.ReplyRenderGrace;
+                if (!gotFirst && elapsed > _settings.FirstTokenTimeout && !inStopGrace)
                     throw UpstreamException.ResponseUnavailable("No distinct assistant reply could be read from Muse web before timeout. Conversation retained; no automatic resend.");
                 await Task.Delay(TimeSpan.FromSeconds(PollInterval), req.Cancel);
                 var st = await ChatState(tab, req.Cancel, req.LocalTools ? submittedRequestId : null);
@@ -632,7 +645,50 @@ public sealed class BrowserDriver : IMuseDriver
                 if (!isNew || text.Length == 0)
                 {
                     if (stoppedAt is { } idleAt && elapsed - idleAt > _settings.ReplyRenderGrace)
-                        throw UpstreamException.ResponseUnavailable("Muse web stopped responding without a completed reply that the app could identify. Conversation retained; no automatic resend.");
+                    {
+                        // Fallback binding: chỉ ở chế độ LocalTools, chỉ sau
+                        // khi đã dừng tạo + hết grace (không kích hoạt trong
+                        // lúc đang tạo). Điều kiện bám đúng spec: có bubble
+                        // assistant sau user message mới, user key mới khác
+                        // baseline, và lastText (bubble assistant mới nhất,
+                        // không phải localReplyText vốn rỗng khi chưa bound)
+                        // khác rỗng và khác baseline. Sau khi kích hoạt,
+                        // đếm ổn định 4 poll như phản hồi thường rồi mới yield.
+                        if (req.LocalTools && !fallbackActive)
+                        {
+                            var candidate = Str(st, "lastText") ?? "";
+                            if (BoolNode(st, "replyAfterUser") && currentUserKey.Length > 0 && currentUserKey != baseUserKey
+                                && candidate.Length > 0 && candidate != baseText)
+                            {
+                                fallbackActive = true;
+                                fallbackText = candidate;
+                                last = candidate;
+                                stable = 0;
+                                gotFirst = true;
+                                Diagnostic?.Invoke($"local_reply_fallback_binding chars={candidate.Length}");
+                                continue;
+                            }
+                        }
+                        if (req.LocalTools && fallbackActive)
+                        {
+                            var current = Str(st, "lastText") ?? "";
+                            if (current.Length > 0 && current != fallbackText) { fallbackText = current; last = current; stable = 0; continue; }
+                            if (++stable >= StablePollsDone)
+                            {
+                                Diagnostic?.Invoke($"local_reply_fallback_complete chars={fallbackText.Length}");
+                                finished = true;
+                                yield return fallbackText;
+                                break;
+                            }
+                            continue;
+                        }
+                        // Fallback cũng thất bại: giữ lỗi 502, nhưng ghi thêm
+                        // độ dài phần đã đọc được (chỉ số ký tự, KHÔNG đưa
+                        // nội dung partial vào lỗi vì có thể là JSON chưa
+                        // hoàn chỉnh làm hỏng planner).
+                        var partialChars = (Str(st, "lastText") ?? "").Length;
+                        throw UpstreamException.ResponseUnavailable($"Muse web stopped responding without a completed reply that the app could identify. Partial text read: {partialChars} chars (content not included). Conversation retained; no automatic resend.");
+                    }
                     if (elapsed > 15 && Dom.StallHints.Any(h => (Str(st, "tail") ?? "").Contains(h)))
                         throw UpstreamException.Timeout("upstream workspace is stuck connecting");
                     continue;
@@ -879,6 +935,68 @@ public sealed class BrowserDriver : IMuseDriver
         var tab = await Checkout(account, t => !t.HasState, req.Cancel);
         return await Generate(tab, account, prompt, images, "video",
             _settings.VideoTimeout, req.OnProgress, req.Cancel);
+    }
+
+    // ---------- liệt kê thread web (v0.6.0, mức 1) ----------
+    // Mở trang chủ muse.ai trong một page TẠM thuộc đúng context của tài
+    // khoản (GetContext, cookie đã gắn sẵn lúc tạo context), đọc mọi thẻ
+    // <a> trỏ tới /thread/<id> ở sidebar. Chọn trang chủ thay vì
+    // /thread/new để không vô tình tạo một thread trống mới; trang chủ
+    // vẫn hiển thị sidebar hội thoại khi tài khoản đã đăng nhập.
+    // Page tạm KHÔNG đưa vào _tabs, chỉ đóng page đó trong finally, không
+    // đóng context và không chạm tab chat đang chạy. Nếu đã bị đẩy về
+    // trang đăng nhập thì báo Auth tiếng Việt, KHÔNG trả danh sách rỗng
+    // (danh sách rỗng thật và hết hạn trông giống nhau, trả rỗng sẽ làm
+    // extension kết luận sai là tài khoản không có hội thoại nào).
+    public async Task<List<(string Url, string Title)>> ListWebThreads(Account account)
+    {
+        if (Upstream.MissingSessionCookies(account.Cookies) is { Count: > 0 })
+            throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+        var context = await GetContext(account);
+        var page = await context.NewPageAsync();
+        try
+        {
+            await page.GotoAsync(Upstream.Site,
+                new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            // Chờ sidebar tải lười: DOMContentLoaded chưa đủ cho danh
+            // sách hội thoại (xem giới hạn trong README extension).
+            await Task.Delay(TimeSpan.FromSeconds(2.5));
+            var result = await Eval(page, """
+                (() => {
+                  const links = [...document.querySelectorAll('a[href]')].map(a => ({
+                    href: a.href || '',
+                    title: (a.innerText || '').trim().replace(/\s+/g, ' '),
+                  }));
+                  return { head: (document.body ? document.body.innerText.slice(0, 2000) : ''), links };
+                })()
+                """);
+            if (result is not System.Text.Json.Nodes.JsonObject obj)
+                throw UpstreamException.ResponseUnavailable("Không đọc được danh sách hội thoại từ muse.ai");
+            if (!Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
+                || !pageUri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase))
+                throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+            var head = (Str(obj, "head") ?? "").ToLowerInvariant();
+            if (Dom.LoginHints.Any(h => head.Contains(h)))
+                throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var threads = new List<(string Url, string Title)>();
+            if (obj["links"] is System.Text.Json.Nodes.JsonArray links)
+            {
+                foreach (var item in links)
+                {
+                    if (item is not System.Text.Json.Nodes.JsonObject link) continue;
+                    var href = Str(link, "href") ?? "";
+                    if (!LocalConversationStore.IsThread(href)) continue;
+                    var normalized = href.TrimEnd('/');
+                    if (!seen.Add(normalized)) continue;
+                    var title = Str(link, "title") ?? "";
+                    if (title.Length > 200) title = title[..200];
+                    threads.Add((normalized, title));
+                }
+            }
+            return threads;
+        }
+        finally { try { await page.CloseAsync(); } catch { } }
     }
 
     // ---------- session / quota ----------

@@ -14,6 +14,14 @@ public sealed class AppState
     public KeyStore Keys { get; }
     public RequestLog Requests { get; }
 
+    // Diagnostic của BrowserDriver trước đây không có ai subscribe nên
+    // các dòng local_reply_poll / local_reply_complete không bao giờ vào
+    // stdout → Output > Muse Gateway và panel Nhật ký. Subscribe một lần
+    // duy nhất cho mỗi instance driver (AppState có thể tạo lại với cùng
+    // driver thì không subscribe trùng, tránh log lặp).
+    private static readonly HashSet<BrowserDriver> DiagnosticSubscribed = new();
+    private static readonly object DiagnosticLock = new();
+
     public AppState(Settings settings, IMuseDriver? driver = null)
     {
         settings.Validate();
@@ -21,6 +29,14 @@ public sealed class AppState
         settings.EnsureDirs();
         settings.ResolveApiKey();
         Driver = driver ?? DriverFactory.Create(settings);
+        if (Driver is BrowserDriver browserDriver)
+        {
+            lock (DiagnosticLock)
+            {
+                if (DiagnosticSubscribed.Add(browserDriver))
+                    browserDriver.Diagnostic += msg => Console.WriteLine("[local] " + msg);
+            }
+        }
         Pool = new AccountPool(settings.AccountsFile, settings.PoolStrategy,
             settings.AccountMaxConcurrency, settings.AccountCooldown, settings.PoolAcquireTimeout);
         Pool.Load();

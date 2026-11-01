@@ -41,7 +41,7 @@ function apiBase(baseUrl: string): string {
   return baseUrl.replace(/\/v1$/, '').replace(/\/+$/, '');
 }
 
-async function adminFetch(baseUrl: string, apiKey: string, path: string, init: RequestInit = {}): Promise<unknown> {
+async function adminFetch(baseUrl: string, apiKey: string, path: string, init: RequestInit = {}, notFoundMessage?: string): Promise<unknown> {
   const url = `${apiBase(baseUrl)}${path}`;
   const resp = await fetch(url, {
     ...init,
@@ -51,6 +51,9 @@ async function adminFetch(baseUrl: string, apiKey: string, path: string, init: R
   if (!resp.ok) {
     if (resp.status === 401) {
       throw new Error('Gateway từ chối quyền admin (HTTP 401). Với gateway kèm theo, key do extension quản lý phải khớp; với gateway ngoài có ADMIN_KEY riêng, hãy dùng dashboard của gateway đó thay vì lệnh này.');
+    }
+    if (resp.status === 404 && notFoundMessage) {
+      throw new Error(notFoundMessage);
     }
     throw new Error(`Gateway trả HTTP ${resp.status}: ${text.slice(0, 500)}`);
   }
@@ -140,26 +143,55 @@ function asBrowserLogin(data: Record<string, unknown>): BrowserLoginResult {
   };
 }
 
+// Thông báo riêng cho 404 ở luồng đăng nhập qua trình duyệt (hotfix
+// v0.6.0): gateway cũ không có endpoint này, khác với 401 (sai key)
+// hay các lỗi admin khác nên không dùng thông điệp chung "HTTP 404".
+const browserLoginNotFoundMessage = 'Gateway chưa có endpoint đăng nhập qua trình duyệt. Nếu bạn vừa cập nhật extension, hãy Khởi động lại gateway rồi thử lại; nếu đang dùng gateway ngoài cũ, hãy cập nhật gateway đó.';
+
 export async function startBrowserLogin(baseUrl: string, apiKey: string, label?: string, accountId?: string): Promise<BrowserLoginResult> {
   const body: Record<string, string> = {};
   if (label) { body.label = label; }
   if (accountId) { body.accountId = accountId; }
-  const data = (await adminFetch(baseUrl, apiKey, '/login/browser/start', { method: 'POST', body: JSON.stringify(body) })) as Record<string, unknown>;
+  const data = (await adminFetch(baseUrl, apiKey, '/admin/login/browser/start', { method: 'POST', body: JSON.stringify(body) }, browserLoginNotFoundMessage)) as Record<string, unknown>;
   return asBrowserLogin(data);
 }
 
 export async function getBrowserLoginStatus(baseUrl: string, apiKey: string, id: string): Promise<BrowserLoginResult> {
-  const data = (await adminFetch(baseUrl, apiKey, `/login/browser/${encodeURIComponent(id)}/status`)) as Record<string, unknown>;
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/login/browser/${encodeURIComponent(id)}/status`, {}, browserLoginNotFoundMessage)) as Record<string, unknown>;
   return asBrowserLogin(data);
 }
 
 export async function cancelBrowserLogin(baseUrl: string, apiKey: string, id: string): Promise<BrowserLoginResult> {
-  const data = (await adminFetch(baseUrl, apiKey, `/login/browser/${encodeURIComponent(id)}/cancel`, { method: 'POST' })) as Record<string, unknown>;
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/login/browser/${encodeURIComponent(id)}/cancel`, { method: 'POST' }, browserLoginNotFoundMessage)) as Record<string, unknown>;
   return asBrowserLogin(data);
 }
 
 export async function deleteGatewayAccount(baseUrl: string, apiKey: string, id: string): Promise<void> {
   await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// Đồng bộ hội thoại từ web, mức 1 (v0.6.0): chỉ danh sách + đăng ký
+// mapping, không nhập nội dung tin nhắn cũ.
+export interface WebThread { url: string; title: string; }
+
+export async function fetchWebThreads(baseUrl: string, apiKey: string, id: string): Promise<WebThread[]> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}/web-threads`, { method: 'POST' })) as Record<string, unknown>;
+  const arr = Array.isArray(data.data) ? data.data : [];
+  return arr
+    .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null && typeof x.url === 'string')
+    .map((x) => ({ url: x.url as string, title: typeof x.title === 'string' ? x.title : '' }));
+}
+
+export async function registerConversation(baseUrl: string, apiKey: string, accountId: string, hint: string, url: string): Promise<void> {
+  await adminFetch(baseUrl, apiKey, '/admin/conversations/register', { method: 'POST', body: JSON.stringify({ accountId, hint, url }) });
+}
+
+export async function fetchRegisteredConversationUrls(baseUrl: string, apiKey: string): Promise<string[]> {
+  const data = (await adminFetch(baseUrl, apiKey, '/admin/conversations/urls')) as Record<string, unknown>;
+  const arr = Array.isArray(data.data) ? data.data : [];
+  return arr
+    .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null && typeof x.url === 'string')
+    .map((x) => x.url as string);
 }
 
 export function formatCooldown(cooldownUntil: number): string {

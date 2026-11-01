@@ -27,6 +27,7 @@
   <p>Gateway sẽ mở một <b>cửa sổ trình duyệt Chromium của chính nó</b> (có đầu, 1200×800) để bạn đăng nhập tài khoản Muse trong đó; đăng nhập xong, gateway tự lấy cookie từ cửa sổ đó và lưu thành tài khoản. Mở muse.ai trong trình duyệt ngoài của bạn rồi đăng nhập thì <b>không</b> truyền được session sang gateway, vì gateway dùng context trình duyệt riêng, không đọc profile trình duyệt hệ thống — vì vậy phải đăng nhập trong cửa sổ do gateway mở.</p>
   <p class="note">Chỉ một phiên đăng nhập chờ tại một thời điểm. Phiên hết hạn sau 10 phút chưa đăng nhập, hoặc bị hủy khi bạn đóng cửa sổ trình duyệt. Đăng nhập qua trình duyệt cần Chromium và cửa sổ có đầu trên Windows.</p>
   <label>Nhãn cho tài khoản mới: <input id="browserLoginLabel" type="text" placeholder="Tài khoản cá nhân"></label>
+  <div id="browserStatus" class="note">Đang kiểm tra trình duyệt…</div>
   <div class="actions">
     <button id="browserLoginBtn">Đăng nhập qua trình duyệt</button>
     <button id="cancelBrowserLoginBtn" style="display: none;">Hủy phiên đăng nhập</button>

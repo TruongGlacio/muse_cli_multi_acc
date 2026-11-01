@@ -3,13 +3,58 @@
   var messagesEl = document.getElementById('messages');
   var sessionListEl = document.getElementById('sessionList');
   var currentSessionLabel = document.getElementById('currentSessionLabel');
-  var drawerEl = document.getElementById('drawer');
-  var sessionListContainer = document.getElementById('sessionListContainer');
+  // Layout 2 cột (v0.6.0): drawer dưới header của 0.5.0 đã xóa; nút
+  // "☰ Quản lý hội thoại" giờ bật/tắt cột trái. Trạng thái mở/thu gọn
+  // lưu bằng webview setState (mất khi webview bị dispose hoàn toàn thì
+  // mặc định mở lại).
+  function setSidebarCollapsed(collapsed) {
+    document.body.classList.toggle('sidebar-collapsed', !!collapsed);
+    try { vscode.setState({ sidebarCollapsed: !!collapsed }); } catch (e) { /* webview cũ không có setState thì thôi */ }
+  }
+  function toggleSidebar() {
+    setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
+  }
+  try {
+    var savedState = vscode.getState();
+    if (savedState && savedState.sidebarCollapsed) { document.body.classList.add('sidebar-collapsed'); }
+  } catch (e) { /* mặc định mở */ }
   var statusEl = document.getElementById('status');
   var inputEl = document.getElementById('input');
   var attachmentsEl = document.getElementById('attachments');
   var streamBubble = null;
   var streamRaw = '';
+  // Panel Nhật ký (v0.6.0): dòng log runtime, mỗi dòng có giờ nhận do
+  // extension thêm (dòng gateway gốc không có timestamp). Dòng hiển thị
+  // dùng textContent nên nội dung log không thể chèn HTML.
+  var logLinesEl = document.getElementById('logLines');
+  var logPanelEl = document.getElementById('logPanel');
+  var logFilterEl = document.getElementById('logFilter');
+  var logData = [];
+  var logErrorWords = ['error', 'lỗi', 'failed', '502', '503', '429', 'quota'];
+  function isLogError(text) {
+    var low = (text || '').toLowerCase();
+    return logErrorWords.some(function (w) { return low.indexOf(w) >= 0; });
+  }
+  function visibleLogLines() {
+    var q = (logFilterEl.value || '').trim().toLowerCase();
+    if (!q) { return logData; }
+    return logData.filter(function (l) { return (l.text || '').toLowerCase().indexOf(q) >= 0; });
+  }
+  function renderLogs() {
+    logLinesEl.innerHTML = '';
+    visibleLogLines().forEach(function (l) {
+      var div = document.createElement('div');
+      div.className = 'log-line' + (isLogError(l.text) ? ' log-error' : '');
+      div.textContent = (l.time ? l.time + ' ' : '') + (l.text || '');
+      logLinesEl.appendChild(div);
+    });
+    if (logPanelEl.style.display !== 'none') { logLinesEl.scrollTop = logLinesEl.scrollHeight; }
+  }
+  function addLogLine(time, text) {
+    logData.push({ time: time || '', text: text || '' });
+    if (logData.length > 1000) { logData.splice(0, logData.length - 1000); }
+    renderLogs();
+  }
 
   function escapeHtml(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -101,14 +146,42 @@
   document.getElementById('renameSessionBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'renameSession' });
   });
-  document.getElementById('drawerBtn').addEventListener('click', function () {
-    drawerEl.style.display = drawerEl.style.display === 'none' ? 'block' : 'none';
+  document.getElementById('sidebarBtn').addEventListener('click', toggleSidebar);
+  document.getElementById('collapseSidebarBtn').addEventListener('click', function () { setSidebarCollapsed(true); });
+  document.getElementById('logBtn').addEventListener('click', function () {
+    var opening = logPanelEl.style.display === 'none';
+    logPanelEl.style.display = opening ? 'block' : 'none';
+    if (opening) { vscode.postMessage({ type: 'getLogs' }); }
   });
-  document.getElementById('manageSessionsBtn').addEventListener('click', function () {
-    sessionListContainer.style.display = sessionListContainer.style.display === 'none' ? 'block' : 'none';
+  document.getElementById('refreshLogsBtn').addEventListener('click', function () {
+    vscode.postMessage({ type: 'getLogs' });
   });
+  document.getElementById('copyLogsBtn').addEventListener('click', function () {
+    var text = visibleLogLines().map(function (l) { return (l.time ? l.time + ' ' : '') + (l.text || ''); }).join('\n');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        statusEl.textContent = 'Đã sao chép log đang hiển thị vào clipboard.';
+      }, function () {
+        statusEl.textContent = 'Không sao chép được log vào clipboard.';
+      });
+    } else {
+      statusEl.textContent = 'Trình duyệt webview này không hỗ trợ sao chép vào clipboard.';
+    }
+  });
+  document.getElementById('clearLogsBtn').addEventListener('click', function () {
+    logData = [];
+    renderLogs();
+    vscode.postMessage({ type: 'clearLogs' });
+  });
+  document.getElementById('openOutputBtn').addEventListener('click', function () {
+    vscode.postMessage({ type: 'openOutput' });
+  });
+  logFilterEl.addEventListener('input', renderLogs);
   document.getElementById('deleteSessionBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'deleteSession' });
+  });
+  document.getElementById('syncFromWebBtn').addEventListener('click', function () {
+    vscode.postMessage({ type: 'syncFromWeb' });
   });
   document.getElementById('settingsBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'openSettings' });
@@ -128,10 +201,42 @@
     else if (m.type === 'tool') { addBubble('tool', 'Công cụ: ' + (m.name || '') + ' — ' + (m.detail || '')); }
     else if (m.type === 'toolResult') { addBubble('tool', 'Kết quả ' + (m.name || '') + ': ' + (m.detail || '')); }
     else if (m.type === 'status') { statusEl.textContent = m.text || ''; }
-    else if (m.type === 'error') { addBubble('error', m.text || 'Đã xảy ra lỗi.'); statusEl.textContent = 'Có lỗi, xem khung đỏ ở trên.'; }
+    else if (m.type === 'error') {
+      var errBubble = addBubble('error', m.text || 'Đã xảy ra lỗi.');
+      statusEl.textContent = 'Có lỗi, xem khung đỏ ở trên.';
+      // Fix 502 (v0.6.0): chỉ khi thông điệp chứa 502 hoặc
+      // upstream_response_unavailable mới thêm nút này. Bấm nút CHỈ
+      // điền sẵn câu ngắn vào ô soạn thảo trong cùng hội thoại, user tự
+      // bấm Gửi — tuyệt đối không tự gửi, không tạo hội thoại mới.
+      if (/502|upstream_response_unavailable/.test(m.text || '')) {
+        var row = document.createElement('div');
+        row.className = 'actions';
+        var resendBtn = document.createElement('button');
+        resendBtn.textContent = 'Gửi lại tin ngắn';
+        resendBtn.addEventListener('click', function () {
+          inputEl.value = 'Bạn vừa dừng mà chưa trả lời xong, hãy trả lời lại ngắn gọn.';
+          inputEl.focus();
+        });
+        row.appendChild(resendBtn);
+        errBubble.appendChild(row);
+      }
+    }
     else if (m.type === 'accountError') { addAccountErrorBubble(m.text || ''); statusEl.textContent = 'Chưa có tài khoản Muse khả dụng.'; }
     else if (m.type === 'loginRequired') { addLoginBubble(m.text || 'Hội thoại này cần đăng nhập lại.'); statusEl.textContent = 'Cần đăng nhập lại.'; }
     else if (m.type === 'loginWarning') { addLoginBubble(m.text || ''); statusEl.textContent = 'Tài khoản của hội thoại này đã hết hạn hoặc đã đăng xuất.'; }
+    else if (m.type === 'importedBanner') {
+      // Banner nhập khẩu (v0.6.0, mức 1): banner riêng trên khung chat,
+      // KHÔNG nằm trong messages nên không gửi lên model. Session đồng
+      // bộ từ web có messages trống nên banner hiện ở đầu khung chat.
+      var old = document.getElementById('importedBanner');
+      if (old) { old.remove(); }
+      var banner = document.createElement('div');
+      banner.id = 'importedBanner';
+      banner.className = 'imported-banner';
+      banner.textContent = m.text || '';
+      messagesEl.insertBefore(banner, messagesEl.firstChild);
+      banner.scrollIntoView();
+    }
     else if (m.type === 'streamStart') { streamRaw = ''; streamBubble = addBubble('assistant', ''); }
     else if (m.type === 'streamDelta') {
       streamRaw += m.text || '';
@@ -178,7 +283,7 @@
         item.appendChild(title);
         var meta = document.createElement('small');
         var when = s.updatedAt ? new Date(s.updatedAt).toLocaleString() : '';
-        meta.textContent = (s.count || 0) + ' tin' + (when ? ' • ' + when : '') + (s.workspacePath ? ' • ' + s.workspacePath.split(/[\\/]/).pop() : '');
+        meta.textContent = (s.count || 0) + ' tin' + (when ? ' • ' + when : '') + (s.workspacePath ? ' • ' + s.workspacePath.split(/[\\/]/).pop() : '') + (s.importedFromWeb ? ' • Từ web' : '');
         item.appendChild(meta);
         var accLine = document.createElement('small');
         accLine.textContent = 'Tài khoản: ' + (s.accountLabel ? s.accountLabel : 'Chưa xác định tài khoản') + (s.accountDetail ? ' (' + s.accountDetail + ')' : '');
@@ -188,8 +293,7 @@
         badge.textContent = s.accountStatus === 'running' ? 'Đang chạy' : s.accountStatus === 'loggedout' ? 'Đã logout' : 'Đã dừng';
         item.appendChild(badge);
         item.addEventListener('click', function () {
-          drawerEl.style.display = 'none';
-          sessionListContainer.style.display = 'none';
+          // Cột trái vẫn mở sau khi chuyển session (không còn drawer để đóng).
           vscode.postMessage({ type: 'switchSession', id: s.id });
         });
         sessionListEl.appendChild(item);
@@ -200,6 +304,12 @@
       (m.messages || []).forEach(function (h) { addBubble(h.role === 'user' ? 'user' : 'assistant', h.text || ''); });
     }
     else if (m.type === 'historyCleared') { messagesEl.innerHTML = ''; attachmentsEl.innerHTML = ''; streamBubble = null; streamRaw = ''; }
+    else if (m.type === 'logLine') { addLogLine(m.time || '', m.text || ''); }
+    else if (m.type === 'logs') {
+      var t = m.time || '';
+      logData = (m.lines || []).map(function (text) { return { time: t, text: text || '' }; });
+      renderLogs();
+    }
     else if (m.type === 'preset') { inputEl.value = m.text || ''; send(); }
     else if (m.type === 'done') { statusEl.textContent = 'Sẵn sàng.'; }
   });

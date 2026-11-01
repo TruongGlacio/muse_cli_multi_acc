@@ -7,44 +7,61 @@
 <title>Muse</title>
 </head>
 <body>
-<div class="header">
-  <div class="title">Muse</div>
-  <div class="subtitle">Chat, đọc dự án, sửa tệp và chạy kiểm tra qua gateway Muse2Api.</div>
-  <button id="drawerBtn" title="Mở/đóng ngăn quản lý hội thoại">☰ Quản lý hội thoại</button>
-  <button id="settingsBtn" title="Mở panel Cài đặt Muse (quản lý tài khoản)">Cài đặt</button>
-  <button id="clearHistoryBtn" title="Xóa lịch sử của hội thoại hiện tại và mở thread Muse mới (hội thoại vẫn giữ tên)">Xóa lịch sử</button>
-</div>
-<div id="currentSessionLabel">Hội thoại hiện tại: …</div>
-<div id="drawer" style="display: none;">
-  <div class="actions">
-    <button id="newSessionBtn" title="Tạo hội thoại mới, trống">Hội thoại mới</button>
-    <button id="renameSessionBtn" title="Đổi tên hội thoại hiện tại">Đổi tên</button>
-    <button id="deleteSessionBtn" title="Xóa hội thoại hiện tại (hỏi xác nhận trước)">Xóa hội thoại</button>
-    <button id="manageSessionsBtn" title="Hiện/ẩn danh sách hội thoại">Quản lý hội thoại</button>
-  </div>
-  <div id="sessionListContainer" style="display: none;">
+<div id="layout">
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <span class="sidebar-title">Hội thoại</span>
+      <button id="collapseSidebarBtn" title="Thu gọn cột hội thoại">« Thu gọn</button>
+    </div>
+    <div class="actions">
+      <button id="newSessionBtn" title="Tạo hội thoại mới, trống">Hội thoại mới</button>
+      <button id="renameSessionBtn" title="Đổi tên hội thoại hiện tại">Đổi tên</button>
+      <button id="deleteSessionBtn" title="Xóa hội thoại hiện tại (hỏi xác nhận trước)">Xóa hội thoại</button>
+      <button id="syncFromWebBtn" title="Lấy danh sách hội thoại từ web muse.ai và tạo session nối tiếp (không nhập nội dung cũ)">Đồng bộ từ web</button>
+    </div>
     <div id="sessionList"></div>
-    <p class="note">Bấm vào một hội thoại để đóng ngăn này và mở lại chat của hội thoại đó. Trạng thái: Đang chạy = hội thoại hiện tại đang có yêu cầu chạy; Đã logout = tài khoản gắn với hội thoại đã hết hạn hoặc đã đăng xuất; còn lại là Đã dừng.</p>
-  </div>
+    <p class="note">Danh sách luôn hiện khi cột trái đang mở. Bấm vào một hội thoại để mở lại chat của hội thoại đó (cột trái vẫn mở). Trạng thái: Đang chạy = hội thoại hiện tại đang có yêu cầu chạy; Đã logout = tài khoản gắn với hội thoại đã hết hạn hoặc đã đăng xuất; còn lại là Đã dừng.</p>
+  </aside>
+  <main id="chatColumn">
+    <div class="header">
+      <button id="sidebarBtn" title="Mở/đóng cột hội thoại bên trái">☰ Quản lý hội thoại</button>
+      <button id="logBtn" title="Mở/đóng panel Nhật ký runtime (log gateway + lỗi chat)">Nhật ký</button>
+      <button id="settingsBtn" title="Mở panel Cài đặt Muse (quản lý tài khoản)">Cài đặt</button>
+      <button id="clearHistoryBtn" title="Xóa lịch sử của hội thoại hiện tại và mở thread Muse mới (hội thoại vẫn giữ tên)">Xóa lịch sử</button>
+      <span id="currentSessionLabel">Hội thoại hiện tại: …</span>
+    </div>
+    <p class="subtitle">Chat, đọc dự án, sửa tệp và chạy kiểm tra qua gateway Muse2Api.</p>
+    <div id="logPanel" style="display: none;">
+      <div class="actions">
+        <input id="logFilter" type="text" placeholder="Lọc theo từ khóa…">
+        <button id="refreshLogsBtn" title="Lấy lại toàn bộ buffer log">Làm mới</button>
+        <button id="copyLogsBtn" title="Sao chép các dòng đang hiển thị sau lọc vào clipboard">Sao chép</button>
+        <button id="clearLogsBtn" title="Xóa buffer log hiển thị (Output > Muse Gateway vẫn giữ đầy đủ)">Xóa</button>
+        <button id="openOutputBtn" title="Mở OutputChannel 'Muse Gateway' đầy đủ">Mở Output</button>
+      </div>
+      <div id="logLines"></div>
+      <p class="note">Panel này chỉ là cửa sổ xem 1000 dòng log gần nhất (log gateway + lỗi chat phía extension); lịch sử đầy đủ vẫn ở Output &gt; Muse Gateway.</p>
+    </div>
+    <div id="chips">
+      <button data-prompt="Giải thích dự án này đang làm gì và các phần chính liên hệ với nhau thế nào. Chỉ đọc tệp, chưa sửa gì.">Tìm hiểu dự án</button>
+      <button data-prompt="Tìm lỗi trong dự án này, giải thích nguyên nhân, rồi sửa sau khi tôi duyệt từng thay đổi.">Tìm và sửa lỗi</button>
+      <button data-prompt="Tôi muốn thêm một tính năng. Trước hết hãy đọc các tệp liên quan rồi hỏi tôi mô tả tính năng, đừng tự sửa ngay.">Thêm tính năng</button>
+      <button data-prompt="Kiểm tra những gì vừa sửa: chạy kiểm tra phù hợp với dự án và giải thích kết quả, không tự sửa thêm.">Kiểm tra chất lượng</button>
+    </div>
+    <div id="messages"></div>
+    <div id="attachments"></div>
+    <div id="status">Gateway kèm theo sẽ tự chạy khi mở VS Code — bạn không cần chạy gateway tay nữa. Nếu gateway báo lỗi, xem thanh trạng thái “Muse Gateway” hoặc Output &gt; Muse Gateway.</div>
+    <div class="composer">
+      <textarea id="input" rows="3" placeholder="Nhập điều bạn muốn làm… (Enter để gửi, Shift+Enter để xuống dòng)"></textarea>
+      <div class="actions">
+        <button id="sendBtn">Gửi</button>
+        <button id="stopBtn">Dừng</button>
+        <button id="attachBtn" title="Chọn tệp đính kèm vào lượt chat tiếp theo: ảnh (tối đa 20 MiB/ảnh), tệp văn bản, video (trích khung hình nếu có ffmpeg)">Đính kèm tệp</button>
+      </div>
+    </div>
+    <p class="note">Mỗi thao tác ghi tệp hoặc chạy lệnh đều hỏi bạn duyệt trước (trừ khi bật muse.autoApprove). Lệnh chạy với quyền của bạn và không bị sandbox trong workspace.</p>
+  </main>
 </div>
-<div id="chips">
-  <button data-prompt="Giải thích dự án này đang làm gì và các phần chính liên hệ với nhau thế nào. Chỉ đọc tệp, chưa sửa gì.">Tìm hiểu dự án</button>
-  <button data-prompt="Tìm lỗi trong dự án này, giải thích nguyên nhân, rồi sửa sau khi tôi duyệt từng thay đổi.">Tìm và sửa lỗi</button>
-  <button data-prompt="Tôi muốn thêm một tính năng. Trước hết hãy đọc các tệp liên quan rồi hỏi tôi mô tả tính năng, đừng tự sửa ngay.">Thêm tính năng</button>
-  <button data-prompt="Kiểm tra những gì vừa sửa: chạy kiểm tra phù hợp với dự án và giải thích kết quả, không tự sửa thêm.">Kiểm tra chất lượng</button>
-</div>
-<div id="messages"></div>
-<div id="attachments"></div>
-<div id="status">Gateway kèm theo sẽ tự chạy khi mở VS Code — bạn không cần chạy gateway tay nữa. Nếu gateway báo lỗi, xem thanh trạng thái “Muse Gateway” hoặc Output &gt; Muse Gateway.</div>
-<div class="composer">
-  <textarea id="input" rows="3" placeholder="Nhập điều bạn muốn làm… (Enter để gửi, Shift+Enter để xuống dòng)"></textarea>
-  <div class="actions">
-    <button id="sendBtn">Gửi</button>
-    <button id="stopBtn">Dừng</button>
-    <button id="attachBtn" title="Chọn tệp đính kèm vào lượt chat tiếp theo: ảnh (tối đa 20 MiB/ảnh), tệp văn bản, video (trích khung hình nếu có ffmpeg)">Đính kèm tệp</button>
-  </div>
-</div>
-<p class="note">Mỗi thao tác ghi tệp hoặc chạy lệnh đều hỏi bạn duyệt trước (trừ khi bật muse.autoApprove). Lệnh chạy với quyền của bạn và không bị sandbox trong workspace.</p>
 <script src="{{jsUri}}"></script>
 </body>
 </html>

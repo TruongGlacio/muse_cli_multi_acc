@@ -1,14 +1,22 @@
 body { font-family: var(--vscode-font-family); color: var(--vscode-editor-foreground); background: var(--vscode-sideBar-background); margin: 0; padding: 10px; font-size: 13px; }
-.header { margin-bottom: 8px; }
+/* Layout 2 cột (v0.6.0): cột trái là danh sách hội thoại, cột phải là
+   khung chat chính. Drawer nằm dưới header của 0.5.0 đã xóa hoàn toàn. */
+#layout { display: flex; flex-direction: row; gap: 10px; align-items: flex-start; }
+#sidebar { width: 230px; flex: 0 0 230px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; box-sizing: border-box; }
+@media (max-width: 600px) { #sidebar { width: 200px; flex-basis: 200px; } }
+body.sidebar-collapsed #sidebar { display: none; }
+#chatColumn { flex: 1 1 auto; min-width: 0; }
+.sidebar-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.sidebar-title { font-size: 14px; font-weight: 700; }
+.header { margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+#currentSessionLabel { font-weight: 700; }
 .title { font-size: 16px; font-weight: 700; }
 .subtitle { color: var(--vscode-descriptionForeground); margin: 2px 0 6px; }
 button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 0; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
 button:hover { background: var(--vscode-button-hoverBackground); }
 #chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 #chips button { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
-#drawer { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; margin-bottom: 10px; }
-#currentSessionLabel { font-weight: 700; margin-bottom: 8px; }
-#sessionList { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; margin-top: 8px; }
+#sessionList { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; margin-top: 8px; }
 .session-item { text-align: left; background: transparent; border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 6px 8px; color: var(--vscode-editor-foreground); }
 .session-item.current { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-color: var(--vscode-badge-background); }
 .session-item small { display: block; opacity: 0.75; font-size: 11px; }
@@ -16,6 +24,12 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 .status-badge.status-running { background: rgba(0, 180, 90, 0.25); color: inherit; }
 .status-badge.status-loggedout { background: rgba(255, 80, 80, 0.25); color: inherit; }
 #messages { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+#logPanel { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; margin-bottom: 10px; }
+#logLines { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; margin-top: 8px; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+.log-line { padding: 1px 4px; border-radius: 3px; }
+.log-line.log-error { background: rgba(255, 80, 80, 0.15); }
+#logFilter { flex: 1; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; padding: 5px 8px; }
+.imported-banner { padding: 8px 10px; border-radius: 8px; background: rgba(0, 150, 255, 0.12); border: 1px solid rgba(0, 150, 255, 0.4); align-self: stretch; white-space: pre-wrap; word-break: break-word; }
 .bubble { padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
 .bubble.user { background: rgba(124, 92, 255, 0.18); align-self: flex-end; max-width: 92%; }
 .bubble.assistant { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); align-self: flex-start; max-width: 96%; }

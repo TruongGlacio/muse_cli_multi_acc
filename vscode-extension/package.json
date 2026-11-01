@@ -22,6 +22,7 @@
     "onCommand:muse.selectComputerWindow",
     "onCommand:muse.stopComputerControl",
     "onCommand:muse.clearChatHistory",
+    "onCommand:muse.syncFromWeb",
     "onCommand:muse.generateImage",
     "onCommand:muse.editImage",
     "onCommand:muse.generateVideo"
@@ -134,6 +135,10 @@
       {
         "command": "muse.logoutGatewayAccount",
         "title": "Muse: Đăng xuất tài khoản Muse khỏi gateway"
+      },
+      {
+        "command": "muse.syncFromWeb",
+        "title": "Muse: Đồng bộ hội thoại từ web"
       },
       {
         "command": "muse.generateImage",
@@ -249,7 +254,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.5.0",
+  "version": "0.6.0",
   "extensionKind": [
     "ui",
     "workspace"

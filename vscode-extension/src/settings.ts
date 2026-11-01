@@ -155,6 +155,7 @@ export class MuseSettingsPanel {
         port: info.port,
         version: status.version || '',
         total, available,
+        browserStatus: this.gateway.browserStatusLabel(),
         accounts: accounts.map((a) => {
           const expiries = Object.values(a.cookieExpires).filter((v) => v > 0);
           return {
@@ -178,6 +179,7 @@ export class MuseSettingsPanel {
     } catch (e) {
       this.post('accounts', {
         gatewayMode: '', port: 0, version: '', total: 0, available: 0, accounts: [],
+        browserStatus: this.gateway.browserStatusLabel(),
         error: e instanceof Error ? e.message : String(e),
       });
     }

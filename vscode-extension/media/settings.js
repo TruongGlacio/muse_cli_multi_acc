@@ -48,6 +48,12 @@
 
   function renderAccounts(m) {
     accountListEl.innerHTML = '';
+    // Dòng trạng thái trình duyệt (v0.6.0): đọc từ kết quả kiểm tra của
+    // GatewayManager, hiện cả khi gateway lỗi (vì kiểm tra chỉ quét file
+    // local, không cần gateway chạy). Dùng textContent nên đường dẫn
+    // không thể chèn HTML.
+    var browserStatusEl = document.getElementById('browserStatus');
+    if (browserStatusEl && m.browserStatus) { browserStatusEl.textContent = m.browserStatus; }
     if (m.error) {
       accountStatusEl.textContent = 'Không đọc được tài khoản Muse: ' + m.error;
       return;

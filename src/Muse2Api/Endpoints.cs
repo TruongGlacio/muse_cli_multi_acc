@@ -803,6 +803,56 @@ public static class Endpoints
             s.Pool.Upsert(acc);
             return Results.Json(new JsonObject { ["account_id"] = acc.Id, ["quota"] = quota });
         });
+        // ---------- đồng bộ hội thoại từ web, mức 1 (v0.6.0) ----------
+        // Chỉ liệt kê + đăng ký mapping; KHÔNG trả nội dung tin nhắn cũ.
+        admin.MapPost("/accounts/{id}/web-threads", async (HttpContext ctx, string id) =>
+        {
+            RequireAdmin(ctx, s);
+            var acc = s.Pool.Get(id) ?? throw MuseException.NotFound($"account '{id}' not found");
+            var threads = await s.Driver.ListWebThreads(acc);
+            var arr = new JsonArray();
+            foreach (var (url, title) in threads)
+                arr.Add(new JsonObject { ["url"] = url, ["title"] = title });
+            return Results.Json(new JsonObject { ["data"] = arr });
+        });
+        admin.MapPost("/conversations/register", async (HttpContext ctx) =>
+        {
+            RequireAdmin(ctx, s);
+            var body = await JsonHelp.ReadBody(ctx.Request);
+            var accountId = JsonHelp.Str(body["accountId"])
+                ?? throw MuseException.Invalid("accountId là bắt buộc");
+            _ = s.Pool.Get(accountId) ?? throw MuseException.NotFound($"account '{accountId}' not found");
+            var hint = JsonHelp.Str(body["hint"]) ?? "";
+            var url = JsonHelp.Str(body["url"]) ?? "";
+            if (string.IsNullOrWhiteSpace(hint))
+                throw MuseException.Invalid("hint không được để trống");
+            if (!LocalConversationStore.IsThread(url))
+                throw MuseException.Invalid("URL không phải thread muse.ai hợp lệ");
+            // AppState không expose LocalConversationStore nên tạo mới
+            // giống cách BrowserDriver tạo (new(settings.DataDir)).
+            new LocalConversationStore(s.Settings.DataDir).Save(accountId, hint, url, pending: false);
+            return Results.Json(new JsonObject { ["ok"] = true });
+        });
+        admin.MapGet("/conversations/urls", (HttpContext ctx) =>
+        {
+            RequireAdmin(ctx, s);
+            var arr = new JsonArray();
+            var dir = Path.Combine(s.Settings.DataDir, "local-conversations");
+            if (Directory.Exists(dir))
+            {
+                foreach (var file in Directory.EnumerateFiles(dir, "*.json"))
+                {
+                    LocalConversationStore.Entry? entry;
+                    try { entry = JsonSerializer.Deserialize<LocalConversationStore.Entry>(File.ReadAllText(file)); }
+                    catch { continue; } // File hỏng: bỏ qua, không vỡ cả danh sách.
+                    if (entry is null || string.IsNullOrEmpty(entry.Url)) continue;
+                    // Chỉ trả URL + hash tài khoản; KHÔNG trả hint gốc
+                    // (hint là conversationId nội bộ) và không trả cookie.
+                    arr.Add(new JsonObject { ["url"] = entry.Url, ["accountHash"] = entry.Account });
+                }
+            }
+            return Results.Json(new JsonObject { ["data"] = arr });
+        });
         // ---------- đăng nhập qua trình duyệt (v0.5.0) ----------
         // Mở cửa sổ Chromium có đầu của chính gateway để user đăng nhập
         // (xem BrowserLogin.cs: không đọc profile trình duyệt hệ thống).
