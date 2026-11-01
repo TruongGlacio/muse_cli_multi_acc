@@ -40,9 +40,104 @@ public static class DiagnosticLines
             + $"[page={p.PageUrl} threads={p.Threads} links={p.Links}"
             + $" base_threads={p.BaselineThreads} base_links={p.BaselineLinks}"
             + $" title={TruncateTitle(p.Title)} login_form={Bool(p.HasLoginForm)}"
-            + $" buttons={p.Buttons} sidebar_clicked={Bool(p.SidebarClicked)}]");
+            + $" buttons={p.Buttons} sidebar_clicked={Bool(p.SidebarClicked)}"
+            + $" probed={Bool(p.Probed)}"
+            + $" groups=thread={(p.Groups?.ThreadLinks ?? 0)}"
+            + $" library={(p.Groups?.LibraryLinks ?? 0)}"
+            + $" settings={(p.Groups?.SettingsLinks ?? 0)}"
+            + $" other={(p.Groups?.OtherLinks ?? 0)}"
+            + $" nohref={(p.Groups?.NoHrefAnchors ?? 0)}"
+            + $" aside_nav_buttons={(p.Groups?.AsideNavButtons ?? 0)}"
+            + $" labeled_buttons={(p.Groups?.LabeledButtons ?? 0)}"
+            + $" history_testids={(p.Groups?.HistoryTestIds ?? 0)}]");
         return $"web_threads account={accountId} threads={scan.Threads.Count} links={scan.LinkCount}"
             + $" login_hint={Bool(scan.LoginHint)} pages={string.Join(" ", pageParts)}";
+    }
+
+    /// <summary>Nhóm của một anchor theo mẫu href (v0.8.7, chỉ để đếm).</summary>
+    public enum AnchorGroup { NoHref, Thread, Library, Settings, Other }
+
+    /// <summary>
+    /// Phân nhóm anchor (v0.8.7, hàm thuần để test đơn vị): không có
+    /// href (hoặc href rỗng) thì vào nhóm nohref; href chứa "/thread/"
+    /// thì vào nhóm thread (kể cả /thread/new — nhóm này chỉ đếm, số
+    /// thread thật vẫn do bước trích IsThread quyết định); tiếp theo
+    /// là /library/ rồi /settings/, còn lại vào other. Thứ tự thread
+    /// trước library/settings để một URL hiếm khi chứa cả hai mẫu vẫn
+    /// được đếm về phía thread.
+    /// </summary>
+    public static AnchorGroup ClassifyAnchorGroup(bool hasHref, string? href)
+    {
+        if (!hasHref || string.IsNullOrWhiteSpace(href)) return AnchorGroup.NoHref;
+        if (href.Contains("/thread/", StringComparison.Ordinal)) return AnchorGroup.Thread;
+        if (href.Contains("/library/", StringComparison.Ordinal)) return AnchorGroup.Library;
+        if (href.Contains("/settings/", StringComparison.Ordinal)) return AnchorGroup.Settings;
+        return AnchorGroup.Other;
+    }
+
+    /// <summary>
+    /// Lấy id thread từ URL sau khi bấm nút thăm dò (v0.8.7, hàm thuần):
+    /// chỉ chấp nhận https://muse.ai/thread/&lt;id&gt; với id là một đoạn
+    /// duy nhất gồm chữ/số/gạch dưới/gạch ngang, khác rỗng và khác
+    /// "new". URL có query/fragment thì bỏ phần đó khi ghi nhận (caller
+    /// tự ráp lại URL chuẩn từ id). Trả null cho mọi trường hợp còn
+    /// lại (kể cả /thread/new, /thread, path lồng nhau, host khác).
+    /// </summary>
+    public static string? ProbeThreadId(string? url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return null;
+        if (!uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)) return null;
+        if (!uri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase)) return null;
+        var path = uri.AbsolutePath;
+        if (!path.StartsWith("/thread/", StringComparison.Ordinal)) return null;
+        var id = path["/thread/".Length..].TrimEnd('/');
+        if (id.Length == 0 || id.Contains('/')) return null;
+        if (id.Equals("new", StringComparison.OrdinalIgnoreCase)) return null;
+        foreach (var c in id)
+            if (!(char.IsLetterOrDigit(c) || c == '_' || c == '-')) return null;
+        return id;
+    }
+
+    /// <summary>Kết quả quyết định sau một lần bấm nút thăm dò (v0.8.7).</summary>
+    public enum ProbeOutcome
+    {
+        /// <summary>Gặp tín hiệu hết hạn: dừng toàn bộ vòng thăm dò.</summary>
+        StopAuth,
+        /// <summary>URL thành thread thật: ghi nhận rồi GoBack.</summary>
+        RecordThread,
+        /// <summary>URL thành /thread/new: nút tạo mới, GoBack + loại nút.</summary>
+        GoBackNew,
+        /// <summary>URL vẫn ở khu vực chat nhưng không phải thread
+        /// (ví dụ về trang chủ): GoBack + loại nút.</summary>
+        GoBackOther,
+        /// <summary>URL không đổi: bấm Escape rồi thử nút khác.</summary>
+        EscapeUnchanged,
+        /// <summary>URL rời khỏi khu vực chat: GoBack ngay, loại nút,
+        /// không ghi nhận gì từ trang lạc.</summary>
+        GoBackLeftChat,
+    }
+
+    /// <summary>
+    /// Quyết định sau một lần bấm nút thăm dò (v0.8.7, hàm thuần để
+    /// test đơn vị). Thứ tự: tín hiệu hết hạn trước hết; URL không
+    /// đổi thì Escape; URL thành thread thật thì ghi nhận; URL thành
+    /// /thread/new thì GoBack + loại; URL rời khu vực chat thì GoBack
+    /// + loại; còn lại (vẫn ở khu vực chat nhưng không phải thread)
+    /// thì GoBack + loại.
+    /// </summary>
+    public static (ProbeOutcome Outcome, string? ThreadId) DecideProbeOutcome(
+        string? beforeUrl, string? afterUrl, bool loginSignal)
+    {
+        if (loginSignal) return (ProbeOutcome.StopAuth, null);
+        if (string.Equals(beforeUrl, afterUrl, StringComparison.Ordinal)) return (ProbeOutcome.EscapeUnchanged, null);
+        var threadId = ProbeThreadId(afterUrl);
+        if (threadId is not null) return (ProbeOutcome.RecordThread, threadId);
+        if (Uri.TryCreate(afterUrl, UriKind.Absolute, out var uri)
+            && uri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase)
+            && uri.AbsolutePath.TrimEnd('/') == "/thread/new")
+            return (ProbeOutcome.GoBackNew, null);
+        if (!IsChatAreaUrl(afterUrl)) return (ProbeOutcome.GoBackLeftChat, null);
+        return (ProbeOutcome.GoBackOther, null);
     }
 
     /// <summary>Tiêu đề trang chung, cắt 80 ký tự (v0.8.5).</summary>

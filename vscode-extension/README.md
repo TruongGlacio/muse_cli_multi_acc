@@ -1,7 +1,14 @@
-# Muse cho VS Code (v0.8.6)
+# Muse cho VS Code (v0.8.7)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.8.7: đồng bộ thăm dò nút lịch sử trong sidebar + chẩn đoán nhóm
+
+Bản 0.8.6 đã sửa lạc trang khi bấm mở sidebar, và log thật của user trên 0.8.6 xác nhận hai trang đều ở đúng khu vực chat (trang chủ `muse.ai` tiêu đề "Chat - Muse", trang `/thread/new`), không bấm nhầm nút nào — nhưng vẫn 0 hội thoại: trang chủ 0 thread / 13 link / 119 nút, trang thread mới 0 thread / 1 link / 96 nút, không gợi ý đăng nhập, không form đăng nhập (trang đã đăng nhập thật). Kết luận mới: lịch sử không hiện thành link `/thread/` trên trang tạm — khả năng cao là dạng nút bấm hoặc nằm sau panel sidebar đang đóng. Bản này sửa theo hướng đó, chỉ trong luồng quét đồng bộ:
+1. **Chẩn đoán nhóm (chỉ số lượng).** Dòng `web_threads` nay ghi thêm cho từng trang: số anchor theo nhóm mẫu href (thread/library/settings/khác/không href), số nút trong aside/nav, số nút có aria-label, số phần tử có data-testid chứa history/sidebar — để lần sau đọc log là biết lịch sử nằm ở dạng nào, không ghi tiêu đề hội thoại, URL thread, nhãn nút hay nội dung trang.
+2. **Thăm dò nút lịch sử có kiểm soát.** Chỉ chạy khi quét link cho 0 thread và chỉ sau bước mở sidebar cũ: xét các nút đang hiển thị trong aside/nav, tối đa 30 nút và chung ngân sách 60 giây cho cả lần quét một tài khoản. Bỏ qua nút trong form, nút trong dialog, nút khớp loại trừ cũ (đăng nhập/đăng xuất/thanh toán/nâng cấp/xóa) và nút khớp mẫu điều khiển sidebar cũ. Bấm xong chờ 800ms rồi đọc URL: thành `/thread/<id>` thì ghi nhận thread đó (chỉ lấy id từ URL, tiêu đề để extension tự đặt dự phòng) rồi quay lại trang quét; thành `/thread/new` thì quay lại và loại nút đó (nút tạo mới, không phải lịch sử); URL không đổi thì bấm Escape; URL rời khỏi khu vực chat thì quay lại ngay và loại nút đó, không ghi nhận gì từ trang lạc. Không điền form, không gửi tin, không bấm nút trong dialog. Gặp tín hiệu hết hạn thì dừng ngay và báo Auth như vòng poll chính. Thread ghi nhận qua thăm dò đi qua cùng khử trùng/tombstone ở extension như thread qua link, không đổi phía extension.
+3. **Chưa kiểm chứng được:** thăm dò nút trên trang muse.ai thật vẫn cần user thử (máy build Linux chỉ chạy được driver mock, mock dừng ở 501 cho web-threads nên bước bấm chỉ qua build + test logic).
 
 ## Mới trong v0.8.6: sửa lỗi bấm mở sidebar làm đồng bộ lạc sang trang artifact
 

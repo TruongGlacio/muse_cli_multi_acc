@@ -45,7 +45,19 @@ public sealed record WebThreadsScan(List<(string Url, string Title)> Threads, st
     // lượng, cờ form đăng nhập — KHÔNG tiêu đề hội thoại, KHÔNG nội
     // dung trang, KHÔNG URL thread; URL trang chỉ là trang chủ hoặc
     // /thread/new, không phải trang thread).
-    string Title = "", bool HasLoginForm = false, int ButtonCount = 0, List<WebThreadsPageDiag>? Pages = null);
+    string Title = "", bool HasLoginForm = false, int ButtonCount = 0, List<WebThreadsPageDiag>? Pages = null,
+    // v0.8.7: nhóm chẩn đoán chỉ gồm số lượng (xem WebThreadsGroupDiag).
+    WebThreadsGroupDiag? Groups = null);
+
+/// <summary>
+/// Nhóm chẩn đoán chỉ gồm SỐ LƯỢNG cho một trang quét (v0.8.7), để lần
+/// sau đọc log là biết lịch sử nằm ở dạng nào mà không cần nhìn DOM:
+/// anchor phân theo mẫu href, nút trong aside/nav, nút có aria-label,
+/// phần tử có data-testid chứa history/sidebar. KHÔNG chứa tiêu đề,
+/// URL, nhãn hay nội dung trang nào.
+/// </summary>
+public sealed record WebThreadsGroupDiag(int ThreadLinks, int LibraryLinks, int SettingsLinks, int OtherLinks,
+    int NoHrefAnchors, int AsideNavButtons, int LabeledButtons, int HistoryTestIds);
 
 /// <summary>
 /// Chẩn đoán của MỘT trang trong lần quét web-threads (v0.8.5, mở rộng
@@ -58,7 +70,10 @@ public sealed record WebThreadsScan(List<(string Url, string Title)> Threads, st
 /// gốc để lần sau đọc log vẫn thấy trang chat gốc cho bao nhiêu.
 /// Khi không bấm thì baseline bằng đúng số liệu cuối.
 /// </summary>
-public sealed record WebThreadsPageDiag(string PageUrl, int Threads, int Links, string Title, bool HasLoginForm, int Buttons, bool SidebarClicked, int BaselineThreads, int BaselineLinks);
+public sealed record WebThreadsPageDiag(string PageUrl, int Threads, int Links, string Title, bool HasLoginForm, int Buttons, bool SidebarClicked, int BaselineThreads, int BaselineLinks,
+    // v0.8.7: nhóm chẩn đoán chỉ gồm số lượng (null = chưa quét nhóm,
+    // dòng log in 0) và cờ đã chạy thăm dò nút lịch sử hay chưa.
+    WebThreadsGroupDiag? Groups = null, bool Probed = false);
 public sealed record DriverCapabilities(bool Chat = false, bool ChatImages = false,
     bool Image = false, bool ImageEdit = false, bool Video = false,
     bool RenewSession = false, bool Quota = false);

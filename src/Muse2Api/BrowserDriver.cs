@@ -999,6 +999,11 @@ public sealed class BrowserDriver : IMuseDriver
             var pages = new List<WebThreadsPageDiag>();
             var best = new WebThreadsScan(new List<(string Url, string Title)>(), Upstream.Site, 0);
             var last = best;
+            // v0.8.7: ngân sách thăm dò CHUNG cho cả lần quét một tài
+            // khoản là 60 giây (mỗi trang thăm dò tối đa 30 nút nhưng
+            // không vượt deadline này), để tổng thời gian quét không
+            // vượt khung hiện tại cộng thêm quá 60 giây.
+            var probeDeadline = DateTimeOffset.UtcNow.AddSeconds(60);
             // Ghi log chẩn đoán trước khi ném Auth để user vẫn đọc được
             // số liệu các trang đã quét (endpoint chỉ ghi log khi quét
             // kết thúc thành công, còn đường Auth thì không tới đó).
@@ -1041,9 +1046,29 @@ public sealed class BrowserDriver : IMuseDriver
                     if (improved is not null) { scan = improved; sidebarClicked = true; }
                     else sidebarClicked = await AnySidebarButtonClickedAsync(page);
                 }
+                // v0.8.7: quét link vẫn 0 thread thì thăm dò nút lịch
+                // sử trong aside/nav (lịch sử có thể nằm ở dạng nút
+                // chứ không phải link). Gặp Auth trong lúc thăm dò thì
+                // ghi log rồi ném Auth như vòng poll chính, không trả
+                // kết quả nửa vời.
+                var probed = false;
+                var probeHitAuth = false;
+                if (scan.Threads.Count == 0)
+                {
+                    probed = true;
+                    var (probeFound, hitAuth) = await ProbeHistoryButtonsAsync(page, scan, probeDeadline);
+                    probeHitAuth = hitAuth;
+                    if (probeFound is not null) scan = probeFound;
+                }
                 pages.Add(new WebThreadsPageDiag(scan.PageUrl, scan.Threads.Count, scan.LinkCount,
-                    scan.Title, scan.HasLoginForm, scan.ButtonCount, sidebarClicked, baselineThreads, baselineLinks));
+                    scan.Title, scan.HasLoginForm, scan.ButtonCount, sidebarClicked, baselineThreads, baselineLinks,
+                    scan.Groups, probed));
                 last = scan;
+                if (probeHitAuth)
+                {
+                    LogScan(scan);
+                    throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+                }
                 if (DiagnosticLines.IsBetterScan(scan, best)) best = scan;
                 if (best.Threads.Count > 0) break;
             }
@@ -1156,20 +1181,164 @@ public sealed class BrowserDriver : IMuseDriver
         return result is System.Text.Json.Nodes.JsonObject obj && BoolNode(obj, "clicked");
     }
 
+    // Thăm dò nút lịch sử có kiểm soát (v0.8.7, chỉ chạy khi quét link
+    // cho 0 thread và chỉ sau bước mở sidebar cũ): lịch sử trên trang
+    // tạm không hiện thành link /thread/ (log thật 0.8.6: trang chủ 0
+    // thread / 13 link / 119 nút, /thread/new 0 thread / 1 link / 96
+    // nút) nên phải thử bấm nút trong aside/nav và xem URL đổi đi đâu.
+    // An toàn: chỉ nút đang hiển thị trong aside/nav; bỏ qua nút trong
+    // form, nút trong dialog, nút khớp loại trừ cũ (đăng nhập/đăng
+    // xuất/thanh toán/nâng cấp/xóa) và nút khớp mẫu điều khiển sidebar
+    // cũ (đã thử ở bước trước); tối đa 30 nút và chung ngân sách 60
+    // giây cho cả lần quét một tài khoản (deadline do caller cấp).
+    // Sau mỗi lần bấm: URL thành /thread/<id> thì ghi nhận thread đó
+    // (chỉ lấy id từ URL, tiêu đề để extension tự đặt dự phòng) rồi
+    // GoBack; URL thành /thread/new thì GoBack + loại nút (nút tạo
+    // mới, không phải lịch sử); URL không đổi thì bấm Escape; URL rời
+    // khỏi khu vực chat thì GoBack ngay + loại nút, không ghi nhận gì
+    // từ trang lạc. Không bao giờ điền form, không gửi tin, không bấm
+    // nút trong dialog (dialog hiện ra thì chỉ bấm Escape). Gặp tín
+    // hiệu hết hạn thì dừng ngay và báo HitAuth để caller ném Auth
+    // như vòng poll chính. Nút đã bấm được đánh dấu trên DOM để lần
+    // liệt kê sau không bấm lại (cùng lưu ý như 0.8.6: nếu GoBack tải
+    // lại toàn bộ trang thì dấu mất theo và nút có thể bị bấm lại,
+    // nhưng vòng lặp vẫn bị chặn bởi 30 nút / 60 giây và URL thread
+    // đã ghi nhận thì không ghi trùng).
+    private async Task<(WebThreadsScan? Found, bool HitAuth)> ProbeHistoryButtonsAsync(
+        IPage page, WebThreadsScan baseline, DateTimeOffset deadline)
+    {
+        var found = new List<(string Url, string Title)>(baseline.Threads);
+        var seen = new HashSet<string>(found.Select(t => t.Url), StringComparer.OrdinalIgnoreCase);
+        var clicked = 0;
+        while (clicked < 30 && DateTimeOffset.UtcNow < deadline)
+        {
+            var tokens = await Eval(page, """
+                (() => {
+                  // __PROBE_SKIP_FN_START__
+                  const probeSkipLabel = (label) => {
+                    const exclude = /log\s?in|sign\s?in|đăng nhập|log\s?out|sign\s?out|đăng xuất|payment|thanh toán|billing|upgrade|subscribe|pricing|delete|xoá|xóa/i;
+                    const norm = ' ' + (label || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim() + ' ';
+                    const control = norm.includes(' history ') || norm.includes(' lịch sử ') || norm.includes(' sidebar ') || norm.includes(' menu ') || norm.includes(' new chat ');
+                    return exclude.test(label || '') || control;
+                  };
+                  // __PROBE_SKIP_FN_END__
+                  // __PROBE_ENUM_START__
+                  const probeEnumerate = () => {
+                    const out = [];
+                    if (!window.__museProbeNext) window.__museProbeNext = 1;
+                    for (const b of document.querySelectorAll('aside button, aside [role="button"], nav button, nav [role="button"]')) {
+                      if (b.dataset.museProbeClicked === '1') continue;
+                      if (b.closest('form')) continue;
+                      if (b.closest('dialog, [role="dialog"], [role="alertdialog"]')) continue;
+                      const r = b.getClientRects();
+                      if (!r.length || (r[0].width === 0 && r[0].height === 0)) continue;
+                      const label = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '')).trim();
+                      if (probeSkipLabel(label)) continue;
+                      const token = 'p' + (window.__museProbeNext++);
+                      b.dataset.museProbeToken = token;
+                      out.push(token);
+                    }
+                    return { tokens: out };
+                  };
+                  // __PROBE_ENUM_END__
+                  return probeEnumerate();
+                })()
+                """);
+            if (tokens is not System.Text.Json.Nodes.JsonObject tokObj
+                || tokObj["tokens"] is not System.Text.Json.Nodes.JsonArray tokArr
+                || tokArr.Count == 0)
+                break;
+            var token = tokArr[0]?.GetValue<string>();
+            if (string.IsNullOrEmpty(token)) break;
+            var beforeUrl = page.Url;
+            var clickedResult = await Eval(page, $$"""
+                (() => {
+                  const b = document.querySelector('[data-muse-probe-token="{{token}}"]');
+                  if (!b) return { clicked: false };
+                  b.dataset.museProbeClicked = '1';
+                  b.click();
+                  return { clicked: true };
+                })()
+                """);
+            if (clickedResult is not System.Text.Json.Nodes.JsonObject clickObj || !BoolNode(clickObj, "clicked"))
+                break;
+            clicked++;
+            await Task.Delay(TimeSpan.FromMilliseconds(800));
+            var state = await ReadProbeStateAsync(page);
+            var (outcome, threadId) = DiagnosticLines.DecideProbeOutcome(beforeUrl, state.Url, state.LoginSignal);
+            switch (outcome)
+            {
+                case DiagnosticLines.ProbeOutcome.StopAuth:
+                    return (null, true);
+                case DiagnosticLines.ProbeOutcome.RecordThread:
+                {
+                    var url = Upstream.Site + "/thread/" + threadId!;
+                    if (seen.Add(url)) found.Add((url, ""));
+                    try { await page.GoBackAsync(); } catch { }
+                    await Task.Delay(TimeSpan.FromMilliseconds(800));
+                    break;
+                }
+                case DiagnosticLines.ProbeOutcome.GoBackNew:
+                case DiagnosticLines.ProbeOutcome.GoBackOther:
+                case DiagnosticLines.ProbeOutcome.GoBackLeftChat:
+                    try { await page.GoBackAsync(); } catch { }
+                    await Task.Delay(TimeSpan.FromMilliseconds(800));
+                    // Sau khi quay lại mà trang đã hết hạn thì dừng
+                    // ngay thay vì liệt kê tiếp trên trang đăng nhập.
+                    if ((await ReadProbeStateAsync(page)).LoginSignal) return (null, true);
+                    break;
+                case DiagnosticLines.ProbeOutcome.EscapeUnchanged:
+                    try { await page.Keyboard.PressAsync("Escape"); } catch { }
+                    await Task.Delay(TimeSpan.FromMilliseconds(300));
+                    break;
+            }
+        }
+        if (found.Count > baseline.Threads.Count)
+            return (new WebThreadsScan(found, baseline.PageUrl, baseline.LinkCount, baseline.LoginHint,
+                baseline.Title, baseline.HasLoginForm, baseline.ButtonCount, Groups: baseline.Groups), false);
+        return (null, false);
+    }
+
+    // Trạng thái nhẹ sau một lần bấm thăm dò: URL hiện tại + tín hiệu
+    // hết hạn (gợi ý chữ trên 2000 ký tự đầu hoặc form đăng nhập).
+    // Chỉ đọc tín hiệu, không đọc nội dung trang hay tiêu đề hội thoại.
+    private async Task<(string Url, bool LoginSignal)> ReadProbeStateAsync(IPage page)
+    {
+        var result = await Eval(page, """
+            (() => ({
+              head: (document.body ? document.body.innerText.slice(0, 2000) : ''),
+              hasLoginForm: !!document.querySelector('input[type="password"], input[type="email"]'),
+            }))()
+            """);
+        if (result is not System.Text.Json.Nodes.JsonObject obj)
+            return (page.Url, false);
+        var head = (Str(obj, "head") ?? "").ToLowerInvariant();
+        var textHint = Dom.LoginHints.Any(h => head.Contains(h));
+        return (page.Url, DiagnosticLines.HasLoginSignal(textHint, BoolNode(obj, "hasLoginForm")));
+    }
+
     // Một lần quét trang: <a href> + regex /thread/<id> trên outerHTML.
-    // Trả kèm linkCount (tổng số <a> đọc được), LoginHint (gợi ý chữ
-    // HOẶC form đăng nhập, v0.8.5), tiêu đề chung của app, và số nút
-    // bấm — để caller phân biệt hết hạn với rỗng thật và để dòng
-    // web_threads chẩn đoán từng trang. Debug chỉ chứa số lượng +
-    // tiêu đề chung, không chứa nội dung trang hay tiêu đề hội thoại.
+    // Trả kèm linkCount (tổng số <a> CÓ href đọc được, giữ nguyên nghĩa
+    // cũ), LoginHint (gợi ý chữ HOẶC form đăng nhập, v0.8.5), tiêu đề
+    // chung của app, số nút bấm, và nhóm chẩn đoán chỉ gồm số lượng
+    // (v0.8.7: anchor phân theo mẫu href, nút trong aside/nav, nút có
+    // aria-label, phần tử có data-testid chứa history/sidebar) — để
+    // caller phân biệt hết hạn với rỗng thật và để dòng web_threads
+    // chẩn đoán từng trang. Debug chỉ chứa số lượng + tiêu đề chung,
+    // không chứa nội dung trang hay tiêu đề hội thoại.
     private async Task<WebThreadsScan> ScanThreadsPage(IPage page)
     {
         var result = await Eval(page, """
             (() => {
-              const links = [...document.querySelectorAll('a[href]')].map(a => ({
-                href: a.href || '',
-                title: (a.innerText || '').trim().replace(/\s+/g, ' '),
-              }));
+              const links = [...document.querySelectorAll('a')].map(a => {
+                const attr = a.getAttribute('href');
+                const hasHref = attr !== null && attr.trim() !== '';
+                return {
+                  href: hasHref ? (a.href || '') : '',
+                  hasHref,
+                  title: hasHref ? (a.innerText || '').trim().replace(/\s+/g, ' ') : '',
+                };
+              });
               return {
                 head: (document.body ? document.body.innerText.slice(0, 2000) : ''),
                 html: (document.documentElement ? document.documentElement.outerHTML.slice(0, 500000) : ''),
@@ -1177,6 +1346,9 @@ public sealed class BrowserDriver : IMuseDriver
                 title: (document.title || ''),
                 hasLoginForm: !!document.querySelector('input[type="password"], input[type="email"]'),
                 buttonCount: document.querySelectorAll('button, [role="button"]').length,
+                asideNavButtons: document.querySelectorAll('aside button, aside [role="button"], nav button, nav [role="button"]').length,
+                labeledButtons: [...document.querySelectorAll('button, [role="button"]')].filter(b => (b.getAttribute('aria-label') || '').trim() !== '').length,
+                historyTestids: [...document.querySelectorAll('[data-testid]')].filter(el => /history|sidebar/i.test(el.getAttribute('data-testid') || '')).length,
               };
             })()
             """);
@@ -1188,16 +1360,37 @@ public sealed class BrowserDriver : IMuseDriver
         var loginHint = DiagnosticLines.HasLoginSignal(textHint, hasLoginForm);
         var pageTitle = DiagnosticLines.TruncateTitle(Str(obj, "title"));
         var buttonCount = obj["buttonCount"] is System.Text.Json.Nodes.JsonValue bv && bv.TryGetValue<int>(out var bc) ? bc : 0;
+        var asideNavButtons = obj["asideNavButtons"] is System.Text.Json.Nodes.JsonValue av && av.TryGetValue<int>(out var an) ? an : 0;
+        var labeledButtons = obj["labeledButtons"] is System.Text.Json.Nodes.JsonValue lv && lv.TryGetValue<int>(out var lb) ? lb : 0;
+        var historyTestids = obj["historyTestids"] is System.Text.Json.Nodes.JsonValue hv && hv.TryGetValue<int>(out var ht) ? ht : 0;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var threads = new List<(string Url, string Title)>();
         var linkCount = 0;
+        var threadLinks = 0;
+        var libraryLinks = 0;
+        var settingsLinks = 0;
+        var otherLinks = 0;
+        var noHrefAnchors = 0;
         if (obj["links"] is System.Text.Json.Nodes.JsonArray links)
         {
-            linkCount = links.Count;
             foreach (var item in links)
             {
                 if (item is not System.Text.Json.Nodes.JsonObject link) continue;
+                var hasHref = link["hasHref"] is System.Text.Json.Nodes.JsonValue hv2 && hv2.TryGetValue<bool>(out var hb) && hb;
                 var href = Str(link, "href") ?? "";
+                // Phân nhóm chỉ để đếm (v0.8.7): anchor không href đếm
+                // riêng; linkCount giữ nguyên nghĩa cũ là số anchor CÓ
+                // href (để số liệu các bản so sánh được với nhau).
+                switch (DiagnosticLines.ClassifyAnchorGroup(hasHref, href))
+                {
+                    case DiagnosticLines.AnchorGroup.Thread: threadLinks++; break;
+                    case DiagnosticLines.AnchorGroup.Library: libraryLinks++; break;
+                    case DiagnosticLines.AnchorGroup.Settings: settingsLinks++; break;
+                    case DiagnosticLines.AnchorGroup.Other: otherLinks++; break;
+                    default: noHrefAnchors++; break;
+                }
+                if (!hasHref) continue;
+                linkCount++;
                 if (!LocalConversationStore.IsThread(href)) continue;
                 var normalized = href.TrimEnd('/');
                 if (!seen.Add(normalized)) continue;
@@ -1215,7 +1408,9 @@ public sealed class BrowserDriver : IMuseDriver
             if (!seen.Add(url)) continue;
             threads.Add((url, ""));
         }
-        return new WebThreadsScan(threads, page.Url, linkCount, loginHint, pageTitle, hasLoginForm, buttonCount);
+        var groups = new WebThreadsGroupDiag(threadLinks, libraryLinks, settingsLinks, otherLinks,
+            noHrefAnchors, asideNavButtons, labeledButtons, historyTestids);
+        return new WebThreadsScan(threads, page.Url, linkCount, loginHint, pageTitle, hasLoginForm, buttonCount, Groups: groups);
     }
 
     // ---------- lấy hồ sơ tài khoản, best-effort (v0.8.2, viết lại từ v0.7.0) ----------
