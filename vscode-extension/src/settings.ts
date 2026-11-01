@@ -21,7 +21,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { GatewayManager } from './gateway';
-import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, patchGatewayAccountLabel, deleteGatewayAccount, fetchGatewayAccountQuota, formatCooldown, startBrowserLogin, getBrowserLoginStatus, cancelBrowserLogin } from './admin';
+import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, patchGatewayAccountLabel, deleteGatewayAccount, fetchGatewayAccountQuota, formatCooldown, startBrowserLogin, getBrowserLoginStatus, cancelBrowserLogin, refreshGatewayAccountProfile, mergeGatewayDuplicates } from './admin';
 
 export interface SettingsSessionInfo {
   id: string;
@@ -56,6 +56,9 @@ export class MuseSettingsPanel {
     gateway: GatewayManager,
     onAccountsChanged: () => void,
     getSessions: () => SettingsSessionInfo[],
+    // v0.7.0: sau khi gộp trùng, khung chat đổi accountId của session
+    // mình sang tài khoản chính (mergedIds -> primaryId/primaryLabel).
+    onMerged?: (remap: Record<string, { primaryId: string; primaryLabel: string }>) => void,
   ): void {
     if (MuseSettingsPanel.current) {
       MuseSettingsPanel.current.panel.reveal(vscode.ViewColumn.Beside);
@@ -67,7 +70,7 @@ export class MuseSettingsPanel {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
     });
-    MuseSettingsPanel.current = new MuseSettingsPanel(panel, context, gateway, onAccountsChanged, getSessions);
+    MuseSettingsPanel.current = new MuseSettingsPanel(panel, context, gateway, onAccountsChanged, getSessions, onMerged);
     panel.onDidDispose(() => {
       const inst = MuseSettingsPanel.current;
       if (inst?.browserLoginTimer) { clearInterval(inst.browserLoginTimer); inst.browserLoginTimer = undefined; }
@@ -97,6 +100,7 @@ export class MuseSettingsPanel {
     private readonly gateway: GatewayManager,
     private readonly onAccountsChanged: () => void,
     private readonly getSessions: () => SettingsSessionInfo[],
+    private readonly onMerged?: (remap: Record<string, { primaryId: string; primaryLabel: string }>) => void,
   ) {
     const base = vscode.Uri.joinPath(context.extensionUri, 'media');
     const read = (name: string): string => fs.readFileSync(vscode.Uri.joinPath(base, name).fsPath, 'utf8');
@@ -107,6 +111,8 @@ export class MuseSettingsPanel {
       if (m.type === 'refreshAccounts') { void this.refreshAccounts(); }
       else if (m.type === 'refreshConfig') { void this.refreshConfig(); }
       else if (m.type === 'accountAction' && m.action && m.id) { void this.accountAction(m.action, m.id); }
+      else if (m.type === 'profileRefresh' && m.id) { void this.profileRefresh(m.id); }
+      else if (m.type === 'mergeDuplicates') { void this.mergeDuplicates(); }
       else if (m.type === 'accountQuota' && m.id) { void this.accountQuota(m.id); }
       else if (m.type === 'browserLogin') { void this.startBrowserLoginFlow((m as { label?: string }).label, undefined); }
       else if (m.type === 'reloginBrowser' && m.id) { void this.startBrowserLoginFlow(undefined, m.id); }
@@ -161,6 +167,10 @@ export class MuseSettingsPanel {
           return {
             id: a.id,
             label: a.label,
+            // Hồ sơ chỉ gửi sang panel Cài đặt, không sang khung chat.
+            email: a.email,
+            username: a.username,
+            phone: a.phone,
             enabled: a.enabled,
             status: a.status,
             lastError: a.lastError.slice(0, 200),
@@ -276,6 +286,55 @@ export class MuseSettingsPanel {
       try { await cancelBrowserLogin(this.browserLoginBaseUrl, this.browserLoginApiKey, loginId); } catch { /* phiên đã kết thúc thì thôi */ }
     }
     this.post('browserLogin', { state: 'cancelled', message: 'Phiên đăng nhập đã bị hủy. Bạn có thể thử lại.' });
+  }
+
+  // ---------------- Hồ sơ + gộp trùng (v0.7.0) ----------------
+  // profileRefresh: điền danh tính cho tài khoản cũ (nhập từ desktop)
+  // mà không cần đăng nhập lại. Thông báo KHÔNG chứa email/phone.
+  private async profileRefresh(id: string): Promise<void> {
+    try {
+      const info = await this.gateway.ensureStarted();
+      const res = await refreshGatewayAccountProfile(info.baseUrl, info.apiKey, id);
+      void vscode.window.showInformationMessage(res.profileFound
+        ? 'Đã cập nhật thông tin hồ sơ của tài khoản.'
+        : 'Không lấy được thông tin hồ sơ từ trang Muse (tài khoản giữ nguyên). Hãy thử lại sau khi tài khoản đã đăng nhập lại.');
+    } catch (e) {
+      void vscode.window.showErrorMessage(`Không cập nhật được thông tin hồ sơ: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await this.refreshAccounts();
+    // Cache tài khoản của khung chat làm mới theo, để dòng tài khoản
+    // trong cột trái + header chat cập nhật danh tính mới (điểm 3).
+    this.onAccountsChanged();
+  }
+
+  // mergeDuplicates: CHỈ chạy khi user bấm nút và xác nhận (gộp là thao
+  // tác xóa tài khoản, không tự động). Sau khi gộp, đổi accountId của
+  // session khung chat sang tài khoản chính rồi làm mới mọi danh sách.
+  private async mergeDuplicates(): Promise<void> {
+    const answer = await vscode.window.showWarningMessage(
+      'Gộp các tài khoản Muse trùng nhau? Các tài khoản có cùng email (hoặc cùng username khi không có email) sẽ gộp thành một tài khoản chính (tài khoản dùng gần nhất). Tài khoản bị gộp sẽ bị xóa khỏi gateway, session của tài khoản bị gộp sẽ chuyển sang tài khoản chính, và các hội thoại cũ vẫn nối tiếp được dưới tài khoản chính. Tài khoản chưa xác định được email/username sẽ được bỏ qua, không gộp.',
+      'Gộp tài khoản trùng', 'Hủy');
+    if (answer !== 'Gộp tài khoản trùng') { return; }
+    try {
+      const info = await this.gateway.ensureStarted();
+      const res = await mergeGatewayDuplicates(info.baseUrl, info.apiKey);
+      const remap: Record<string, { primaryId: string; primaryLabel: string }> = {};
+      let mergedCount = 0;
+      for (const g of res.merged) {
+        for (const oldId of g.mergedIds) { remap[oldId] = { primaryId: g.primaryId, primaryLabel: g.primaryLabel }; }
+        mergedCount += g.mergedIds.length;
+      }
+      if (Object.keys(remap).length > 0) { this.onMerged?.(remap); }
+      this.post('mergeResult', {
+        groups: res.merged.length, merged: mergedCount, skipped: res.skipped.length,
+        message: `Đã gộp ${res.merged.length} nhóm, ${mergedCount} tài khoản vào tài khoản chính; bỏ qua ${res.skipped.length} tài khoản chưa xác định được danh tính.`,
+      });
+      void vscode.window.showInformationMessage(`Đã gộp ${res.merged.length} nhóm (${mergedCount} tài khoản), bỏ qua ${res.skipped.length} tài khoản chưa xác định được danh tính.`);
+    } catch (e) {
+      void vscode.window.showErrorMessage(`Không gộp được tài khoản trùng: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await this.refreshAccounts();
+    this.onAccountsChanged();
   }
 
   private async accountAction(action: string, id: string): Promise<void> {

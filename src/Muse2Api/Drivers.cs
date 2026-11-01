@@ -14,6 +14,13 @@ public sealed record MediaResult(byte[] Data, string Mime, string Kind,
     int? Width = null, int? Height = null, string? RevisedPrompt = null);
 public sealed record SessionInfo(bool Ok, Dictionary<string, string> Cookies,
     Dictionary<string, long> CookieExpires, Dictionary<string, string?> Meta);
+// Hồ sơ Muse lấy best-effort (v0.7.0): trường nào không xác định được
+// thì null, không bao giờ bịa. Phone thường là null vì trang chủ hiếm
+// khi hiện trường Phone gắn nhãn rõ ràng.
+public sealed record ProfileInfo(string? Email, string? Username, string? Phone);
+// Kết quả quét thread web (v0.7.0, điểm 4): danh sách + chẩn đoán chỉ
+// gồm số lượng (pageUrl, linkCount, threadCount), không nội dung trang.
+public sealed record WebThreadsScan(List<(string Url, string Title)> Threads, string PageUrl, int LinkCount, bool LoginHint = false);
 public sealed record DriverCapabilities(bool Chat = false, bool ChatImages = false,
     bool Image = false, bool ImageEdit = false, bool Video = false,
     bool RenewSession = false, bool Quota = false);
@@ -38,8 +45,12 @@ public interface IMuseDriver
     // v0.6.0, mức 1: liệt kê thread web của tài khoản (danh sách + tiêu
     // đề từ sidebar muse.ai). Chỉ BrowserDriver cài đặt thật; các driver
     // khác dùng default này và gateway trả 501.
-    Task<List<(string Url, string Title)>> ListWebThreads(Account account)
+    Task<WebThreadsScan> ListWebThreads(Account account)
         => throw MuseException.NotImplemented($"driver '{Name}' không hỗ trợ liệt kê hội thoại web");
+    // v0.7.0: lấy hồ sơ best-effort của tài khoản. Driver không phải
+    // trình duyệt trả null (không lấy được gì), không lỗi.
+    Task<ProfileInfo?> FetchProfile(Account account, CancellationToken cancel = default)
+        => Task.FromResult<ProfileInfo?>(null);
     Task<Dictionary<string, object?>> Health()
         => Task.FromResult(new Dictionary<string, object?> { ["driver"] = Name, ["ok"] = true });
 }

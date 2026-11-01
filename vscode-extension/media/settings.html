@@ -14,8 +14,10 @@
   <h2>Tài khoản Muse</h2>
   <div id="accountStatus">Đang kiểm tra tài khoản Muse…</div>
   <div id="accountList"></div>
+  <div id="mergeStatus" class="note"></div>
   <div class="actions">
     <button id="refreshAccountsBtn">Kiểm tra lại</button>
+    <button id="mergeDuplicatesBtn" title="Gộp các tài khoản có cùng email/username thành một (hỏi xác nhận trước)">Gộp tài khoản trùng</button>
     <button id="importLoginBtn">Nhập đăng nhập từ app desktop</button>
     <button id="openDashboardBtn">Mở dashboard</button>
     <button id="restartGatewayBtn">Khởi động lại gateway</button>
@@ -44,7 +46,7 @@
     <li>Quay lại panel này, bấm <b>“Nhập đăng nhập từ app desktop”</b> để đưa toàn bộ danh sách đó vào pool gateway của extension.</li>
   </ol>
   <p class="warning"><b>Cảnh báo ghi đè:</b> lệnh nhập sẽ <b>thay thế toàn bộ danh sách tài khoản của gateway</b> bằng danh sách từ app desktop (có sao lưu file cũ dạng .bak-timestamp trước khi ghi). Tài khoản nào đang ở gateway mà không có trong app desktop sẽ mất sau khi nhập.</p>
-  <p class="note">Giới hạn cần biết: mỗi tài khoản có Id ngẫu nhiên (acc_ + chuỗi ngẫu nhiên), không suy ra từ danh tính Muse. Vì vậy nếu bạn xóa một tài khoản rồi nhập lại cùng tài khoản Muse đó, nó sẽ có Id mới và các session cũ ghi Id cũ sẽ <b>không tự nối lại</b> được. Extension không tự nối lại theo nhãn, vì nhãn mặc định (“Tài khoản cá nhân”) không duy nhất.</p>
+  <p class="note">Giới hạn cần biết: mỗi tài khoản có Id ngẫu nhiên (acc_ + chuỗi ngẫu nhiên), không suy ra từ danh tính Muse. Từ v0.7.0, gateway định danh bằng email (rồi username) nên đăng nhập lại cùng tài khoản Muse sẽ cập nhật tài khoản cũ thay vì tạo Id mới, và nút “Gộp tài khoản trùng” ở trên gộp các tài khoản trùng đã tồn tại (session chuyển sang tài khoản chính, hội thoại cũ vẫn nối tiếp được). Nếu bạn xóa một tài khoản rồi nhập lại mà gateway chưa lấy được hồ sơ của nó, nó vẫn có thể nhận Id mới và các session cũ ghi Id cũ sẽ <b>không tự nối lại</b> được. Extension không tự nối lại theo nhãn, vì nhãn mặc định (“Tài khoản cá nhân”) không duy nhất.</p>
 </section>
 
 <section>

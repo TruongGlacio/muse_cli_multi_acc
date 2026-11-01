@@ -11,6 +11,12 @@ public sealed class Account
 {
     public string Id { get; set; } = "acc_" + Guid.NewGuid().ToString("N")[..10];
     public string Label { get; set; } = "";
+    // Hồ sơ Muse (v0.7.0, nullable): file accounts.json cũ load lên sẽ
+    // có null, tương thích ngược. Chỉ điền bằng FetchProfile best-effort
+    // (trang chủ muse.ai), không bao giờ suy ra từ nội dung chat.
+    public string? Email { get; set; }
+    public string? Username { get; set; }
+    public string? Phone { get; set; }
     public bool Enabled { get; set; } = true;
     public AccountStatus Status { get; set; } = AccountStatus.Active;
     public Dictionary<string, string> Cookies { get; set; } = new();
@@ -43,6 +49,9 @@ public sealed class Account
         {
             ["id"] = Id,
             ["label"] = Label,
+            ["email"] = Email is null ? null : JsonValue.Create(Email),
+            ["username"] = Username is null ? null : JsonValue.Create(Username),
+            ["phone"] = Phone is null ? null : JsonValue.Create(Phone),
             ["enabled"] = Enabled,
             ["status"] = Status.ToString().ToLowerInvariant(),
             ["cookies"] = masked,
@@ -129,10 +138,39 @@ public sealed class AccountPool
         return acc;
     }
 
+    // Chuẩn hóa email để so khớp danh tính: trim + lowercase. Username
+    // chỉ trim (so khớp không phân biệt hoa/thường ở bước 3).
+    public static string? NormalizeEmail(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email)) return null;
+        return email.Trim().ToLowerInvariant();
+    }
+
+    public static string? NormalizeUsername(string? username)
+    {
+        if (string.IsNullOrWhiteSpace(username)) return null;
+        return username.Trim();
+    }
+
+    // Điền danh tính từ tài khoản vào vào tài khoản cũ, CHỈ khi trường
+    // cũ còn trống — không ghi đè email/username/phone đã có.
+    private static void FillMissingIdentity(Account existing, Account incoming)
+    {
+        if (string.IsNullOrWhiteSpace(existing.Email) && !string.IsNullOrWhiteSpace(incoming.Email))
+            existing.Email = incoming.Email;
+        if (string.IsNullOrWhiteSpace(existing.Username) && !string.IsNullOrWhiteSpace(incoming.Username))
+            existing.Username = incoming.Username;
+        if (string.IsNullOrWhiteSpace(existing.Phone) && !string.IsNullOrWhiteSpace(incoming.Phone))
+            existing.Phone = incoming.Phone;
+    }
+
     public Account UpsertSession(Account incoming)
     {
         lock (_lock)
         {
+            // Bước 1 (giữ nguyên hành vi cũ): khớp theo auth-hash của
+            // cookie phiên. Cookie xoay vòng nên bước này không đủ một
+            // mình — xem bước 2/3 dưới đây.
             var existing = Upstream.MissingSessionCookies(incoming.Cookies).Count == 0
                 ? _accounts.Values.FirstOrDefault(a => BrowserSessionStore.AuthenticationHash(a) == BrowserSessionStore.AuthenticationHash(incoming)) : null;
             if (existing is not null)
@@ -140,7 +178,47 @@ public sealed class AccountPool
                 existing.Cookies = incoming.Cookies; existing.CookieExpires = incoming.CookieExpires;
                 existing.Label = incoming.Label; existing.Enabled = incoming.Enabled;
                 if (existing.Status == AccountStatus.Invalid) { existing.Status = AccountStatus.Active; existing.LastError = null; }
+                FillMissingIdentity(existing, incoming);
                 Persist(); return existing;
+            }
+            // Bước 2 (v0.7.0): khớp theo Email đã chuẩn hóa. Đây là khóa
+            // chính chống trùng: cùng một tài khoản Muse đăng nhập lại
+            // (trình duyệt khác, desktop khác, gia hạn khác) sẽ có
+            // auth-hash khác nhưng cùng email → cập nhật tài khoản cũ,
+            // GIỮ NGUYÊN Id và GIỮ NGUYÊN label cũ (không ghi đè tên do
+            // user tự đổi).
+            var incomingEmail = NormalizeEmail(incoming.Email);
+            if (incomingEmail is not null)
+            {
+                existing = _accounts.Values.FirstOrDefault(a => NormalizeEmail(a.Email) == incomingEmail);
+                if (existing is not null)
+                {
+                    existing.Cookies = incoming.Cookies; existing.CookieExpires = incoming.CookieExpires;
+                    existing.Enabled = incoming.Enabled;
+                    if (existing.Status == AccountStatus.Invalid) { existing.Status = AccountStatus.Active; existing.LastError = null; }
+                    FillMissingIdentity(existing, incoming);
+                    Persist(); return existing;
+                }
+            }
+            // Bước 3 (v0.7.0, yếu hơn): chỉ khi cả hai bên đều không có
+            // Email và Username đều khác rỗng, dài từ 3 ký tự, mới khớp
+            // theo Username (không phân biệt hoa/thường). Khớp Username
+            // yếu hơn Email vì tên hiển thị có thể trùng giữa hai người.
+            var incomingUsername = NormalizeUsername(incoming.Username);
+            if (incomingEmail is null && incomingUsername is not null && incomingUsername.Length >= 3)
+            {
+                existing = _accounts.Values.FirstOrDefault(a =>
+                    NormalizeEmail(a.Email) is null
+                    && NormalizeUsername(a.Username) is { Length: >= 3 } oldName
+                    && string.Equals(oldName, incomingUsername, StringComparison.OrdinalIgnoreCase));
+                if (existing is not null)
+                {
+                    existing.Cookies = incoming.Cookies; existing.CookieExpires = incoming.CookieExpires;
+                    existing.Enabled = incoming.Enabled;
+                    if (existing.Status == AccountStatus.Invalid) { existing.Status = AccountStatus.Active; existing.LastError = null; }
+                    FillMissingIdentity(existing, incoming);
+                    Persist(); return existing;
+                }
             }
             return Upsert(incoming);
         }

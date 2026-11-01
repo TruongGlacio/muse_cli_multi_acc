@@ -19,6 +19,12 @@ export interface GatewayAccountSummary {
   status: string;
   lastError: string;
   cooldownUntil: number;
+  // Hồ sơ Muse (v0.7.0, nullable): chỉ hiện trong panel Cài đặt, KHÔNG
+  // bao giờ đưa vào khung chat, log hay thông báo. asAccount chỉ chọn
+  // đúng các trường này, không bao giờ chuyển cookies sang webview.
+  email: string | null;
+  username: string | null;
+  phone: string | null;
   // Các trường an toàn bổ sung cho panel đa tài khoản (v0.5.0). KHÔNG
   // bao gồm cookies (kể cả dạng đã che) hay meta: asAccount chỉ chọn
   // đúng các trường dưới đây, không bao giờ chuyển cookies sang webview.
@@ -75,6 +81,9 @@ function asAccount(obj: Record<string, unknown>): GatewayAccountSummary {
   return {
     id: String(obj.id || ''),
     label: String(obj.label || ''),
+    email: typeof obj.email === 'string' && obj.email ? obj.email : null,
+    username: typeof obj.username === 'string' && obj.username ? obj.username : null,
+    phone: typeof obj.phone === 'string' && obj.phone ? obj.phone : null,
     enabled: obj.enabled === true,
     status: String(obj.status || ''),
     lastError: String(obj.last_error || obj.lastError || ''),
@@ -170,16 +179,62 @@ export async function deleteGatewayAccount(baseUrl: string, apiKey: string, id: 
   await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+// Hồ sơ tài khoản (v0.7.0): cập nhật Email/Username/Phone best-effort
+// cho một tài khoản, không cần đăng nhập lại. Trả về account mới +
+// profileFound (có lấy được danh tính nào không). Email/phone trong
+// kết quả này chỉ dùng trong panel Cài đặt, không log, không thông báo.
+export async function refreshGatewayAccountProfile(baseUrl: string, apiKey: string, id: string): Promise<{ account: GatewayAccountSummary; profileFound: boolean }> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}/profile-refresh`, { method: 'POST' })) as Record<string, unknown>;
+  return { account: asAccount((data.account || {}) as Record<string, unknown>), profileFound: data.profile_found === true };
+}
+
+export interface MergeDuplicatesResult {
+  merged: Array<{ primaryId: string; primaryLabel: string; mergedIds: string[]; identity: string }>;
+  skipped: string[];
+}
+
+// Gộp tài khoản trùng (v0.7.0): chỉ gọi sau khi user xác nhận trong
+// panel Cài đặt. Trả về các nhóm đã gộp để extension đổi accountId của
+// session mình sang tài khoản chính.
+export async function mergeGatewayDuplicates(baseUrl: string, apiKey: string): Promise<MergeDuplicatesResult> {
+  const data = (await adminFetch(baseUrl, apiKey, '/admin/accounts/merge-duplicates', { method: 'POST' })) as Record<string, unknown>;
+  const merged = Array.isArray(data.merged) ? data.merged : [];
+  const skipped = Array.isArray(data.skipped) ? data.skipped : [];
+  return {
+    merged: merged
+      .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null)
+      .map((x) => ({
+        primaryId: String(x.primaryId || ''),
+        primaryLabel: String(x.primaryLabel || ''),
+        mergedIds: Array.isArray(x.mergedIds) ? x.mergedIds.map((v) => String(v)) : [],
+        identity: String(x.identity || ''),
+      })),
+    skipped: skipped.map((v) => String(v)),
+  };
+}
+
 // Đồng bộ hội thoại từ web, mức 1 (v0.6.0): chỉ danh sách + đăng ký
 // mapping, không nhập nội dung tin nhắn cũ.
 export interface WebThread { url: string; title: string; }
 
-export async function fetchWebThreads(baseUrl: string, apiKey: string, id: string): Promise<WebThread[]> {
+export interface WebThreadsDebug { pageUrl: string; linkCount: number; threadCount: number; }
+
+export interface WebThreadsResult { threads: WebThread[]; debug?: WebThreadsDebug; }
+
+// Đồng bộ web (v0.7.0, điểm 4): gateway trả thêm debug (chỉ số lượng,
+// không nội dung trang hay tiêu đề nhạy cảm) để thông báo "Đã thêm 0"
+// nêu rõ được lỗi ở khâu nào.
+export async function fetchWebThreads(baseUrl: string, apiKey: string, id: string): Promise<WebThreadsResult> {
   const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}/web-threads`, { method: 'POST' })) as Record<string, unknown>;
   const arr = Array.isArray(data.data) ? data.data : [];
-  return arr
+  const threads = arr
     .filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null && typeof x.url === 'string')
     .map((x) => ({ url: x.url as string, title: typeof x.title === 'string' ? x.title : '' }));
+  const d = data.debug as Record<string, unknown> | undefined;
+  const debug: WebThreadsDebug | undefined = d && typeof d === 'object'
+    ? { pageUrl: typeof d.pageUrl === 'string' ? d.pageUrl : '', linkCount: typeof d.linkCount === 'number' ? d.linkCount : 0, threadCount: typeof d.threadCount === 'number' ? d.threadCount : threads.length }
+    : undefined;
+  return { threads, debug };
 }
 
 export async function registerConversation(baseUrl: string, apiKey: string, accountId: string, hint: string, url: string): Promise<void> {

@@ -40,7 +40,7 @@ public sealed class AppState
         Pool = new AccountPool(settings.AccountsFile, settings.PoolStrategy,
             settings.AccountMaxConcurrency, settings.AccountCooldown, settings.PoolAcquireTimeout);
         Pool.Load();
-        Login = new BrowserLoginManager(settings, Pool);
+        Login = new BrowserLoginManager(settings, Pool, Driver);
         Gateway = new Gateway(Pool, Driver, settings.MaxFailover);
         Tasks = new TaskManager(settings.TasksFile);
         Tasks.Load();

@@ -809,11 +809,128 @@ public static class Endpoints
         {
             RequireAdmin(ctx, s);
             var acc = s.Pool.Get(id) ?? throw MuseException.NotFound($"account '{id}' not found");
-            var threads = await s.Driver.ListWebThreads(acc);
+            var scan = await s.Driver.ListWebThreads(acc);
             var arr = new JsonArray();
-            foreach (var (url, title) in threads)
+            foreach (var (url, title) in scan.Threads)
                 arr.Add(new JsonObject { ["url"] = url, ["title"] = title });
-            return Results.Json(new JsonObject { ["data"] = arr });
+            // debug v0.7.0, điểm 4: chỉ số lượng, không nội dung trang.
+            return Results.Json(new JsonObject
+            {
+                ["data"] = arr,
+                ["debug"] = new JsonObject
+                {
+                    ["pageUrl"] = scan.PageUrl,
+                    ["linkCount"] = scan.LinkCount,
+                    ["threadCount"] = scan.Threads.Count,
+                },
+            });
+        });
+        // ---------- hồ sơ tài khoản + gộp trùng (v0.7.0) ----------
+        // profile-refresh: best-effort, không bao giờ log email/phone.
+        // Lấy được gì thì cập nhật trường đó (trường đã có giá trị thì
+        // giữ nguyên, không ghi đè); không lấy được gì thì trả account
+        // cũ kèm profile_found=false, không lỗi. Phiên hết hạn thật
+        // (Auth) thì vẫn lỗi để extension báo đăng nhập lại.
+        admin.MapPost("/accounts/{id}/profile-refresh", async (HttpContext ctx, string id) =>
+        {
+            RequireAdmin(ctx, s);
+            var acc = s.Pool.Get(id) ?? throw MuseException.NotFound($"account '{id}' not found");
+            var profile = await s.Driver.FetchProfile(acc);
+            var found = false;
+            if (profile is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(profile.Email) && string.IsNullOrWhiteSpace(acc.Email))
+                    { acc.Email = profile.Email.Trim(); found = true; }
+                if (!string.IsNullOrWhiteSpace(profile.Username) && string.IsNullOrWhiteSpace(acc.Username))
+                    { acc.Username = profile.Username.Trim(); found = true; }
+                if (!string.IsNullOrWhiteSpace(profile.Phone) && string.IsNullOrWhiteSpace(acc.Phone))
+                    { acc.Phone = profile.Phone.Trim(); found = true; }
+                // Profile có giá trị nhưng các trường đã đầy: vẫn coi là
+                // đã xác định được danh tính (found theo giá trị mới
+                // điền không phản ánh đúng) — tính lại: found = có ít
+                // nhất một trường hồ sơ (kể cả đã có sẵn) sau khi đọc.
+                if (!found && (profile.Email is not null || profile.Username is not null || profile.Phone is not null))
+                    found = true;
+                if (found) s.Pool.Upsert(acc);
+            }
+            return Results.Json(new JsonObject { ["account"] = acc.Public(), ["profile_found"] = found });
+        });
+        // merge-duplicates: CHỈ chạy khi user bấm nút và xác nhận ở
+        // panel Cài đặt — không tự động gộp khi mở panel hay đăng nhập,
+        // vì gộp là thao tác xóa tài khoản. Với mỗi tài khoản chưa có
+        // danh tính thì thử FetchProfile trước (timeout 90s/tài khoản,
+        // thất bại thì bỏ qua tài khoản đó, không dừng cả quá trình).
+        // Nhóm theo Email chuẩn hóa (khóa chính); không có Email thì
+        // nhóm theo Username khác rỗng. Nhóm >= 2 mới gộp. Tài khoản
+        // chính = LastUsedAt mới nhất (bằng nhau thì CreatedAt sớm
+        // nhất). Tài khoản phụ bị xóa khỏi Pool và các file
+        // local-conversations của nó được viết lại sang hash của tài
+        // khoản chính để thread cũ vẫn nối tiếp được.
+        admin.MapPost("/accounts/merge-duplicates", async (HttpContext ctx) =>
+        {
+            RequireAdmin(ctx, s);
+            var all = s.Pool.All();
+            foreach (var acc in all)
+            {
+                if (!string.IsNullOrWhiteSpace(acc.Email) || !string.IsNullOrWhiteSpace(acc.Username)) continue;
+                try
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+                    var profile = await s.Driver.FetchProfile(acc, cts.Token);
+                    if (profile is null) continue;
+                    if (!string.IsNullOrWhiteSpace(profile.Email)) acc.Email = profile.Email.Trim();
+                    if (!string.IsNullOrWhiteSpace(profile.Username)) acc.Username = profile.Username.Trim();
+                    if (!string.IsNullOrWhiteSpace(profile.Phone)) acc.Phone = profile.Phone.Trim();
+                    s.Pool.Upsert(acc);
+                }
+                catch { /* bỏ qua tài khoản này, không dừng cả quá trình */ }
+            }
+            all = s.Pool.All();
+            var groups = new Dictionary<string, List<Account>>(StringComparer.Ordinal);
+            var skipped = new List<string>();
+            foreach (var acc in all)
+            {
+                var email = AccountPool.NormalizeEmail(acc.Email);
+                if (email is not null) { AddToGroup(groups, "email:" + email, acc); continue; }
+                var username = AccountPool.NormalizeUsername(acc.Username);
+                if (username is not null) { AddToGroup(groups, "username:" + username.ToLowerInvariant(), acc); continue; }
+                skipped.Add(acc.Id);
+            }
+            var merged = new JsonArray();
+            var conversations = new LocalConversationStore(s.Settings.DataDir);
+            foreach (var (key, members) in groups)
+            {
+                if (members.Count < 2) continue;
+                var primary = members
+                    .OrderByDescending(a => a.LastUsedAt)
+                    .ThenBy(a => a.CreatedAt)
+                    .First();
+                var mergedIds = new List<string>();
+                foreach (var secondary in members.Where(a => a.Id != primary.Id))
+                {
+                    if (s.Pool.Remove(secondary.Id))
+                    {
+                        mergedIds.Add(secondary.Id);
+                        try { await s.Driver.InvalidateAccount(secondary.Id); } catch { }
+                        conversations.ReassignAccount(secondary.Id, primary.Id);
+                    }
+                }
+                if (mergedIds.Count == 0) continue;
+                merged.Add(new JsonObject
+                {
+                    ["primaryId"] = primary.Id,
+                    ["primaryLabel"] = primary.Label,
+                    ["mergedIds"] = new JsonArray(mergedIds.Select(i => (JsonNode?)i).ToArray()),
+                    ["identity"] = key,
+                });
+            }
+            return Results.Json(new JsonObject { ["merged"] = merged, ["skipped"] = new JsonArray(skipped.Select(i => (JsonNode?)i).ToArray()) });
+
+            static void AddToGroup(Dictionary<string, List<Account>> groups, string key, Account acc)
+            {
+                if (!groups.TryGetValue(key, out var list)) { list = new List<Account>(); groups[key] = list; }
+                list.Add(acc);
+            }
         });
         admin.MapPost("/conversations/register", async (HttpContext ctx) =>
         {
@@ -1032,6 +1149,9 @@ public static class Endpoints
             Cookies = cookies,
             CookieExpires = expires,
             Enabled = body["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var e) ? e : true,
+            Email = JsonHelp.Str(body["email"]),
+            Username = JsonHelp.Str(body["username"]),
+            Phone = JsonHelp.Str(body["phone"]),
         };
         foreach (var (k, v) in expires.ToList())
             if (body["cookie_expires"] is JsonObject extra && extra[k] is not null)

@@ -39,6 +39,36 @@ public sealed class LocalConversationStore(string dataDirectory)
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
+    // Viết lại mapping cho các thread cũ của tài khoản phụ sang tài
+    // khoản chính (v0.7.0, dùng khi gộp trùng): Entry.Account là
+    // Hash(accountId) — dùng đúng hàm Hash nội bộ này, không tự chế
+    // hàm khác. Giữ nguyên Url/Pending/ImageHash. Trả số file đã viết
+    // lại; file hỏng thì bỏ qua để không vỡ cả quá trình gộp.
+    public int ReassignAccount(string oldAccountId, string newAccountId)
+    {
+        var dir = Path.Combine(dataDirectory, "local-conversations");
+        if (!Directory.Exists(dir)) return 0;
+        var oldHash = Hash(oldAccountId);
+        var newHash = Hash(newAccountId);
+        var rewritten = 0;
+        foreach (var file in Directory.EnumerateFiles(dir, "*.json"))
+        {
+            Entry entry;
+            try { entry = JsonSerializer.Deserialize<Entry>(File.ReadAllText(file)) ?? throw new JsonException(); }
+            catch { continue; }
+            if (entry.Account != oldHash) continue;
+            var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporary, JsonSerializer.Serialize(new Entry(newHash, entry.Url, entry.Pending, entry.ImageHash)));
+                File.Move(temporary, file, overwrite: true);
+                rewritten++;
+            }
+            catch { if (File.Exists(temporary)) try { File.Delete(temporary); } catch { } }
+        }
+        return rewritten;
+    }
+
     public static bool IsThread(string url)
         => Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https"
             && uri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase) && uri.IsDefaultPort

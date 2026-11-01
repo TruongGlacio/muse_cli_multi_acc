@@ -10,6 +10,10 @@ body.sidebar-collapsed #sidebar { display: none; }
 .sidebar-title { font-size: 14px; font-weight: 700; }
 .header { margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 #currentSessionLabel { font-weight: 700; }
+/* Dòng tài khoản (v0.7.0, điểm 3): email dài cắt ellipsis, tooltip
+   giữ đầy đủ. Header chỉ thêm đúng một dòng nhỏ, không cao thêm. */
+.session-item small.account-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#currentSessionAccount { opacity: 0.75; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px; }
 .title { font-size: 16px; font-weight: 700; }
 .subtitle { color: var(--vscode-descriptionForeground); margin: 2px 0 6px; }
 button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 0; border-radius: 4px; padding: 5px 10px; cursor: pointer; }

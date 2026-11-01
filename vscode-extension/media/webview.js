@@ -3,6 +3,7 @@
   var messagesEl = document.getElementById('messages');
   var sessionListEl = document.getElementById('sessionList');
   var currentSessionLabel = document.getElementById('currentSessionLabel');
+  var currentSessionAccountEl = document.getElementById('currentSessionAccount');
   // Layout 2 cột (v0.6.0): drawer dưới header của 0.5.0 đã xóa; nút
   // "☰ Quản lý hội thoại" giờ bật/tắt cột trái. Trạng thái mở/thu gọn
   // lưu bằng webview setState (mất khi webview bị dispose hoàn toàn thì
@@ -285,8 +286,16 @@
         var when = s.updatedAt ? new Date(s.updatedAt).toLocaleString() : '';
         meta.textContent = (s.count || 0) + ' tin' + (when ? ' • ' + when : '') + (s.workspacePath ? ' • ' + s.workspacePath.split(/[\\/]/).pop() : '') + (s.importedFromWeb ? ' • Từ web' : '');
         item.appendChild(meta);
+        // Dòng tài khoản (v0.7.0, điểm 3): dùng accountDisplay do
+        // provider join từ cache tài khoản mới nhất (Email -> Username
+        // -> Label), KHÔNG dùng label lưu trong session. Email dài thì
+        // CSS cắt ellipsis, title giữ đầy đủ để rê chuột đọc được.
+        // Vẫn cùng hàng/vị trí cũ, không thêm hàng mới.
         var accLine = document.createElement('small');
-        accLine.textContent = 'Tài khoản: ' + (s.accountLabel ? s.accountLabel : 'Chưa xác định tài khoản') + (s.accountDetail ? ' (' + s.accountDetail + ')' : '');
+        accLine.className = 'account-line';
+        var accDisplay = s.accountDisplay || 'Chưa xác định tài khoản';
+        accLine.textContent = 'Tài khoản: ' + accDisplay + (s.accountDetail ? ' (' + s.accountDetail + ')' : '');
+        accLine.title = accDisplay;
         item.appendChild(accLine);
         var badge = document.createElement('span');
         badge.className = 'status-badge status-' + (s.accountStatus || 'stopped');
@@ -297,7 +306,20 @@
           vscode.postMessage({ type: 'switchSession', id: s.id });
         });
         sessionListEl.appendChild(item);
-        if (s.id === m.currentId) { currentSessionLabel.textContent = 'Hội thoại hiện tại: ' + (s.title || 'Hội thoại'); }
+        if (s.id === m.currentId) {
+          currentSessionLabel.textContent = 'Hội thoại hiện tại: ' + (s.title || 'Hội thoại');
+          // Header chat (v0.7.0, điểm 3 bổ sung): dòng tài khoản của
+          // hội thoại đang mở, cùng thứ tự ưu tiên như danh sách.
+          // Cập nhật ngay mỗi lần nhận danh sách session (chuyển
+          // session, tạo mới, làm mới cache) nên không kẹt tài khoản
+          // của session cũ. Đã logout vẫn hiện danh tính kèm trạng
+          // thái, vì user cần biết chính tài khoản nào đã logout.
+          if (currentSessionAccountEl) {
+            var curDisplay = s.accountDisplay || 'Chưa xác định tài khoản';
+            currentSessionAccountEl.textContent = 'Tài khoản: ' + curDisplay + (s.accountStatus === 'loggedout' ? ' (Đã logout)' : '');
+            currentSessionAccountEl.title = curDisplay;
+          }
+        }
       });
     }
     else if (m.type === 'history') {

@@ -937,18 +937,135 @@ public sealed class BrowserDriver : IMuseDriver
             _settings.VideoTimeout, req.OnProgress, req.Cancel);
     }
 
-    // ---------- liệt kê thread web (v0.6.0, mức 1) ----------
+    // ---------- liệt kê thread web (v0.6.0, mức 1; bền hơn ở v0.7.0, điểm 4) ----------
     // Mở trang chủ muse.ai trong một page TẠM thuộc đúng context của tài
-    // khoản (GetContext, cookie đã gắn sẵn lúc tạo context), đọc mọi thẻ
-    // <a> trỏ tới /thread/<id> ở sidebar. Chọn trang chủ thay vì
-    // /thread/new để không vô tình tạo một thread trống mới; trang chủ
-    // vẫn hiển thị sidebar hội thoại khi tài khoản đã đăng nhập.
-    // Page tạm KHÔNG đưa vào _tabs, chỉ đóng page đó trong finally, không
-    // đóng context và không chạm tab chat đang chạy. Nếu đã bị đẩy về
-    // trang đăng nhập thì báo Auth tiếng Việt, KHÔNG trả danh sách rỗng
-    // (danh sách rỗng thật và hết hạn trông giống nhau, trả rỗng sẽ làm
+    // khoản (GetContext, cookie đã gắn sẵn lúc tạo context). Page tạm
+    // KHÔNG đưa vào _tabs, chỉ đóng page đó trong finally, không đóng
+    // context và không chạm tab chat đang chạy. Nếu đã bị đẩy về trang
+    // đăng nhập thì báo Auth tiếng Việt, KHÔNG trả danh sách rỗng (danh
+    // sách rỗng thật và hết hạn trông giống nhau, trả rỗng sẽ làm
     // extension kết luận sai là tài khoản không có hội thoại nào).
-    public async Task<List<(string Url, string Title)>> ListWebThreads(Account account)
+    // Vì sao v0.7.0 quét khác v0.6.0: bản cũ chỉ quét thẻ <a> sau khi
+    // chờ cố định 2,5 giây. Nếu sidebar không render thành <a> (mà là
+    // button/div điều hướng, danh sách ảo chỉ render phần nhìn thấy,
+    // hoặc lịch sử tải lười qua API sau 2,5 giây) thì trả về rỗng dù
+    // web có rất nhiều thread. Bản này: (a) quét thêm HTML bằng regex
+    // /thread/<id> trên outerHTML (bắt cả link trong JSON hydration,
+    // data-url, button điều hướng mà <a> bỏ sót), hợp nhất với <a>
+    // rồi khử trùng theo URL, chỉ giữ URL qua được IsThread;
+    // (b) poll mỗi 500ms tối đa 10 giây, dừng sớm khi số thread ổn định
+    // qua 2 lần quét liên tiếp và > 0; sau 10 giây vẫn 0 thì thử mở
+    // thêm /thread/new (trang chat mới thường hiện sidebar lịch sử)
+    // và lặp lại vòng poll, rồi mới trả về rỗng. Chỉ quét trang danh
+    // sách/trang chủ, KHÔNG mở từng thread để quét (không lấy thread
+    // từ nội dung chat trong thread). Mở /thread/new chỉ mở trang,
+    // không gửi tin nhắn nên không tự tạo thread mới.
+    public async Task<WebThreadsScan> ListWebThreads(Account account)
+    {
+        if (Upstream.MissingSessionCookies(account.Cookies) is { Count: > 0 })
+            throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+        var context = await GetContext(account);
+        var page = await context.NewPageAsync();
+        try
+        {
+            var scan = new WebThreadsScan(new List<(string Url, string Title)>(), Upstream.Site, 0);
+            foreach (var startUrl in new[] { Upstream.Site, Upstream.Site + "/thread/new" })
+            {
+                await page.GotoAsync(startUrl,
+                    new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                var previousCount = -1;
+                for (var i = 0; i < 20; i++)
+                {
+                    scan = await ScanThreadsPage(page);
+                    if (!Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
+                        || !pageUri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase))
+                        throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+                    if (scan.LoginHint) throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
+                    if (scan.Threads.Count > 0 && scan.Threads.Count == previousCount) break;
+                    previousCount = scan.Threads.Count;
+                    if (i < 19) await Task.Delay(TimeSpan.FromMilliseconds(500));
+                }
+                if (scan.Threads.Count > 0) break;
+            }
+            return scan;
+        }
+        finally { try { await page.CloseAsync(); } catch { } }
+    }
+
+    // Một lần quét trang: <a href> + regex /thread/<id> trên outerHTML.
+    // Trả kèm linkCount (tổng số <a> đọc được) và LoginHint để caller
+    // phân biệt hết hạn với rỗng thật. Debug chỉ chứa số lượng, không
+    // chứa nội dung trang hay tiêu đề nhạy cảm.
+    private async Task<WebThreadsScan> ScanThreadsPage(IPage page)
+    {
+        var result = await Eval(page, """
+            (() => {
+              const links = [...document.querySelectorAll('a[href]')].map(a => ({
+                href: a.href || '',
+                title: (a.innerText || '').trim().replace(/\s+/g, ' '),
+              }));
+              return {
+                head: (document.body ? document.body.innerText.slice(0, 2000) : ''),
+                html: (document.documentElement ? document.documentElement.outerHTML.slice(0, 500000) : ''),
+                links,
+              };
+            })()
+            """);
+        if (result is not System.Text.Json.Nodes.JsonObject obj)
+            return new WebThreadsScan(new List<(string Url, string Title)>(), page.Url, 0, LoginHint: false);
+        var head = (Str(obj, "head") ?? "").ToLowerInvariant();
+        var loginHint = Dom.LoginHints.Any(h => head.Contains(h));
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var threads = new List<(string Url, string Title)>();
+        var linkCount = 0;
+        if (obj["links"] is System.Text.Json.Nodes.JsonArray links)
+        {
+            linkCount = links.Count;
+            foreach (var item in links)
+            {
+                if (item is not System.Text.Json.Nodes.JsonObject link) continue;
+                var href = Str(link, "href") ?? "";
+                if (!LocalConversationStore.IsThread(href)) continue;
+                var normalized = href.TrimEnd('/');
+                if (!seen.Add(normalized)) continue;
+                var title = Str(link, "title") ?? "";
+                if (title.Length > 200) title = title[..200];
+                threads.Add((normalized, title));
+            }
+        }
+        var html = Str(obj, "html") ?? "";
+        foreach (System.Text.RegularExpressions.Match m in
+            System.Text.RegularExpressions.Regex.Matches(html, @"/thread/([A-Za-z0-9_\-]+)"))
+        {
+            var url = Upstream.Site + "/thread/" + m.Groups[1].Value;
+            if (!LocalConversationStore.IsThread(url)) continue;
+            if (!seen.Add(url)) continue;
+            threads.Add((url, ""));
+        }
+        return new WebThreadsScan(threads, page.Url, linkCount, loginHint);
+    }
+
+    // ---------- lấy hồ sơ tài khoản, best-effort (v0.7.0) ----------
+    // Dùng page TẠM trong đúng context của tài khoản, như ListWebThreads:
+    // không dùng tab chat đang chạy, đóng page sau khi đọc. KHÔNG mở
+    // thread để tìm email (email trong hội thoại có thể là của người
+    // khác). Trong code hiện có KHÔNG có URL trang cài đặt tài khoản
+    // nào (chỉ có trang chủ và /thread/new), nên chỉ đọc trang chủ;
+    // không đoán URL cài đặt rồi coi 404 là lỗi.
+    // - Email: regex trong text trang chủ, ưu tiên vùng menu hồ sơ
+    //   (candidates) rồi tiêu đề, cuối cùng mới toàn bộ text.
+    // - Username/tên hiển thị: best-effort từ aria-label/innerText của
+    //   nút hồ sơ/avatar hoặc phần đầu tiêu đề trang; không xác định
+    //   được thì null (PHỎNG ĐOÁN về cấu trúc DOM thật của muse.ai,
+    //   chưa kiểm chứng bằng mắt trên Windows — xem README).
+    // - Phone: CHỈ khi có dòng gắn nhãn rõ ràng "Phone"/"Số điện thoại"/
+    //   "Điện thoại" kèm số, hoặc input type=tel; KHÔNG regex số tự do.
+    //   Trong đa số trường hợp phone vẫn là null.
+    // Không lấy được gì thì trả null (để nguyên tài khoản), không lỗi.
+    // Chỉ ném Auth khi bị đẩy về trang đăng nhập (phiên hết hạn thật).
+    // Email/phone lấy được KHÔNG được log (chỉ trả về caller để lưu
+    // vào Account và hiện trong panel Cài đặt).
+    public async Task<ProfileInfo?> FetchProfile(Account account, CancellationToken cancel = default)
     {
         if (Upstream.MissingSessionCookies(account.Cookies) is { Count: > 0 })
             throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
@@ -958,45 +1075,118 @@ public sealed class BrowserDriver : IMuseDriver
         {
             await page.GotoAsync(Upstream.Site,
                 new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-            // Chờ sidebar tải lười: DOMContentLoaded chưa đủ cho danh
-            // sách hội thoại (xem giới hạn trong README extension).
-            await Task.Delay(TimeSpan.FromSeconds(2.5));
+            await Task.Delay(TimeSpan.FromSeconds(2.5), cancel);
             var result = await Eval(page, """
                 (() => {
-                  const links = [...document.querySelectorAll('a[href]')].map(a => ({
-                    href: a.href || '',
-                    title: (a.innerText || '').trim().replace(/\s+/g, ' '),
-                  }));
-                  return { head: (document.body ? document.body.innerText.slice(0, 2000) : ''), links };
+                  const seen = new Set();
+                  const candidates = [];
+                  const push = (v) => {
+                    const t = (v || '').trim().replace(/\s+/g, ' ');
+                    if (t && t.length <= 120 && !seen.has(t)) { seen.add(t); candidates.push(t); }
+                  };
+                  document.querySelectorAll('button[aria-label], [role="button"][aria-label]').forEach(e => push(e.getAttribute('aria-label')));
+                  document.querySelectorAll('[data-testid]').forEach(e => {
+                    const id = (e.getAttribute('data-testid') || '').toLowerCase();
+                    if (id.includes('profile') || id.includes('avatar') || id.includes('account') || id.includes('user')) push(e.innerText);
+                  });
+                  document.querySelectorAll('header button, header [role="button"]').forEach(e => push(e.innerText || e.getAttribute('aria-label')));
+                  const tel = document.querySelector('input[type="tel"]');
+                  return {
+                    text: (document.body ? document.body.innerText.slice(0, 12000) : ''),
+                    title: document.title || '',
+                    candidates: candidates.slice(0, 20),
+                    telValue: tel ? (tel.value || '') : '',
+                  };
                 })()
-                """);
+                """, cancel);
             if (result is not System.Text.Json.Nodes.JsonObject obj)
-                throw UpstreamException.ResponseUnavailable("Không đọc được danh sách hội thoại từ muse.ai");
+                return null;
             if (!Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
                 || !pageUri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase))
                 throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
-            var head = (Str(obj, "head") ?? "").ToLowerInvariant();
+            var text = Str(obj, "text") ?? "";
+            var head = text.Length > 2000 ? text[..2000].ToLowerInvariant() : text.ToLowerInvariant();
             if (Dom.LoginHints.Any(h => head.Contains(h)))
                 throw UpstreamException.Auth("Tài khoản Muse đã hết hạn, hãy đăng nhập lại");
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var threads = new List<(string Url, string Title)>();
-            if (obj["links"] is System.Text.Json.Nodes.JsonArray links)
+            var email = FindEmail(Str(obj, "title") ?? "");
+            var candidates = new List<string>();
+            if (obj["candidates"] is System.Text.Json.Nodes.JsonArray arr)
+                foreach (var item in arr)
+                    if (item?.GetValue<string>() is { } c) candidates.Add(c);
+            foreach (var c in candidates)
             {
-                foreach (var item in links)
+                var found = FindEmail(c);
+                if (found is not null) { email = found; break; }
+            }
+            email ??= FindEmail(text);
+            string? username = null;
+            foreach (var c in candidates)
+            {
+                var cleaned = CleanProfileCandidate(c);
+                if (cleaned is not null) { username = cleaned; break; }
+            }
+            if (username is null)
+            {
+                // Tiêu đề dạng "Tên — Muse"/"Tên | Muse": lấy phần đầu
+                // nếu trông như tên hiển thị, không phải từ chung.
+                var title = Str(obj, "title") ?? "";
+                foreach (var sep in new[] { " — ", " - ", " | ", " · " })
                 {
-                    if (item is not System.Text.Json.Nodes.JsonObject link) continue;
-                    var href = Str(link, "href") ?? "";
-                    if (!LocalConversationStore.IsThread(href)) continue;
-                    var normalized = href.TrimEnd('/');
-                    if (!seen.Add(normalized)) continue;
-                    var title = Str(link, "title") ?? "";
-                    if (title.Length > 200) title = title[..200];
-                    threads.Add((normalized, title));
+                    if (!title.Contains(sep)) continue;
+                    var first = title.Split(sep)[0].Trim();
+                    if (first.Length >= 3 && first.Length <= 60
+                        && !new[] { "muse", "home", "trang chủ", "chat" }.Contains(first.ToLowerInvariant()))
+                    { username = first; break; }
                 }
             }
-            return threads;
+            string? phone = null;
+            var telValue = Str(obj, "telValue") ?? "";
+            if (IsPhoneLike(telValue)) phone = telValue.Trim();
+            if (phone is null)
+            {
+                foreach (var line in text.Split('\n'))
+                {
+                    var m = System.Text.RegularExpressions.Regex.Match(line,
+                        @"^\s*(Phone|Số điện thoại|Điện thoại)\s*[:：]\s*(.+?)\s*$",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (m.Success && IsPhoneLike(m.Groups[2].Value)) { phone = m.Groups[2].Value.Trim(); break; }
+                }
+            }
+            if (email is null && username is null && phone is null) return null;
+            return new ProfileInfo(email, username, phone);
         }
         finally { try { await page.CloseAsync(); } catch { } }
+    }
+
+    private static string? FindEmail(string text)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(text,
+            @"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}");
+        return m.Success ? m.Value : null;
+    }
+
+    private static bool IsPhoneLike(string value)
+    {
+        var digits = value.Count(char.IsDigit);
+        return digits >= 7 && digits <= 15
+            && System.Text.RegularExpressions.Regex.IsMatch(value.Trim(), @"^[+\d][\d\s\-().]*$");
+    }
+
+    private static string? CleanProfileCandidate(string raw)
+    {
+        var t = raw.Trim();
+        foreach (var prefix in new[] { "Open ", "Mở ", "Show ", "Hiện " })
+            if (t.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) t = t[prefix.Length..].Trim();
+        foreach (var suffix in new[] { " menu", " Menu" })
+            if (t.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) t = t[..^suffix.Length].Trim();
+        if (t.Length < 3 || t.Length > 80) return null;
+        if (t.Contains('@')) return null; // đó là email, không phải username
+        var lower = t.ToLowerInvariant();
+        if (new[] { "profile", "account", "settings", "menu", "user", "avatar",
+            "hồ sơ", "tài khoản", "cài đặt", "đăng xuất", "log out", "sign out",
+            "log in", "sign in", "đăng nhập" }.Contains(lower)) return null;
+        if (lower.StartsWith("open ") || lower.StartsWith("mở ")) return null;
+        return t;
     }
 
     // ---------- session / quota ----------

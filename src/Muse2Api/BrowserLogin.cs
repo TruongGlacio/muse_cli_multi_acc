@@ -49,13 +49,15 @@ public sealed class BrowserLoginManager
     private static readonly TimeSpan Timeout = TimeSpan.FromMinutes(10);
     private readonly Settings _settings;
     private readonly AccountPool _pool;
+    private readonly IMuseDriver? _driver;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private BrowserLoginSession? _current;
 
-    public BrowserLoginManager(Settings settings, AccountPool pool)
+    public BrowserLoginManager(Settings settings, AccountPool pool, IMuseDriver? driver = null)
     {
         _settings = settings;
         _pool = pool;
+        _driver = driver;
     }
 
     public async Task<BrowserLoginSession> StartAsync(string? label, string? accountId)
@@ -179,6 +181,28 @@ public sealed class BrowserLoginManager
                 saved.CooldownUntil = 0;
                 saved.LastError = null;
                 _pool.Upsert(saved);
+            }
+            // v0.7.0: sau khi lưu xong, thử lấy hồ sơ best-effort cho
+            // tài khoản kết quả. Thất bại thì bỏ qua, KHÔNG chặn thông
+            // báo thành công (user vẫn có thể bấm "Cập nhật thông tin
+            // hồ sơ" trong panel Cài đặt sau). Không log email/phone.
+            if (_driver is not null)
+            {
+                try
+                {
+                    var profile = await _driver.FetchProfile(saved);
+                    if (profile is not null)
+                    {
+                        if (!string.IsNullOrWhiteSpace(profile.Email) && string.IsNullOrWhiteSpace(saved.Email))
+                            saved.Email = profile.Email.Trim();
+                        if (!string.IsNullOrWhiteSpace(profile.Username) && string.IsNullOrWhiteSpace(saved.Username))
+                            saved.Username = profile.Username.Trim();
+                        if (!string.IsNullOrWhiteSpace(profile.Phone) && string.IsNullOrWhiteSpace(saved.Phone))
+                            saved.Phone = profile.Phone.Trim();
+                        _pool.Upsert(saved);
+                    }
+                }
+                catch { /* best-effort: đăng nhập đã thành công thì vẫn báo thành công */ }
             }
             session.Account = saved.Public();
             session.Status = "authenticated";
