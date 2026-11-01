@@ -4,8 +4,12 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFile } from 'child_process';
 import { GatewayManager, GatewayConfig, GatewayState } from './gateway';
+import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, formatAccountLine } from './admin';
+import { BackgroundProcesses } from './processes';
+import { generateImages, editImage, createVideo, downloadMedia, dataUrlOfImageFile } from './media';
+import { ComputerHelper, COMPUTER_TOOLS, approveComputerAction, describeComputerCall } from './computer';
 
-// Muse cho VS Code, v0.2.0.
+// Muse cho VS Code, v0.3.0.
 // Kiến trúc: extension này là GIAO DIỆN CHAT trong VS Code. Nó gọi gateway
 // Muse2Api qua API tương thích OpenAI (/v1/chat/completions), rồi tự thực
 // thi các tool cục bộ bằng API của VS Code / Node trong đúng workspace
@@ -15,11 +19,21 @@ import { GatewayManager, GatewayConfig, GatewayState } from './gateway';
 // chạy mỗi lần mở VS Code (activation onStartupFinished); nếu đã có
 // gateway ngoài chạy sẵn ở cùng cổng thì extension dùng luôn gateway đó.
 // Mọi thao tác ghi tệp / chạy lệnh đều hỏi duyệt trước, trừ khi người dùng
-// bật muse.autoApprove. Lệnh chạy với quyền của người dùng và KHÔNG bị
+// bật muse.autoApprove — ngoại trừ đường dẫn nhạy cảm (.env/.key/.pem/
+// .git/secrets) luôn hỏi duyệt riêng, và mọi hành động điều khiển màn
+// hình nguy hiểm luôn hỏi duyệt riêng, kể cả khi autoApprove bật.
+// Lệnh chạy với quyền của người dùng và KHÔNG bị
 // sandbox trong workspace, đúng như bản desktop đã cảnh báo.
+// V0.3.0 thêm: streaming chat, đính kèm ảnh, tạo/sửa ảnh, tạo video,
+// quản lý tài khoản gateway, tiến trình nền (Node child_process, không
+// dùng VS Code terminal API để lấy output), lưu lịch sử chat, và điều
+// khiển màn hình Windows THỬ NGHIỆM qua helper .NET riêng (không load
+// DLL net10-windows vào Node).
 
 interface ToolCall { name: string; args: Record<string, unknown>; }
-interface ChatMsg { role: string; content: string; }
+type ChatContent = string | Array<Record<string, unknown>>;
+interface ChatMsg { role: string; content: ChatContent; }
+interface PendingAttachment { name: string; size: number; dataUrl: string; }
 
 const SYSTEM_PROMPT = [
   'Bạn là Muse, trợ lý lập trình chạy trong VS Code, làm việc trực tiếp trên',
@@ -36,7 +50,24 @@ const SYSTEM_PROMPT = [
   'max_lines}, read_files {paths}, search_files {query, path, case_sensitive},',
   'write_file {path, content}, edit_file {path, old_text, new_text} hoặc',
   'edit_file {path, edits:[{old_text, new_text}]}, run_command {command,',
-  'workdir, shell, timeout_seconds}, git_status {}, git_diff {}.',
+  'workdir, shell, timeout_seconds} hoặc run_command {command, background:true,',
+  'timeout_seconds} để chạy nền rồi dùng process_status/process_input/',
+  'process_stop với process_id trả về, git_status {}, git_diff {}.',
+  'Công cụ điều khiển màn hình (chỉ thử nghiệm, chỉ Windows, chỉ khi người',
+  'dùng đã bật và chọn cửa sổ đích): computer_list_windows {},',
+  'computer_inspect {element_id?}, computer_screenshot {}, computer_click',
+  '{x, y, snapshot_id, double_click?}, computer_type {element_id, text},',
+  'computer_key {key}, computer_scroll {element_id, direction: up|down},',
+  'computer_invoke {element_id}, computer_set_value {element_id, text},',
+  'computer_focus {}, computer_assert {element_id, property: name|value|toggle|',
+  'enabled|offscreen|selected, expected, match?: contains, wait_ms?},',
+  'computer_toggle {element_id, state: on|off}, computer_select {element_id},',
+  'computer_expand {element_id, expanded?}. Trước khi dùng computer_click phải',
+  'chụp computer_screenshot mới và dùng đúng snapshot_id của nó; trước khi',
+  'dùng các tool theo element_id phải chạy computer_inspect mới, vì id cũ',
+  'hết hạn sau 180 giây. Nếu extension báo điều khiển màn hình đang tắt,',
+  'thiếu helper hoặc chưa chọn cửa sổ thì dừng và nói rõ cho người dùng,',
+  'không tự bịa cửa sổ hay tọa độ.',
   'Quy tắc: tệp đã có phải đọc trước khi sửa; edit_file yêu cầu old_text khớp',
   'đúng một lần; ưu tiên sửa nhỏ thay vì ghi đè toàn bộ; bỏ qua thư mục',
   'bin, obj, node_modules, .git khi duyệt/tìm; đường dẫn chỉ trong workspace,',
@@ -44,9 +75,7 @@ const SYSTEM_PROMPT = [
   'không chạy lệnh tương tác; một lệnh chỉ được coi là thành công khi',
   'exit_code = 0. Thao tác ghi tệp và chạy lệnh sẽ được extension hỏi người',
   'dùng duyệt trước khi thực thi; nếu bị từ chối thì tôn trọng, không thử',
-  'lách bằng cách khác. Công cụ điều khiển màn hình (computer_*) và tiến',
-  'trình nền (process_*) KHÔNG có trong VS Code — đừng dùng chúng.',
-  'Sau mỗi kết quả công cụ, tiếp tục bước tiếp theo hoặc trả lời cuối.',
+  'lách bằng cách khác. Sau mỗi kết quả công cụ, tiếp tục bước tiếp theo hoặc trả lời cuối.',
   'Câu trả lời cuối không chứa khối tool, tóm tắt đã đổi gì và đã kiểm tra gì.',
 ].join('\n');
 
@@ -72,6 +101,8 @@ function cfg() {
     commandTimeout: Math.max(5, c.get<number>('commandTimeoutSeconds') || 120),
     gatewayMode: (mode === 'bundled' || mode === 'external' ? mode : 'auto') as GatewayConfig['gatewayMode'],
     gatewayPath: c.get<string>('gatewayPath') || '',
+    allowComputerControl: c.get<boolean>('allowComputerControl') || false,
+    computerHelperPath: c.get<string>('computerHelperPath') || '',
   };
 }
 
@@ -94,6 +125,21 @@ function truncate(text: string, max = 8000): string {
   return text.length > max ? text.slice(0, max) + `\n... (đã cắt, còn ${text.length - max} ký tự)` : text;
 }
 
+// Đường dẫn nhạy cảm: luôn hỏi duyệt riêng kể cả khi autoApprove bật.
+// Khớp tên tệp/thư mục ở bất kỳ cấp nào, không khớp chuỗi con vô tội
+// (ví dụ "mysecrets.txt" không tính, nhưng "secrets/api.json" thì tính).
+function isSensitivePath(relPath: string): boolean {
+  const parts = relPath.replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts.some((p, i) => {
+    const lower = p.toLowerCase();
+    if (lower === '.git' || lower === 'secrets' || lower === '.secrets') { return true; }
+    if (lower.startsWith('.env')) { return true; }
+    if (i === parts.length - 1 && (lower.endsWith('.key') || lower.endsWith('.pem') || lower.endsWith('.pfx') || lower.endsWith('.p12'))) { return true; }
+    if (i === parts.length - 1 && (lower === 'credentials.json' || lower === 'credentials' || lower.includes('credential'))) { return true; }
+    return false;
+  });
+}
+
 class MuseChatProvider implements vscode.WebviewViewProvider {
   static readonly viewId = 'muse.chat';
   private view?: vscode.WebviewView;
@@ -101,8 +147,61 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   private running = false;
   private abort?: AbortController;
   private history: ChatMsg[] = [];
+  private pendingAttachments: PendingAttachment[] = [];
+  private processes = new BackgroundProcesses();
+  private computer = new ComputerHelper(this.context);
+  private lastComputerImage?: string;
+  private lastStreamed = false;
 
-  constructor(private readonly context: vscode.ExtensionContext, private readonly gateway: GatewayManager) {}
+  constructor(private readonly context: vscode.ExtensionContext, private readonly gateway: GatewayManager) {
+    const saved = this.context.workspaceState.get<Array<{ role?: unknown; content?: unknown }>>('muse.chatHistory', []);
+    this.history = saved
+      .filter((m) => typeof m.role === 'string' && typeof m.content === 'string')
+      .map((m) => ({ role: m.role as string, content: m.content as string }))
+      .slice(-40);
+  }
+
+  private saveHistory(): void {
+    void this.context.workspaceState.update('muse.chatHistory', this.history.slice(-40));
+  }
+
+  clearHistory(): void {
+    this.history = [];
+    this.pendingAttachments = [];
+    void this.context.workspaceState.update('muse.chatHistory', []);
+    this.post('historyCleared', {});
+  }
+
+  async stopComputerControl(): Promise<string> {
+    const conf = cfg();
+    if (this.computer.selectedTitle) {
+      try { await this.computer.call(conf.computerHelperPath, 'computer_stop', {}); } catch { /* helper có thể đã thoát */ }
+    }
+    this.computer.stop();
+    return 'Đã dừng điều khiển màn hình thử nghiệm và hủy chọn cửa sổ đích.';
+  }
+
+  async selectComputerWindow(): Promise<string> {
+    const conf = cfg();
+    const reason = this.computer.unavailableReason(conf.computerHelperPath, conf.allowComputerControl);
+    if (reason) { return reason; }
+    try {
+      const list = await this.computer.call(conf.computerHelperPath, 'computer_list_windows', {});
+      const windows = JSON.parse(list.text) as Array<{ Handle?: number; ProcessId?: number; Title?: string }>;
+      if (windows.length === 0) { return 'Không thấy cửa sổ Windows nào đang mở để chọn làm đích.'; }
+      const pick = await vscode.window.showQuickPick(
+        windows.map((w) => ({ label: w.Title || '(không tiêu đề)', description: `process ${w.ProcessId}`, window: w })),
+        { placeHolder: 'Chọn cửa sổ đích cho điều khiển màn hình thử nghiệm (Muse sẽ chỉ tác động cửa sổ này)' },
+      );
+      if (!pick) { return 'Bạn đã hủy chọn cửa sổ đích.'; }
+      const res = await this.computer.call(conf.computerHelperPath, 'computer_select_window', {
+        handle: pick.window.Handle, process_id: pick.window.ProcessId, title: pick.window.Title,
+      });
+      return res.text;
+    } catch (e) {
+      return `Không chọn được cửa sổ đích: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -112,7 +211,18 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       if (m.type === 'send' && m.text) { void this.run(m.text); }
       else if (m.type === 'stop') { this.abort?.abort(); }
       else if (m.type === 'openSettings') { void vscode.commands.executeCommand('workbench.action.openSettings', 'muse.'); }
+      else if (m.type === 'attach') { void this.attachImage(); }
+      else if (m.type === 'clearHistory') { this.clearHistory(); }
+      else if (m.type === 'importLogin') { void vscode.commands.executeCommand('muse.importDesktopLogin'); }
+      else if (m.type === 'openDashboard') { void vscode.commands.executeCommand('muse.openGatewayDashboard'); }
+      else if (m.type === 'selectComputerWindow') { void this.selectComputerWindow().then((msg) => this.post('status', { text: msg })); }
     });
+    if (this.history.length > 0) {
+      void view.webview.postMessage({
+        type: 'history',
+        messages: this.history.map((h) => ({ role: h.role, text: typeof h.content === 'string' ? h.content : '' })),
+      });
+    }
     if (this.pendingPreset) {
       const preset = this.pendingPreset; this.pendingPreset = undefined;
       void view.webview.postMessage({ type: 'preset', text: preset });
@@ -126,6 +236,27 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   }
 
   stop(): void { this.abort?.abort(); }
+
+  // Đính kèm ảnh vào lượt chat tiếp theo. Ảnh được đọc thành data URL
+  // (đúng dạng gateway chấp nhận cho chat: part image_url, xem
+  // Prompt.ContentToText trong Models.cs) và chỉ giữ trong bộ nhớ của
+  // phiên này; không lưu data URL vào workspaceState cùng lịch sử.
+  private async attachImage(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectMany: false,
+      filters: { 'Ảnh': ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
+      title: 'Chọn ảnh đính kèm vào chat Muse',
+    });
+    if (!picked || picked.length === 0) { return; }
+    try {
+      const dataUrl = dataUrlOfImageFile(picked[0].fsPath);
+      const size = fs.statSync(picked[0].fsPath).size;
+      this.pendingAttachments.push({ name: path.basename(picked[0].fsPath), size, dataUrl });
+      this.post('attached', { name: path.basename(picked[0].fsPath), size });
+    } catch (e) {
+      this.post('error', { text: `Không đính kèm được ảnh: ${e instanceof Error ? e.message : String(e)}` });
+    }
+  }
 
   private post(type: string, payload: Record<string, unknown> = {}): void {
     void this.view?.webview.postMessage({ type, ...payload });
@@ -169,8 +300,14 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       return;
     }
     try {
-      this.post('message', { role: 'user', text: userText });
-      const request: ChatMsg[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...this.history, { role: 'user', content: userText }];
+      const attachments = this.pendingAttachments;
+      this.pendingAttachments = [];
+      if (attachments.length > 0) { this.post('attachmentsCleared', {}); }
+      this.post('message', { role: 'user', text: attachments.length > 0 ? `${userText}\n[Đã đính kèm ${attachments.length} ảnh: ${attachments.map((a) => a.name).join(', ')}]` : userText });
+      const userContent: ChatContent = attachments.length > 0
+        ? [{ type: 'text', text: userText }, ...attachments.map((a) => ({ type: 'image_url', image_url: { url: a.dataUrl } }))]
+        : userText;
+      const request: ChatMsg[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...this.history, { role: 'user', content: userContent }];
       let malformed = 0;
       for (let step = 0; step < conf.maxSteps; step++) {
         if (signal.aborted) { this.post('status', { text: 'Đã dừng.' }); break; }
@@ -180,10 +317,12 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         request.push({ role: 'assistant', content: reply });
         if (calls.length === 0) {
           const finalText = reply.trim() || '(Muse không trả lời gì.)';
-          this.post('message', { role: 'assistant', text: finalText });
+          if (this.lastStreamed) { this.post('streamEnd', {}); }
+          else { this.post('message', { role: 'assistant', text: finalText }); }
           this.post('status', { text: 'Xong.' });
           this.history.push({ role: 'user', content: userText }, { role: 'assistant', content: finalText });
           if (this.history.length > 40) { this.history.splice(0, this.history.length - 40); }
+          this.saveHistory();
           return;
         }
         const bad = calls.find((c) => c.name === '__parse_error__');
@@ -198,8 +337,21 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         for (const call of calls) {
           if (signal.aborted) { break; }
           this.post('tool', { name: call.name, detail: describe(call) });
+          this.lastComputerImage = undefined;
           const result = await this.execute(call, root, conf, signal);
-          request.push({ role: 'user', content: `TOOL_RESULT ${call.name}:\n${result}` });
+          // Giống AgentLoop: nếu tool computer vừa trả ảnh screenshot thì
+          // lượt tiếp theo gửi kèm ảnh đó dưới dạng image_url data URI.
+          if (call.name.startsWith('computer_') && this.lastComputerImage) {
+            request.push({
+              role: 'user',
+              content: [
+                { type: 'text', text: `TOOL_RESULT ${call.name}:\n${result}` },
+                { type: 'image_url', image_url: { url: this.lastComputerImage } },
+              ],
+            });
+          } else {
+            request.push({ role: 'user', content: `TOOL_RESULT ${call.name}:\n${result}` });
+          }
           this.post('toolResult', { name: call.name, detail: truncate(result, 500) });
         }
       }
@@ -207,7 +359,12 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (signal.aborted) { this.post('status', { text: 'Đã dừng.' }); }
-      else {
+      else if (msg.includes('no_account_available')) {
+        // Lỗi 503 này nghĩa là pool gateway chưa có tài khoản khả dụng,
+        // không phải lỗi key/cổng. Webview hiện nút hành động được thay vì
+        // chỉ mã lỗi; việc nhập đăng nhập vẫn phải làm trên máy người dùng.
+        this.post('accountError', { text: 'Gateway đã chạy nhưng chưa có tài khoản Muse nào khả dụng (lỗi no_account_available). Bạn chưa nhập đăng nhập vào gateway kèm theo, hoặc tài khoản đang cooling/invalid. Bấm một nút dưới đây, rồi gửi lại câu hỏi.' });
+      } else {
         this.post('error', { text: `Lỗi: ${msg}` });
       }
     } finally {
@@ -216,18 +373,28 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // Chat có streaming: gateway hỗ trợ stream:true theo SSE (xem Chat
+  // trong Endpoints.cs: mỗi dòng "data: {chunk}" với
+  // choices[0].delta.content, kết thúc bằng "data: [DONE]"). Extension
+  // tích lũy toàn bộ văn bản để parse tool như cũ, đồng thời đẩy từng
+  // delta ra webview để hiện dần. Nếu gateway trả về không phải SSE
+  // (ví dụ lỗi JSON), rơi về đường parse JSON không-stream.
   private async chatOnce(conf: ReturnType<typeof cfg>, messages: ChatMsg[], signal: AbortSignal): Promise<string> {
     const url = `${conf.baseUrl.replace(/\/v1$/, '')}/v1/chat/completions`;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (conf.apiKey) { headers.Authorization = `Bearer ${conf.apiKey}`; }
-    const timeout = setTimeout(() => { /* gateway tự có timeout riêng; không abort sớm ở đây */ }, 11 * 60 * 1000);
-    try {
-      const resp = await fetch(url, {
-        method: 'POST', headers, signal,
-        body: JSON.stringify({ model: conf.model, messages, temperature: 0.2, stream: false, _muse_local_tools: true }),
-      });
+    this.lastStreamed = false;
+    const resp = await fetch(url, {
+      method: 'POST', headers, signal,
+      body: JSON.stringify({ model: conf.model, messages, temperature: 0.2, stream: true, _muse_local_tools: true }),
+    });
+    const contentType = resp.headers.get('content-type') || '';
+    if (!resp.ok) {
       const text = await resp.text();
-      if (!resp.ok) { throw new Error(`Gateway trả HTTP ${resp.status}: ${truncate(text, 500)}`); }
+      throw new Error(`Gateway trả HTTP ${resp.status}: ${truncate(text, 500)}`);
+    }
+    if (!contentType.includes('text/event-stream') || !resp.body) {
+      const text = await resp.text();
       const data = JSON.parse(text) as { choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }> };
       const msg = data.choices?.[0]?.message;
       if (!msg) { throw new Error('Gateway trả về không có choices[0].message.'); }
@@ -243,13 +410,50 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         return '```json\n' + JSON.stringify({ tool_calls: calls }) + '\n```';
       }
       return typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? '');
-    } finally { clearTimeout(timeout); }
+    }
+    this.post('streamStart', {});
+    let full = '';
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) { break; }
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          for (const line of block.split('\n')) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith(':')) { continue; }
+            if (!trimmed.startsWith('data:')) { continue; }
+            const payload = trimmed.slice(5).trim();
+            if (payload === '[DONE]') { return full; }
+            try {
+              const chunk = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
+              const delta = chunk.choices?.[0]?.delta?.content;
+              if (delta) {
+                full += delta;
+                this.lastStreamed = true;
+                this.post('streamDelta', { text: delta });
+              }
+            } catch { /* bỏ qua chunk SSE lỗi, giữ phần đã nhận */ }
+          }
+        }
+      }
+      return full;
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   // ---------------- Thực thi tool trong workspace ----------------
   private async execute(call: ToolCall, root: string, conf: ReturnType<typeof cfg>, signal: AbortSignal): Promise<string> {
     try {
       if (signal.aborted) { return 'Đã dừng trước khi thực thi.'; }
+      if (COMPUTER_TOOLS.includes(call.name)) { return this.executeComputer(call, conf); }
       switch (call.name) {
         case 'list_files': {
           const rel = str(call.args.path, '.');
@@ -355,20 +559,76 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           if (!command) { return 'Lỗi: run_command cần command.'; }
           const workdir = this.resolve(root, str(call.args.workdir, '.'));
           const shell = str(call.args.shell, 'auto');
+          if (call.args.background === true) {
+            if (!await this.approve(call, root, conf, `Chạy nền trong ${path.relative(root, workdir) || '.'}: ${command}\nLệnh nền chạy với quyền của bạn và không bị sandbox; dùng process_status/process_input/process_stop với process_id để theo dõi.`)) {
+              return 'Người dùng đã từ chối chạy lệnh nền. Không thử lại lệnh này.';
+            }
+            return this.processes.start(command, workdir, shell, num(call.args.timeout_seconds, 300));
+          }
           if (!await this.approve(call, root, conf, `Chạy lệnh trong ${path.relative(root, workdir) || '.'}: ${command}\nLệnh chạy với quyền của bạn và không bị sandbox trong workspace.`)) {
             return 'Người dùng đã từ chối chạy lệnh. Không thử lại lệnh này.';
           }
           return await runShell(command, workdir, shell, num(call.args.timeout_seconds, conf.commandTimeout));
         }
+        case 'process_status': {
+          const id = str(call.args.process_id);
+          if (!id) {
+            const list = this.processes.list();
+            return list.length === 0 ? 'Không có tiến trình nền nào trong phiên này.' : list.map((p) => `${p.id}: ${p.command.slice(0, 120)} — ${p.running ? 'đang chạy' : `đã thoát (exit_code=${p.exitCode})`}${p.timedOut ? ' (timeout)' : ''}`).join('\n');
+          }
+          return this.processes.status(id, num(call.args.wait_ms, 30000));
+        }
+        case 'process_input': {
+          const id = str(call.args.process_id);
+          if (!id) { return 'Lỗi: process_input cần process_id.'; }
+          return this.processes.input(id, str(call.args.text), call.args.newline !== false);
+        }
+        case 'process_stop': {
+          const id = str(call.args.process_id);
+          if (!id) { return 'Lỗi: process_stop cần process_id.'; }
+          if (!await this.approve(call, root, conf, `Dừng tiến trình nền ${id}.`)) {
+            return 'Người dùng đã từ chối dừng tiến trình. Không thử lại thao tác này.';
+          }
+          return this.processes.stop(id);
+        }
         case 'git_status': return await runShell('git status --short', root, 'auto', 30);
         case 'git_diff': return await runShell('git diff --stat && git diff', root, 'auto', 30);
         default:
-          if (call.name.startsWith('computer_')) { return 'Lỗi: công cụ điều khiển màn hình chỉ có trên app WinForms, không có trong extension VS Code.'; }
-          if (call.name.startsWith('process_')) { return 'Lỗi: tiến trình nền chưa hỗ trợ trong extension v0.2.0; hãy dùng lệnh chạy tới khi xong thay vì chạy nền.'; }
           return `Lỗi: công cụ không hỗ trợ trong extension VS Code: ${call.name}`;
       }
     } catch (e) {
       return `Lỗi khi thực thi ${call.name}: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  // ---------------- Điều khiển màn hình Windows thử nghiệm ----------------
+  private async executeComputer(call: ToolCall, conf: ReturnType<typeof cfg>): Promise<string> {
+    const reason = this.computer.unavailableReason(conf.computerHelperPath, conf.allowComputerControl);
+    if (reason) { return reason; }
+    if (call.name === 'computer_list_windows') {
+      try {
+        const res = await this.computer.call(conf.computerHelperPath, 'computer_list_windows', {});
+        return res.text;
+      } catch (e) {
+        return `Lỗi: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+    // Chưa chọn cửa sổ đích thì hỏi chọn ngay, thay vì để helper lỗi rồi
+    // model tự đoán cửa sổ. Chọn xong thì chạy tiếp tool đã yêu cầu.
+    if (!this.computer.selectedTitle) {
+      const picked = await this.selectComputerWindow();
+      if (!this.computer.selectedTitle) { return `Chưa chọn được cửa sổ đích nên không chạy ${call.name}: ${picked}`; }
+    }
+    if (this.computer.isDangerous(call.name)) {
+      const ok = await approveComputerAction(call.name, call.args, this.computer.selectedTitle);
+      if (!ok) { return 'Người dùng đã từ chối hành động điều khiển màn hình. Không thử lại hành động này.'; }
+    }
+    try {
+      const res = await this.computer.call(conf.computerHelperPath, call.name, call.args);
+      if (res.imageDataUrl) { this.lastComputerImage = res.imageDataUrl; }
+      return res.text;
+    } catch (e) {
+      return `Lỗi: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
 
@@ -380,13 +640,18 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   }
 
   private async approve(call: ToolCall, root: string, conf: ReturnType<typeof cfg>, detail: string, proposed?: string, target?: string): Promise<boolean> {
-    if (conf.autoApprove || READ_ONLY_TOOLS.has(call.name)) { return true; }
+    // Đường dẫn nhạy cảm luôn hỏi duyệt riêng, kể cả khi autoApprove bật.
+    const sensitive = target !== undefined && isSensitivePath(path.relative(root, target));
+    if (conf.autoApprove && !sensitive) { return true; }
+    if (READ_ONLY_TOOLS.has(call.name)) { return true; }
     let viewed = false;
     for (;;) {
       const choices: string[] = ['Cho phép', 'Từ chối'];
       const canPreview = proposed !== undefined && target !== undefined && (call.name === 'write_file' || call.name === 'edit_file') && !viewed;
       if (canPreview) { choices.splice(1, 0, 'Xem diff'); }
-      const pick = await vscode.window.showWarningMessage(`Muse muốn: ${detail}`, { modal: true }, ...choices);
+      const pick = await vscode.window.showWarningMessage(
+        sensitive ? `Muse muốn thay đổi ĐƯỜNG DẪN NHẠY CẢM (luôn hỏi riêng, kể cả khi autoApprove bật): ${detail}` : `Muse muốn: ${detail}`,
+        { modal: true }, ...choices);
       if (pick === 'Cho phép') { return true; }
       if (pick === 'Xem diff' && proposed !== undefined && target !== undefined) {
         viewed = true;
@@ -442,7 +707,12 @@ function describe(call: ToolCall): string {
     case 'run_command': return str(call.args.command);
     case 'git_status': return 'git status';
     case 'git_diff': return 'git diff';
-    default: return call.name;
+    case 'process_status': return `Trạng thái tiến trình nền ${str(call.args.process_id) || '(liệt kê)'}`;
+    case 'process_input': return `Gửi input cho tiến trình nền ${str(call.args.process_id)}`;
+    case 'process_stop': return `Dừng tiến trình nền ${str(call.args.process_id)}`;
+    default:
+      if (call.name.startsWith('computer_')) { return describeComputerCall(call.name, call.args); }
+      return call.name;
   }
 }
 
@@ -500,6 +770,136 @@ function extractToolJson(node: unknown, calls: ToolCall[]): void {
     if (args[to] === undefined && args[from] !== undefined) { args[to] = args[from]; }
   }
   calls.push({ name: normalizeName(name), args });
+}
+
+async function accountAction(gateway: GatewayManager, output: vscode.OutputChannel, kind: 'reset' | 'renew'): Promise<void> {
+  try {
+    const info = await gateway.ensureStarted();
+    const accounts = await fetchGatewayAccounts(info.baseUrl, info.apiKey);
+    if (accounts.length === 0) {
+      void vscode.window.showWarningMessage('Chưa có tài khoản nào trong pool gateway nên không có gì để reset/renew. Hãy chạy "Muse: Nhập đăng nhập từ app desktop" trước.');
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(
+      accounts.map((a) => ({ label: formatAccountLine(a), account: a })),
+      { placeHolder: `Chọn tài khoản để ${kind === 'reset' ? 'reset (xóa cooldown, đưa về Active)' : 'renew (gia hạn phiên)'}` },
+    );
+    if (!pick) { return; }
+    const confirm = await vscode.window.showWarningMessage(
+      `${kind === 'reset' ? 'Reset' : 'Renew'} tài khoản ${pick.account.label || pick.account.id}?`,
+      { modal: true }, 'Đồng ý', 'Hủy',
+    );
+    if (confirm !== 'Đồng ý') { return; }
+    const result = kind === 'reset'
+      ? await resetGatewayAccount(info.baseUrl, info.apiKey, pick.account.id)
+      : (await renewGatewayAccount(info.baseUrl, info.apiKey, pick.account.id)).account;
+    const msg = `Đã ${kind} tài khoản: ${formatAccountLine(result)}`;
+    output.appendLine('[Muse] ' + msg);
+    void vscode.window.showInformationMessage(msg);
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Không ${kind} được tài khoản: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function askSaveFolder(): Promise<string | undefined> {
+  const root = workspaceRoot();
+  const picked = await vscode.window.showOpenDialog({
+    canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
+    defaultUri: root ? vscode.Uri.file(root) : undefined,
+    title: 'Chọn thư mục lưu kết quả media',
+  });
+  return picked?.[0]?.fsPath;
+}
+
+async function mediaGenerateImage(gateway: GatewayManager): Promise<void> {
+  try {
+    const prompt = await vscode.window.showInputBox({ prompt: 'Mô tả ảnh cần tạo (prompt)', placeHolder: 'Ví dụ: một con mèo cam ngồi bên cửa sổ, phong cách vẽ tay' });
+    if (!prompt) { return; }
+    const nText = await vscode.window.showInputBox({ prompt: 'Số ảnh (1-4)', value: '1', validateInput: (v) => { const n = Number(v); return Number.isInteger(n) && n >= 1 && n <= 4 ? undefined : 'Nhập số nguyên từ 1 đến 4.'; } });
+    if (!nText) { return; }
+    const size = await vscode.window.showInputBox({ prompt: 'Kích thước (để trống = mặc định của gateway)', placeHolder: 'Ví dụ: 1024x1024' });
+    const info = await gateway.ensureStarted();
+    const images = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Muse: đang tạo ảnh…' }, async () =>
+      generateImages(info.baseUrl, info.apiKey, { prompt, n: Number(nText), size: size || undefined }));
+    if (images.length === 0 || !images[0].url) { throw new Error('Gateway không trả về URL ảnh nào.'); }
+    const folder = await askSaveFolder();
+    if (!folder) { return; }
+    const saved: string[] = [];
+    for (const img of images) {
+      if (img.url) { saved.push(await downloadMedia(img.url, folder, 'muse-image.png')); }
+    }
+    for (const file of saved) { await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(file)); }
+    void vscode.window.showInformationMessage(`Đã tạo và lưu ${saved.length} ảnh vào ${folder}.`);
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Không tạo được ảnh: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function mediaEditImage(gateway: GatewayManager): Promise<void> {
+  try {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectMany: true, filters: { 'Ảnh': ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
+      title: 'Chọn 1-4 ảnh gốc để sửa',
+    });
+    if (!picked || picked.length === 0 || picked.length > 4) {
+      if (picked && picked.length > 4) { void vscode.window.showWarningMessage('Sửa ảnh tối đa 4 ảnh gốc (giới hạn của gateway).'); }
+      return;
+    }
+    const prompt = await vscode.window.showInputBox({ prompt: 'Mô tả cách sửa ảnh (prompt)' });
+    if (!prompt) { return; }
+    const info = await gateway.ensureStarted();
+    const images = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Muse: đang sửa ảnh…' }, async () =>
+      editImage(info.baseUrl, info.apiKey, { prompt, imagePaths: picked.map((u) => u.fsPath), n: 1 }));
+    if (images.length === 0 || !images[0].url) { throw new Error('Gateway không trả về URL ảnh nào.'); }
+    const folder = await askSaveFolder();
+    if (!folder) { return; }
+    const saved: string[] = [];
+    for (const img of images) {
+      if (img.url) { saved.push(await downloadMedia(img.url, folder, 'muse-edit.png')); }
+    }
+    for (const file of saved) { await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(file)); }
+    void vscode.window.showInformationMessage(`Đã sửa và lưu ${saved.length} ảnh vào ${folder}.`);
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Không sửa được ảnh: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function mediaGenerateVideo(gateway: GatewayManager): Promise<void> {
+  try {
+    const prompt = await vscode.window.showInputBox({ prompt: 'Mô tả video cần tạo (prompt)' });
+    if (!prompt) { return; }
+    const durText = await vscode.window.showInputBox({
+      prompt: 'Thời lượng giây (1-60, để trống = mặc định của gateway)',
+      validateInput: (v) => {
+        if (!v) { return undefined; }
+        const n = Number(v);
+        return Number.isInteger(n) && n >= 1 && n <= 60 ? undefined : 'Nhập số nguyên từ 1 đến 60.';
+      },
+    });
+    if (durText === undefined) { return; }
+    const useFrame = await vscode.window.showQuickPick(['Không dùng first frame', 'Chọn ảnh làm first frame'], { placeHolder: 'Video có dùng ảnh khung hình đầu không?' });
+    let firstFrame: string | undefined;
+    if (useFrame === 'Chọn ảnh làm first frame') {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectMany: false, filters: { 'Ảnh': ['png', 'jpg', 'jpeg', 'webp'] },
+        title: 'Chọn ảnh làm first frame',
+      });
+      if (!picked || picked.length === 0) { return; }
+      firstFrame = dataUrlOfImageFile(picked[0].fsPath);
+    }
+    const info = await gateway.ensureStarted();
+    const video = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Muse: đang tạo video (poll mỗi 5 giây, tối đa 15 phút)…' }, async (progress) =>
+      createVideo(info.baseUrl, info.apiKey, { prompt, duration: durText ? Number(durText) : undefined, firstFrameDataUrl: firstFrame }, (status, pct) => {
+        progress.report({ message: `trạng thái: ${status}${pct ? `, tiến trình ${pct}%` : ''}` });
+      }));
+    const folder = await askSaveFolder();
+    if (!folder) { return; }
+    const saved = await downloadMedia(video.url, folder, 'muse-video.mp4');
+    await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(saved));
+    void vscode.window.showInformationMessage(`Đã tạo và lưu video vào ${saved}.`);
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Không tạo được video: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 let sharedGateway: GatewayManager | undefined;
@@ -569,6 +969,50 @@ export function activate(context: vscode.ExtensionContext): void {
       } catch (e) {
         void vscode.window.showErrorMessage(`Không mở được dashboard gateway: ${e instanceof Error ? e.message : String(e)}`);
       }
+    }),
+    vscode.commands.registerCommand('muse.checkGatewayAccounts', async () => {
+      try {
+        const info = await gateway.ensureStarted();
+        const status = await fetchGatewayStatus(info.baseUrl, info.apiKey);
+        const accounts = await fetchGatewayAccounts(info.baseUrl, info.apiKey);
+        const lines = [
+          `Gateway ${info.mode === 'bundled' ? 'kèm theo' : 'sẵn có'} (cổng ${info.port}), phiên bản gateway ${status.version || '?'}:`,
+          `Tài khoản: tổng ${String(status.accounts.total ?? '?')}, khả dụng ${String(status.accounts.available ?? '?')}, đang cooling ${String(status.accounts.cooling ?? '?')}, invalid ${String(status.accounts.invalid ?? '?')}.`,
+          accounts.length === 0 ? 'Chưa có tài khoản nào trong pool — đây chính là nguyên nhân của lỗi 503 no_account_available. Hãy chạy "Muse: Nhập đăng nhập từ app desktop".' : accounts.map(formatAccountLine).join('\n'),
+        ];
+        output.appendLine('[Muse] ' + lines.join('\n'));
+        output.show(true);
+        void vscode.window.showInformationMessage(lines.join('\n'));
+      } catch (e) {
+        void vscode.window.showErrorMessage(`Không xem được trạng thái gateway: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }),
+    vscode.commands.registerCommand('muse.resetGatewayAccount', async () => {
+      await accountAction(gateway, output, 'reset');
+    }),
+    vscode.commands.registerCommand('muse.renewGatewayAccount', async () => {
+      await accountAction(gateway, output, 'renew');
+    }),
+    vscode.commands.registerCommand('muse.selectComputerWindow', async () => {
+      const msg = await provider.selectComputerWindow();
+      void vscode.window.showInformationMessage(msg);
+    }),
+    vscode.commands.registerCommand('muse.stopComputerControl', async () => {
+      const msg = await provider.stopComputerControl();
+      void vscode.window.showInformationMessage(msg);
+    }),
+    vscode.commands.registerCommand('muse.clearChatHistory', () => {
+      provider.clearHistory();
+      void vscode.window.showInformationMessage('Đã xóa lịch sử chat của Muse trong workspace này.');
+    }),
+    vscode.commands.registerCommand('muse.generateImage', async () => {
+      await mediaGenerateImage(gateway);
+    }),
+    vscode.commands.registerCommand('muse.editImage', async () => {
+      await mediaEditImage(gateway);
+    }),
+    vscode.commands.registerCommand('muse.generateVideo', async () => {
+      await mediaGenerateVideo(gateway);
     }),
   );
   // Tự chạy gateway ngay khi extension kích hoạt — kể cả khi kích hoạt do

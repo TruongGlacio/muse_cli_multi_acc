@@ -11,6 +11,7 @@
   <div class="title">Muse</div>
   <div class="subtitle">Chat, đọc dự án, sửa tệp và chạy kiểm tra qua gateway Muse2Api.</div>
   <button id="settingsBtn" title="Mở cài đặt Muse">Cài đặt</button>
+  <button id="clearHistoryBtn" title="Xóa lịch sử chat đã lưu trong workspace này">Xóa lịch sử</button>
 </div>
 <div id="chips">
   <button data-prompt="Giải thích dự án này đang làm gì và các phần chính liên hệ với nhau thế nào. Chỉ đọc tệp, chưa sửa gì.">Tìm hiểu dự án</button>
@@ -19,12 +20,14 @@
   <button data-prompt="Kiểm tra những gì vừa sửa: chạy kiểm tra phù hợp với dự án và giải thích kết quả, không tự sửa thêm.">Kiểm tra chất lượng</button>
 </div>
 <div id="messages"></div>
+<div id="attachments"></div>
 <div id="status">Gateway kèm theo sẽ tự chạy khi mở VS Code — bạn không cần chạy gateway tay nữa. Nếu gateway báo lỗi, xem thanh trạng thái “Muse Gateway” hoặc Output &gt; Muse Gateway.</div>
 <div class="composer">
   <textarea id="input" rows="3" placeholder="Nhập điều bạn muốn làm… (Enter để gửi, Shift+Enter để xuống dòng)"></textarea>
   <div class="actions">
     <button id="sendBtn">Gửi</button>
     <button id="stopBtn">Dừng</button>
+    <button id="attachBtn" title="Chọn ảnh đính kèm vào lượt chat tiếp theo (tối đa 20 MiB/ảnh)">Đính kèm ảnh</button>
   </div>
 </div>
 <p class="note">Mỗi thao tác ghi tệp hoặc chạy lệnh đều hỏi bạn duyệt trước (trừ khi bật muse.autoApprove). Lệnh chạy với quyền của bạn và không bị sandbox trong workspace.</p>

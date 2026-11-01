@@ -1,7 +1,83 @@
-# Muse cho VS Code (v0.2.0)
+# Muse cho VS Code (v0.3.0)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.3.0: tất cả tính năng portable + điều khiển màn hình Windows thử nghiệm
+
+- **Streaming:** câu trả lời hiện dần từng phần thay vì chờ cả câu.
+- **Đính kèm ảnh vào chat:** nút “Đính kèm ảnh” trong khung chat (tối đa
+  20 MiB/ảnh, đúng giới hạn của gateway), gửi dưới dạng part `image_url`
+  như gateway chấp nhận cho chat.
+- **Tạo/sửa ảnh, tạo video:** lệnh “Muse: Tạo ảnh” (`POST
+  /v1/images/generations`, 1–4 ảnh), “Muse: Sửa ảnh” (multipart
+  `/v1/images/edits`, 1–4 ảnh gốc, không mask), “Muse: Tạo video” (`POST
+  /v1/videos`, poll theo taskId mỗi 5 giây, tối đa 15 phút). Kết quả được
+  hỏi thư mục lưu, tải về workspace rồi mở xem.
+- **Quản lý tài khoản ngay trong extension:** lệnh “Muse: Xem trạng thái
+  tài khoản gateway” (`/admin/status` + `/admin/accounts`), “Reset tài
+  khoản gateway” và “Renew tài khoản gateway”. Chỉ hiện label, trạng
+  thái, bật/tắt, cooldown và lỗi cuối — **không bao giờ hiện cookie hay
+  token**. Khi chat gặp đúng lỗi `no_account_available`, khung chat hiện
+  nút “Nhập đăng nhập từ app desktop” và “Mở dashboard gateway” thay vì
+  chỉ mã lỗi. Lưu ý: lỗi 503 này vẫn có nghĩa là pool gateway chưa có
+  tài khoản khả dụng; extension không tự tạo tài khoản, bạn vẫn phải nhập
+  đăng nhập trên máy mình như mục dưới.
+- **Tiến trình nền:** `run_command` với `background: true` khởi động
+  tiến trình nền, rồi dùng `process_status` / `process_input` /
+  `process_stop` với `process_id` trả về. Chạy bằng Node `child_process`
+  trong extension host (tối đa 8 tiến trình chạy cùng lúc, giữ 32000 ký
+  tự output mới nhất, đúng semantics của agent desktop), không dùng
+  VS Code terminal API để lấy output.
+- **Lưu lịch sử chat:** lịch sử giữ trong `workspaceState` của workspace
+  đang mở, mở lại VS Code vẫn thấy đoạn chat cũ; nút “Xóa lịch sử” trong
+  khung chat (hoặc lệnh “Muse: Xóa lịch sử chat”) để xóa. Ảnh đính kèm
+  không được lưu cùng lịch sử (chỉ giữ trong bộ nhớ của phiên).
+- **Duyệt nhạy cảm:** đường dẫn chứa `.env`, `.key`, `.pem`, `.git`,
+  `secrets` luôn hỏi duyệt modal riêng, kể cả khi bật `muse.autoApprove`.
+
+### Điều khiển màn hình Windows THỬ NGHIỆM (chỉ Windows, mặc định TẮT)
+
+Đây là phần duy nhất không thể bê nguyên từ app desktop sang VS Code:
+app desktop dùng UI Automation và SendInput của project
+`Muse2Api.Computer` trên .NET Windows, còn extension host chạy Node
+không load được DLL đó và VS Code API không có UI Automation hay chụp
+màn hình desktop. Vì vậy v0.3.0 làm theo cách sau, và **không giả vờ**
+chạy khi không đủ điều kiện:
+
+- **Helper .NET riêng:** project mới `src/Muse2Api.ComputerHelper`
+  (console `net10.0-windows`, tham chiếu `Muse2Api.Computer`, publish
+  win-x64 self-contained vào
+  `bin/win-x64/computer-helper/Muse2Api.ComputerHelper.exe`), giữ một
+  `DesktopComputer` duy nhất và nói chuyện với extension bằng JSON-lines
+  qua stdin/stdout. Mọi logic UI Automation, cache element, snapshot
+  ảnh cho click đều là code thật của `DesktopComputer`, không viết lại.
+- **Bật:** đặt `muse.allowComputerControl` thành `true` (mặc định
+  `false`). Khi tắt, không phải Windows, hoặc thiếu helper, mọi tool
+  `computer_*` trả lỗi rõ ràng và hướng về app desktop.
+- **Chọn cửa sổ đích:** extension hỏi chọn bằng QuickPick từ danh sách
+  cửa sổ (`computer_list_windows`), rồi mới chạy các tool khác. Helper
+  không tự mở cửa sổ chooser như bản desktop; cách dừng khẩn cấp là
+  lệnh “Muse: Dừng điều khiển màn hình” (hủy chọn cửa sổ và tắt helper),
+  vì helper không có cửa sổ WinForms để nhận phím Esc như bản desktop.
+- **Duyệt riêng từng hành động:** mọi hành động `computer_click`,
+  `computer_type`, `computer_key`, `computer_invoke`, `computer_set_value`,
+  `computer_toggle`, `computer_select`, `computer_expand`,
+  `computer_scroll` đều hiện modal riêng ghi rõ hành động và cửa sổ đích,
+  **kể cả khi `muse.autoApprove` bật**. Sau `computer_screenshot`, ảnh
+  được đưa vào lượt model tiếp theo dưới dạng `image_url` data URI,
+  đúng cách `AgentLoop` của bản desktop làm với `LastComputerImage`.
+- **Rủi ro phải biết trước:** hành động này bấm/gõ thật vào Windows.
+  Chỉ bật khi bạn đang nhìn thấy đúng cửa sổ đích, và đừng chọn cửa sổ
+  VS Code đang chạy extension nếu bạn không muốn model bấm vào chính
+  VS Code. Helper chỉ tự loại trừ cửa sổ của chính nó, không loại trừ
+  VS Code.
+- **Kích thước gói:** helper self-contained khoảng 173 MB chưa nén, cộng
+  gateway khoảng 213 MB, nên file `.vsix` v0.3.0 sẽ to hơn hẳn v0.2.0
+  (xem dung lượng thực tế khi giao). Repo vẫn không chứa binary: script
+  `scripts/Build-VscodeExtension.ps1` nay publish cả helper trước khi
+  đóng gói (chỉ trên runtime `win-*`; trên runtime khác thì bỏ qua
+  helper và extension báo rõ computer_* không khả dụng).
 
 ## Mới trong v0.2.0: gateway kèm theo, tự chạy khi mở VS Code
 
@@ -65,7 +141,11 @@ gateway:
   `Muse2Api.Agent`: ```json {"tool_calls": [...]} hoặc ```tool legacy),
   extension tự thực thi tool trong workspace đang mở bằng API của VS Code /
   Node: `list_files`, `read_file`, `read_files`, `search_files`,
-  `write_file`, `edit_file`, `run_command`, `git_status`, `git_diff`.
+  `write_file`, `edit_file`, `run_command` (kể cả `background: true`),
+  `process_status`, `process_input`, `process_stop`, `git_status`,
+  `git_diff`, và (thử nghiệm, chỉ Windows, khi bật
+  `muse.allowComputerControl`) toàn bộ 14 tool `computer_*` qua helper
+  .NET riêng.
 - Mọi thao tác ghi tệp và chạy lệnh đều **hỏi duyệt trước** (hộp thoại
   modal), riêng sửa/ghi tệp có thêm nút **Xem diff**. Chỉ khi bật
   `muse.autoApprove` mới tự duyệt. Lệnh chạy với quyền của người dùng và
@@ -93,7 +173,7 @@ nằm trong file `api_key` dưới thư mục `Gateway` của app desktop, ví d
 ### 2. Cài extension
 
 - Mở file `.vsix` trong VS Code: bấm phải vào file > **Install Extension
-  VSIX**, hoặc chạy `code --install-extension muse-vscode-0.2.0.vsix`.
+  VSIX**, hoặc chạy `code --install-extension muse-vscode-0.3.0.vsix`.
 - Mở một thư mục dự án, bấm biểu tượng **Muse** ở thanh Activity Bar
   (trái), hoặc chạy lệnh **Muse: Mở chat** từ Command Palette.
 
@@ -108,6 +188,8 @@ nằm trong file `api_key` dưới thư mục `Gateway` của app desktop, ví d
 - `muse.maxSteps`: mặc định 30 bước tool / yêu cầu.
 - `muse.commandTimeoutSeconds`: mặc định 120 giây / lệnh.
 - `muse.autoApprove`: mặc định `false` (khuyên giữ nguyên).
+- `muse.allowComputerControl`: mặc định `false` (thử nghiệm, chỉ Windows).
+- `muse.computerHelperPath`: để trống thì dùng helper kèm theo extension.
 
 ## Gợi ý sẵn trong UI
 

@@ -14,6 +14,8 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 .bubble.error { background: rgba(255, 80, 80, 0.15); border: 1px solid rgba(255, 80, 80, 0.4); align-self: stretch; }
 .bubble pre { background: var(--vscode-textCodeBlock-background); padding: 8px; overflow-x: auto; white-space: pre; }
 .bubble code { font-family: var(--vscode-editor-font-family); }
+#attachments { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.chip { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 4px; padding: 4px 8px; font-size: 12px; }
 #status { color: var(--vscode-descriptionForeground); margin-bottom: 8px; min-height: 16px; }
 .composer textarea { width: 100%; box-sizing: border-box; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; padding: 8px; resize: vertical; }
 .actions { display: flex; gap: 6px; margin-top: 6px; }

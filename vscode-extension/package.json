@@ -14,7 +14,16 @@
     "onCommand:muse.importDesktopLogin",
     "onCommand:muse.installGatewayBrowser",
     "onCommand:muse.showGatewayLog",
-    "onCommand:muse.openGatewayDashboard"
+    "onCommand:muse.openGatewayDashboard",
+    "onCommand:muse.checkGatewayAccounts",
+    "onCommand:muse.resetGatewayAccount",
+    "onCommand:muse.renewGatewayAccount",
+    "onCommand:muse.selectComputerWindow",
+    "onCommand:muse.stopComputerControl",
+    "onCommand:muse.clearChatHistory",
+    "onCommand:muse.generateImage",
+    "onCommand:muse.editImage",
+    "onCommand:muse.generateVideo"
   ],
   "categories": [
     "Other"
@@ -72,6 +81,42 @@
       {
         "command": "muse.openGatewayDashboard",
         "title": "Muse: Mở dashboard gateway"
+      },
+      {
+        "command": "muse.checkGatewayAccounts",
+        "title": "Muse: Xem trạng thái tài khoản gateway"
+      },
+      {
+        "command": "muse.resetGatewayAccount",
+        "title": "Muse: Reset tài khoản gateway (xóa cooldown)"
+      },
+      {
+        "command": "muse.renewGatewayAccount",
+        "title": "Muse: Renew tài khoản gateway"
+      },
+      {
+        "command": "muse.selectComputerWindow",
+        "title": "Muse: Chọn cửa sổ đích cho điều khiển màn hình (thử nghiệm)"
+      },
+      {
+        "command": "muse.stopComputerControl",
+        "title": "Muse: Dừng điều khiển màn hình"
+      },
+      {
+        "command": "muse.clearChatHistory",
+        "title": "Muse: Xóa lịch sử chat"
+      },
+      {
+        "command": "muse.generateImage",
+        "title": "Muse: Tạo ảnh"
+      },
+      {
+        "command": "muse.editImage",
+        "title": "Muse: Sửa ảnh"
+      },
+      {
+        "command": "muse.generateVideo",
+        "title": "Muse: Tạo video"
       }
     ],
     "configuration": {
@@ -120,6 +165,16 @@
           "default": "",
           "description": "Đường dẫn tới file thực thi gateway Muse2Api tự chọn. Để trống thì dùng binary kèm theo extension (bin/win-x64/Muse2Api.exe trên Windows x64).",
           "type": "string"
+        },
+        "muse.allowComputerControl": {
+          "default": false,
+          "description": "THỬ NGHIỆM, chỉ Windows: cho phép extension điều khiển màn hình qua helper .NET riêng. Mặc định TẮT. Khi bật, mỗi hành động bấm/gõ vẫn hỏi duyệt modal riêng, kể cả khi muse.autoApprove bật. Tắt thì computer_* trả lỗi rõ ràng, hướng về app desktop.",
+          "type": "boolean"
+        },
+        "muse.computerHelperPath": {
+          "default": "",
+          "description": "Đường dẫn tới Muse2Api.ComputerHelper.exe tự chọn. Để trống thì dùng helper kèm theo extension (bin/win-x64/computer-helper/Muse2Api.ComputerHelper.exe).",
+          "type": "string"
         }
       },
       "title": "Muse"
@@ -165,7 +220,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.2.0",
+  "version": "0.3.0",
   "extensionKind": [
     "ui",
     "workspace"

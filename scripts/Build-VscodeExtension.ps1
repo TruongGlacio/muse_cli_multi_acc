@@ -4,12 +4,21 @@ $ErrorActionPreference = 'Stop'
 $workspaceRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $extensionRoot = Join-Path $workspaceRoot 'vscode-extension'
 $gatewayOut = Join-Path $extensionRoot "bin/$Runtime"
+$helperOut = Join-Path $extensionRoot "bin/$Runtime/computer-helper"
 
 Push-Location -LiteralPath $workspaceRoot
 try {
     if (!$SkipGateway) {
         & $DotNet publish src/Muse2Api/Muse2Api.csproj -c Release -r $Runtime --self-contained true -o $gatewayOut --nologo -v minimal
         if ($LASTEXITCODE -ne 0) { throw 'Publish gateway Muse2Api thất bại.' }
+        # Helper điều khiển màn hình thử nghiệm (v0.3.0): project net10-windows
+        # riêng, chỉ publish cho Windows. Trên runtime khác, bỏ qua helper và
+        # extension sẽ báo rõ là computer_* không khả dụng.
+        if ($Runtime -like 'win-*') {
+            & $DotNet publish src/Muse2Api.ComputerHelper/Muse2Api.ComputerHelper.csproj -c Release -r $Runtime --self-contained true -o $helperOut --nologo -v minimal
+            if ($LASTEXITCODE -ne 0) { throw 'Publish helper Muse2Api.ComputerHelper thất bại.' }
+            if (!(Test-Path -LiteralPath (Join-Path $helperOut 'Muse2Api.ComputerHelper.exe'))) { throw 'Không tìm thấy Muse2Api.ComputerHelper.exe sau khi publish.' }
+        }
         $privateFiles = @(Get-ChildItem -LiteralPath $gatewayOut -Recurse -File | Where-Object { $_.Name -in @('accounts.json','api_key','keys.json','requests.db','cookies.json','storage-state.json','auth.json') })
         if ($privateFiles.Count) { throw 'Dữ liệu cá nhân lọt vào thư mục gateway; dừng đóng gói.' }
     }
@@ -25,4 +34,5 @@ try {
     if (!$vsix) { throw 'Không tìm thấy file .vsix sau khi đóng gói.' }
     Write-Output ('VSIX=' + $vsix.FullName)
     Write-Output ('GATEWAY=' + $gatewayOut)
+    Write-Output ('HELPER=' + $helperOut)
 } finally { Pop-Location }
