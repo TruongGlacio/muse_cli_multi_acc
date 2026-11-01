@@ -87,6 +87,15 @@ export async function renewGatewayAccount(baseUrl: string, apiKey: string, id: s
   return { ok: data.ok === true, account: asAccount((data.account || {}) as Record<string, unknown>) };
 }
 
+export async function patchGatewayAccount(baseUrl: string, apiKey: string, id: string, enabled: boolean): Promise<GatewayAccountSummary> {
+  const data = (await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled }) })) as Record<string, unknown>;
+  return asAccount((data.account || {}) as Record<string, unknown>);
+}
+
+export async function deleteGatewayAccount(baseUrl: string, apiKey: string, id: string): Promise<void> {
+  await adminFetch(baseUrl, apiKey, `/admin/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
 export function formatCooldown(cooldownUntil: number): string {
   if (!cooldownUntil) { return 'không cooldown'; }
   const remainingMs = cooldownUntil * 1000 - Date.now();

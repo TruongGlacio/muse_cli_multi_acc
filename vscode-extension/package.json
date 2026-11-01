@@ -107,6 +107,30 @@
         "title": "Muse: Xóa lịch sử chat"
       },
       {
+        "command": "muse.newSession",
+        "title": "Muse: Hội thoại mới"
+      },
+      {
+        "command": "muse.switchSession",
+        "title": "Muse: Chọn hội thoại"
+      },
+      {
+        "command": "muse.renameSession",
+        "title": "Muse: Đổi tên hội thoại hiện tại"
+      },
+      {
+        "command": "muse.deleteSession",
+        "title": "Muse: Xóa hội thoại hiện tại"
+      },
+      {
+        "command": "muse.refreshGatewayAccounts",
+        "title": "Muse: Kiểm tra lại tài khoản Muse"
+      },
+      {
+        "command": "muse.logoutGatewayAccount",
+        "title": "Muse: Đăng xuất tài khoản Muse khỏi gateway"
+      },
+      {
         "command": "muse.generateImage",
         "title": "Muse: Tạo ảnh"
       },
@@ -220,7 +244,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.3.3",
+  "version": "0.4.0",
   "extensionKind": [
     "ui",
     "workspace"

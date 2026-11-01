@@ -6,8 +6,20 @@ button { background: var(--vscode-button-background); color: var(--vscode-button
 button:hover { background: var(--vscode-button-hoverBackground); }
 #chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 #chips button { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
-#sessionBar { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
-#sessionSelect { flex: 1; min-width: 140px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; padding: 5px; }
+#sessionBar { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+#currentSessionLabel { font-weight: 700; }
+#sessionList { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
+.session-item { text-align: left; background: transparent; border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 6px 8px; color: var(--vscode-editor-foreground); }
+.session-item.current { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-color: var(--vscode-badge-background); }
+.session-item small { display: block; opacity: 0.75; font-size: 11px; }
+#accountPanel { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; margin-bottom: 10px; }
+.panelTitle { font-weight: 700; margin-bottom: 4px; }
+#accountStatus { margin-bottom: 6px; }
+#accountList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.account-card { border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 6px 8px; }
+.account-card .acc-title { font-weight: 700; }
+.account-card .acc-meta { font-size: 12px; color: var(--vscode-descriptionForeground); margin: 2px 0 6px; word-break: break-word; }
+.account-card .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 0; }
 #messages { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .bubble { padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
 .bubble.user { background: rgba(124, 92, 255, 0.18); align-self: flex-end; max-width: 92%; }

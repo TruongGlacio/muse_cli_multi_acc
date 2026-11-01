@@ -1,7 +1,12 @@
-# Muse cho VS Code (v0.3.3)
+# Muse cho VS Code (v0.4.0)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.4.0: danh sách session nhìn thấy được + bảng quản lý đăng nhập Muse
+
+- Danh sách session nhìn thấy được: thay dropdown nhỏ bằng danh sách session hiển thị rõ ở đầu khung chat (tiêu đề, số tin, thời gian cập nhật, thư mục), bấm vào session nào là làm việc tiếp session đó. Session lưu toàn cục theo user (globalState) nên mở thư mục khác vẫn thấy đủ danh sách; lần đầu lên 0.4.0 sẽ hợp nhất session từ global + session workspace của 0.3.3 + lịch sử cũ. Lưu ý thật: session trước 0.3.3 không bao giờ được lưu thành danh sách nên không thể hiện thành nhiều session cũ, chỉ lịch sử cuối cùng thành 1 session; session workspace khác tạo ở 0.3.3 sẽ được kéo vào khi bạn mở lại đúng workspace đó một lần. Ngoài khung chat, session còn quản lý được từ Command Palette: "Muse: Chọn hội thoại", "Hội thoại mới", "Đổi tên", "Xóa".
+- Bảng quản lý đăng nhập Muse trong khung chat ("Tài khoản Muse", ngay dưới danh sách session): luôn hiện trạng thái gateway và từng tài khoản (nhãn, trạng thái active/cooling/invalid, bật/tắt, cooldown, lỗi cuối — không bao giờ hiện cookie). Từ đây bạn tự kiểm tra được có lỗi đăng nhập hay không mà không cần đoán: nếu chưa có tài khoản thì bảng báo rõ và đó là nguyên nhân lỗi 503; nếu Invalid/cooling thì thấy rõ trạng thái và lỗi cuối. Nút theo từng tài khoản: Làm mới / Đăng nhập lại (Renew qua gateway), Xóa cooldown, Bật/Tắt, Đăng xuất (xóa khỏi pool gateway, hỏi xác nhận; không đăng xuất app desktop). Nút chung: Kiểm tra lại tài khoản, Nhập đăng nhập từ app desktop, Mở dashboard, Khởi động lại gateway. Đăng nhập lại đầy đủ khi cookie hết hạn: đăng nhập lại trong app Muse desktop rồi bấm Nhập đăng nhập từ app desktop (VS Code không có WebView2 nên không đăng nhập trực tiếp trong extension được).
 
 ## Mới trong v0.3.3: quản lý session + lỗi 502 dạng dễ hiểu
 
