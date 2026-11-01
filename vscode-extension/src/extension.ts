@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { GatewayManager, GatewayConfig, GatewayState } from './gateway';
 import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, formatAccountLine } from './admin';
@@ -9,7 +10,8 @@ import { BackgroundProcesses } from './processes';
 import { generateImages, editImage, createVideo, downloadMedia, dataUrlOfImageFile } from './media';
 import { ComputerHelper, COMPUTER_TOOLS, approveComputerAction, describeComputerCall } from './computer';
 
-// Muse cho VS Code, v0.3.0.
+// Muse cho VS Code, v0.3.1.
+// V0.3.1 vá lỗi 400: gửi user=conversationId ổn định khi dùng local tools.
 // Kiến trúc: extension này là GIAO DIỆN CHAT trong VS Code. Nó gọi gateway
 // Muse2Api qua API tương thích OpenAI (/v1/chat/completions), rồi tự thực
 // thi các tool cục bộ bằng API của VS Code / Node trong đúng workspace
@@ -147,6 +149,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   private running = false;
   private abort?: AbortController;
   private history: ChatMsg[] = [];
+  private conversationId: string;
   private pendingAttachments: PendingAttachment[] = [];
   private processes = new BackgroundProcesses();
   private computer = new ComputerHelper(this.context);
@@ -159,6 +162,17 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       .filter((m) => typeof m.role === 'string' && typeof m.content === 'string')
       .map((m) => ({ role: m.role as string, content: m.content as string }))
       .slice(-40);
+    // ID hội thoại ổn định, bắt buộc khi dùng local tools: gateway lấy
+    // field "user" làm ConversationHint (Endpoints.cs -> BrowserDriver:
+    // local tools mà hint trống thì trả 400 "Local tools require a stable
+    // conversation ID"). Agent terminal luôn gửi conversationId của nó;
+    // extension trước 0.3.1 không gửi field này nên mọi lượt chat đều 400.
+    // ID này là UUID ngẫu nhiên theo workspace, không chứa thông tin tài
+    // khoản; cùng ID thì gateway tái dùng đúng thread Muse phía server
+    // (LocalConversationStore), khác ID thì mở thread mới.
+    const savedId = this.context.workspaceState.get<string>('muse.conversationId', '');
+    this.conversationId = savedId || crypto.randomUUID();
+    if (!savedId) { void this.context.workspaceState.update('muse.conversationId', this.conversationId); }
   }
 
   private saveHistory(): void {
@@ -169,6 +183,10 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     this.history = [];
     this.pendingAttachments = [];
     void this.context.workspaceState.update('muse.chatHistory', []);
+    // Xóa lịch sử thì phải đổi ID hội thoại, nếu không gateway sẽ tái
+    // dùng thread Muse cũ phía server dù lịch sử cục bộ đã trống.
+    this.conversationId = crypto.randomUUID();
+    void this.context.workspaceState.update('muse.conversationId', this.conversationId);
     this.post('historyCleared', {});
   }
 
@@ -386,7 +404,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     this.lastStreamed = false;
     const resp = await fetch(url, {
       method: 'POST', headers, signal,
-      body: JSON.stringify({ model: conf.model, messages, temperature: 0.2, stream: true, _muse_local_tools: true }),
+      body: JSON.stringify({ model: conf.model, messages, temperature: 0.2, stream: true, _muse_local_tools: true, user: this.conversationId }),
     });
     const contentType = resp.headers.get('content-type') || '';
     if (!resp.ok) {

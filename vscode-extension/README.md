@@ -1,7 +1,11 @@
-# Muse cho VS Code (v0.3.0)
+# Muse cho VS Code (v0.3.1)
 
 Extension chat trong VS Code: mở thanh bên **Muse**, gửi yêu cầu bằng tiếng
 Việt, Muse đọc dự án, sửa tệp và chạy kiểm tra — qua gateway Muse2Api.
+
+## Mới trong v0.3.1: vá lỗi 400 conversation ID
+
+- Trước 0.3.1, extension gửi `_muse_local_tools: true` nhưng không gửi field `user`, nên gateway (driver browser) trả 400 `Local tools require a stable conversation ID` ở mọi lượt chat. Từ 0.3.1, extension gửi `user` là UUID hội thoại ổn định theo workspace (lưu ở workspaceState), đúng cách agent terminal gửi conversationId của nó. Xóa lịch sử thì đổi ID mới để gateway mở thread Muse mới, không tái dùng thread cũ.
 
 ## Mới trong v0.3.0: tất cả tính năng portable + điều khiển màn hình Windows thử nghiệm
 
