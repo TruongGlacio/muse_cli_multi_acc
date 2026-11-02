@@ -1,4 +1,20 @@
-# Muse cho VS Code (v0.8.22)
+# Muse cho VS Code (v0.8.23)
+
+## Mới trong v0.8.23: kế hoạch dạng actions gọi send_file không còn bị báo không hỗ trợ
+
+**Vấn đề cũ.** Tool `send_file` đã có sẵn trong `execute()` từ 0.8.20 (nằm trong `READ_ONLY_TOOLS`, gửi nguyên file trong workspace lên web qua file part), và đường `tool_calls` với name `send_file` cũng qua được `normalizeName`. Nhưng riêng nhánh `actions` trong `extractToolJson` thì bảng map chỉ có `{scan, inspect_text, inspect_texts, find_text, replace_text, save_text, terminal, git_status, git_diff}` mà KHÔNG có `send_file`, nên kế hoạch dạng `{"actions":[{"action":"send_file","path":"..."}]}` bị biến thành `__parse_error__` với thông báo "Action không hỗ trợ: send_file". Sau tối đa 3 phản hồi sai định dạng thì vòng lặp dừng hẳn, khung chat chỉ còn "Sẵn sàng" mà file không được gửi. Đây là lỗi thật trong code, không phải do model chọn sai tool.
+
+**Cách sửa.** Thêm đúng một mục `send_file: 'send_file'` vào bảng map của nhánh `actions`. Không cần dịch tham số gì thêm vì `send_file` dùng đúng trường `path` đã có sẵn trong args sau khi xóa `action`. Không map thêm action nào khác (đặc biệt không đụng các action `ui_*`, ngoài phạm vi lỗi này). Mọi hành vi khác giữ nguyên.
+
+**Lưu ý khi dùng.** Nhờ bổ sung tự tìm ngay bên dưới, model không còn bắt buộc phải biết trước đường dẫn đầy đủ: ghi tên file trần hay đường dẫn thừa tiền tố đầu cũng được extension tự tìm (xem mục bổ sung). Giới hạn 25 MB/file và 10 file/lượt vẫn giữ nguyên.
+
+## Mới trong v0.8.23 (bổ sung): send_file tự tìm file trong workspace, không bắt user gửi thủ công
+
+**Quy tắc user chốt.** User CHỈ gửi đường dẫn khi muốn chỉ định; còn file sinh ra trong progress thì model PHẢI tự tìm trong workspace, tuyệt đối không bắt user gửi file thủ công lên. Vì vậy ngoài vá map ở trên, `send_file` nay có thêm tự tìm.
+
+**Cách hoạt động.** Đường dẫn chính xác resolve ra đúng file trong workspace thì gửi như cũ, mọi giới hạn cũ giữ nguyên (25 MB, 10 file/lượt, chỉ tệp không phải thư mục, chặn ngoài workspace). Khi đường dẫn chính xác KHÔNG resolve ra file, extension tự đi tìm trong cây workspace (chỉ dưới root, dùng đúng tập `SKIP_DIRS` của `list_files`/`search_files` là `bin, obj, node_modules, .git, .vs, dist`, chỉ recurse vào thư mục thật không phải symlink, bỏ qua thư mục không đọc được, chỉ xét tệp) và thu thập các file thỏa MỘT trong: relative path bằng đúng arg; relative path kết thúc bằng `'/' + arg` (arg là đoạn cuối đường dẫn, ví dụ chỉ tên file); arg kết thúc bằng `'/' + relative path` (arg thừa tiền tố đầu, ví dụ root là `DaiChienRungXanh` mà arg ghi `DaiChienRungXanh/data/.../shot_0031.mp4`). So khớp tên không phân biệt hoa thường. Kết quả: duy nhất 1 file thì gửi file đó và text kết quả ghi rõ đường dẫn tương đối thật đã tìm thấy để model/user đối chiếu; 0 file thì giữ lỗi "tệp không tồn tại" như cũ (ghi thêm là đã tìm theo tên); nhiều file thì lỗi liệt kê tối đa 20 ứng viên dạng đường dẫn tương đối, bắt chỉ định rõ, TUYỆT ĐỐI không tự đoán chọn một file; hơn 20 thì báo quá nhiều kết quả, yêu cầu chỉ định rõ hơn. SYSTEM_PROMPT cũng dặn thêm: khi user chỉ nêu tên file mà không có đường dẫn đầy đủ thì cứ gọi `send_file` với tên đó, extension sẽ tự tìm (duy nhất thì gửi, nhiều thì báo danh sách để chọn); không bao giờ yêu cầu user tự đính kèm/gửi thủ công file đã nằm trong workspace.
+
+**Vì sao không chỉ dặn model dùng list_files/search_files.** `search_files` tìm theo NỘI DUNG file (bỏ qua file nhị phân > 2 MB) nên không tìm được mp4 theo tên; `list_files` thì có recursive nhưng cắt 8000 ký tự và limit mặc định 50 nên đi bộ tay dễ hụt. Tự tìm ngay trong `send_file` là cách chắc chắn nhất.
 
 ## Mới trong v0.8.22: kéo thả file vào bất kỳ chỗ nào trong khung chat + hết im lặng khi webview không giao được file
 

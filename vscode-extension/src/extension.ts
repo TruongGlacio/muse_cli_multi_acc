@@ -211,6 +211,56 @@ export function toolResultContent(callName: string, result: string, images: stri
   ];
 }
 
+// v0.8.23: tự tìm file cho send_file khi đường dẫn chính xác không
+// resolve ra file. Chỉ đi dưới root, dùng đúng tập SKIP_DIRS của
+// list_files/search_files, chỉ recurse vào thư mục thật (Dirent của
+// symlink có isDirectory() false nên không bị đi lạc), bỏ qua thư mục
+// không đọc được, chỉ xét tệp (isFile(), symlink không tính). So khớp
+// tên không phân biệt hoa thường, thỏa MỘT trong: relative path bằng
+// đúng arg; relative path kết thúc bằng '/' + arg (arg là đoạn cuối
+// đường dẫn, ví dụ chỉ tên file); arg kết thúc bằng '/' + relative
+// path (arg thừa tiền tố đầu, ví dụ root là DaiChienRungXanh mà arg
+// ghi DaiChienRungXanh/data/.../shot_0031.mp4). Trả về các đường dẫn
+// tương đối dạng posix ('/' nối), không giới hạn số lượng ở đây (giới
+// hạn hiển thị 20 do caller quyết).
+export function findSendFileCandidates(root: string, arg: string): string[] {
+  let a = arg.replace(/\\/g, '/').trim();
+  while (a.startsWith('./')) { a = a.slice(2); }
+  while (a.startsWith('/')) { a = a.slice(1); }
+  const parts: string[] = [];
+  for (const seg of a.split('/')) {
+    if (seg === '' || seg === '.') { continue; }
+    if (seg === '..') {
+      if (parts.length === 0) { return []; }
+      parts.pop();
+      continue;
+    }
+    parts.push(seg);
+  }
+  if (parts.length === 0) { return []; }
+  const needle = parts.join('/').toLowerCase();
+  const out: string[] = [];
+  const walk = (d: string): void => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name)) { walk(full); }
+        continue;
+      }
+      if (!e.isFile()) { continue; }
+      const rel = path.relative(root, full).split(path.sep).join('/');
+      const relLower = rel.toLowerCase();
+      if (relLower === needle || relLower.endsWith('/' + needle) || needle.endsWith('/' + relLower)) {
+        out.push(rel);
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
 // v0.8.19: thứ tự hiển thị danh sách hội thoại, mới nhất lên đầu.
 // Chỉ đổi thứ tự hiển thị: không đổi thứ tự lưu trong store (sort trên
 // bản sao), tie-break createdAt desc rồi giữ thứ tự gốc nhờ sort ổn định.
@@ -268,6 +318,11 @@ const SYSTEM_PROMPT = [
   'mỗi file tối đa 25 MB (giới hạn của web), tối đa 10 file mỗi lượt gửi;',
   'dùng send_file khi user muốn gửi nguyên file, dùng read_video_frames',
   'khi chỉ cần xem nhanh vài khung hình mẫu),',
+  'khi user chỉ nêu tên file mà không có đường dẫn đầy đủ thì cứ gọi',
+  'send_file với tên đó, extension sẽ tự tìm trong workspace (duy nhất',
+  'thì gửi, nhiều thì báo danh sách để chọn); không bao giờ yêu cầu',
+  'user tự đính kèm/gửi thủ công file đã nằm trong workspace, mà phải',
+  'tự tìm bằng send_file (hoặc list_files nếu cần xác nhận),',
   'write_file {path, content}, edit_file {path, old_text, new_text} hoặc',
   'edit_file {path, edits:[{old_text, new_text}]}, run_command {command,',
   'workdir, shell, timeout_seconds} hoặc run_command {command, background:true,',
@@ -2299,23 +2354,38 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           // Ngoài workspace thì resolve() ném lỗi qua catch cuối
           // execute thành lỗi text; rỗng/quá 25 MB/đủ 10 file thì
           // lỗi text rõ, tuyệt đối không cắt file hay giả vờ đã gửi.
+          // v0.8.23: đường dẫn chính xác không resolve ra file thì
+          // tự tìm trong cây workspace (findSendFileCandidates):
+          // duy nhất thì gửi file đó và ghi rõ path thật tìm thấy;
+          // 0 thì lỗi như cũ (ghi thêm là đã tìm theo tên); nhiều
+          // thì lỗi liệt kê tối đa 20 ứng viên, TUYỆT ĐỐI không tự
+          // đoán chọn một file; hơn 20 thì báo quá nhiều kết quả.
           const rel = str(call.args.path);
           if (!rel) { return 'Lỗi: send_file cần path.'; }
-          const target = this.resolve(root, rel);
-          if (!fs.existsSync(target)) { return `Lỗi: tệp không tồn tại: ${rel}`; }
+          let target = this.resolve(root, rel);
+          let displayRel = rel;
+          if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+            const candidates = findSendFileCandidates(root, rel);
+            if (candidates.length === 0) { return `Lỗi: tệp không tồn tại: ${rel} (đã tìm theo tên trong workspace, không thấy file nào khớp).`; }
+            if (candidates.length > 20) { return `Lỗi: có quá nhiều file khớp với "${rel}" (hơn 20), hãy chỉ định đường dẫn đầy đủ hơn.`; }
+            if (candidates.length > 1) { return `Lỗi: có nhiều file khớp với "${rel}", hãy chỉ định rõ đường dẫn đầy đủ:\n${candidates.map((c) => `- ${c}`).join('\n')}`; }
+            displayRel = candidates[0];
+            target = path.join(root, ...displayRel.split('/'));
+          }
           const st = fs.statSync(target);
-          if (!st.isFile()) { return `Lỗi: send_file chỉ gửi được tệp, không phải thư mục: ${rel}`; }
+          if (!st.isFile()) { return `Lỗi: send_file chỉ gửi được tệp, không phải thư mục: ${displayRel}`; }
           const limitError = checkFileAttachmentLimit(st.size, this.turnFileCount);
           if (limitError) { return `Lỗi: ${limitError}`; }
           const buf = fs.readFileSync(target);
-          const mime = mimeForFile(rel);
+          const mime = mimeForFile(displayRel);
           const filename = path.basename(target);
           this.lastToolFiles = [{ filename, mime, dataUrl: `data:${mime};base64,${buf.toString('base64')}` }];
           this.turnFileCount++;
-          const videoNote = VIDEO_EXTS.includes(path.extname(rel).toLowerCase())
+          const videoNote = VIDEO_EXTS.includes(path.extname(displayRel).toLowerCase())
             ? ' Lưu ý: web đã nhận file không đồng nghĩa bạn xem được nội dung video — nếu bạn không truy cập được video thì hãy nói rõ và đề nghị dùng khung hình mẫu thay thế.'
             : '';
-          return `Đã gửi nguyên file ${rel} kèm theo message này (tên ${filename}, ${st.size} byte, ${mime}). Hãy dùng nội dung file đính kèm để kiểm tra, không suy đoán nội dung file từ tên file.${videoNote}`;
+          const foundNote = displayRel !== rel ? ` (tìm thấy theo "${rel}" tại đường dẫn tương đối thật: ${displayRel})` : '';
+          return `Đã gửi nguyên file ${displayRel} kèm theo message này (tên ${filename}, ${st.size} byte, ${mime})${foundNote}. Hãy dùng nội dung file đính kèm để kiểm tra, không suy đoán nội dung file từ tên file.${videoNote}`;
         }
         case 'write_file': {
           const rel = str(call.args.path);
@@ -2569,7 +2639,7 @@ function extractToolJson(node: unknown, calls: ToolCall[]): void {
   const obj = node as Record<string, unknown>;
   if (Array.isArray(obj.tool_calls)) { for (const item of obj.tool_calls) { extractToolJson(item, calls); } return; }
   if (Array.isArray(obj.actions)) {
-    const map: Record<string, string> = { scan: 'list_files', inspect_text: 'read_file', inspect_texts: 'read_files', find_text: 'search_files', replace_text: 'edit_file', save_text: 'write_file', terminal: 'run_command', git_status: 'git_status', git_diff: 'git_diff' };
+    const map: Record<string, string> = { scan: 'list_files', inspect_text: 'read_file', inspect_texts: 'read_files', find_text: 'search_files', replace_text: 'edit_file', save_text: 'write_file', terminal: 'run_command', git_status: 'git_status', git_diff: 'git_diff', send_file: 'send_file' };
     for (const item of obj.actions) {
       const step = item as Record<string, unknown>;
       const tool = map[str(step.action)] || '';
