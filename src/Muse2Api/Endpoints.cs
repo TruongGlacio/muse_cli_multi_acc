@@ -7,7 +7,7 @@ namespace Muse2Api;
 
 public static class Endpoints
 {
-    public const string Version = "0.8.14";
+    public const string Version = "0.8.15";
 
     public static void Map(WebApplication app, AppState s)
     {
@@ -167,7 +167,19 @@ public static class Endpoints
             throw MuseException.Invalid("messages contain no text or images");
         var images = await JsonHelp.LoadImageRefs(flat.Images, ctx.RequestAborted);
         var localTools = JsonHelp.Bool(body["_muse_local_tools"]);
-        var req = new ChatRequest(localTools && s.Driver.Name == "browser" ? Prompt.ForLocalExecutor(msgObjs) : flat.Text, spec.Id, images,
+        // v0.8.15 (OpenAI tools mode, e.g. Kilo Code): only when the request
+        // declares tools AND the extension's own local-tools flow is off.
+        // The local-tools flow is untouched: it keeps using ForLocalExecutor
+        // and its own JSON plan protocol, and the gateway still never
+        // executes anything itself in tools mode — it only translates.
+        var toolSpecs = localTools ? null : OpenAiTools.ParseToolSpecs(body["tools"]);
+        var toolsMode = toolSpecs is { Count: > 0 };
+        var toolChoice = OpenAiTools.ParseToolChoice(body["tool_choice"]);
+        var parallelToolCalls = body["parallel_tool_calls"] is null || JsonHelp.Bool(body["parallel_tool_calls"], true);
+        var promptText = toolsMode
+            ? flat.Text + "\n\n" + OpenAiTools.RenderCatalog(toolSpecs!)
+            : localTools && s.Driver.Name == "browser" ? Prompt.ForLocalExecutor(msgObjs) : flat.Text;
+        var req = new ChatRequest(promptText, spec.Id, images,
             JsonHelp.Str(body["user"]), Prompt.MessageTurns(msgObjs), ctx.RequestAborted, localTools, Prompt.ImageBatchId(msgObjs),
             // v0.8.2: extension gửi account_id của session đã chọn.
             // Gateway cũ bỏ qua trường lạ này; gateway mới ép đúng tài
@@ -184,6 +196,26 @@ public static class Endpoints
             var text = "";
             var chatStream = s.Gateway.ChatStream(req, id => ctx.Items["account_id"] = id);
             await foreach (var d in chatStream) text += d;
+            // v0.8.15: in tools mode a valid tool_calls block becomes a real
+            // OpenAI tool_calls message (content empty, finish tool_calls);
+            // anything else — no block, forbidden choice, or any invalid call
+            // — degrades to the plain-text reply, never a half-valid call.
+            var message = new JsonObject { ["role"] = "assistant", ["content"] = text };
+            var finishReason = "stop";
+            var calls = toolsMode ? OpenAiTools.TryExtractCalls(text, toolSpecs!, toolChoice, parallelToolCalls) : null;
+            if (calls is { Count: > 0 })
+            {
+                var toolCalls = new JsonArray();
+                foreach (var call in calls)
+                    toolCalls.Add(new JsonObject
+                    {
+                        ["id"] = OpenAiTools.BuildCallId(),
+                        ["type"] = "function",
+                        ["function"] = new JsonObject { ["name"] = call.Name, ["arguments"] = call.ArgumentsJson },
+                    });
+                message = new JsonObject { ["role"] = "assistant", ["content"] = "", ["tool_calls"] = toolCalls };
+                finishReason = "tool_calls";
+            }
             await ctx.Response.WriteAsJsonAsync(new JsonObject
             {
                 ["id"] = completionId,
@@ -193,16 +225,107 @@ public static class Endpoints
                 ["choices"] = new JsonArray(new JsonObject
                 {
                     ["index"] = 0,
-                    ["message"] = new JsonObject { ["role"] = "assistant", ["content"] = text },
-                    ["finish_reason"] = "stop",
+                    ["message"] = message,
+                    ["finish_reason"] = finishReason,
                 }),
                 ["usage"] = new JsonObject
                 {
-                    ["prompt_tokens"] = JsonHelp.ApproxTokens(flat.Text),
+                    // Non-tools usage stays on flat.Text exactly as before;
+                    // only tools mode counts the catalog-augmented prompt.
+                    ["prompt_tokens"] = JsonHelp.ApproxTokens(toolsMode ? promptText : flat.Text),
                     ["completion_tokens"] = JsonHelp.ApproxTokens(text),
-                    ["total_tokens"] = JsonHelp.ApproxTokens(flat.Text) + JsonHelp.ApproxTokens(text),
+                    ["total_tokens"] = JsonHelp.ApproxTokens(toolsMode ? promptText : flat.Text) + JsonHelp.ApproxTokens(text),
                 },
             });
+            return;
+        }
+
+        // v0.8.15: tools-mode streaming must buffer the whole web reply
+        // first — tool_calls deltas can only be emitted once the reply is
+        // known to be a valid block, otherwise a client would receive text
+        // it cannot retract. Plain text in tools mode is re-emitted as
+        // content deltas; the wire shape stays standard SSE + [DONE].
+        if (toolsMode)
+        {
+            var fullText = "";
+            var bufferedStream = s.Gateway.ChatStream(req, id => ctx.Items["account_id"] = id);
+            await foreach (var d in bufferedStream) fullText += d;
+            ctx.Response.ContentType = "text/event-stream";
+            ctx.Response.Headers.CacheControl = "no-cache";
+            ctx.Response.Headers["X-Accel-Buffering"] = "no";
+            await using var toolsWriter = new StreamWriter(ctx.Response.Body, leaveOpen: true);
+            JsonObject ToolsChunk(JsonObject delta, string? finish) => new()
+            {
+                ["id"] = completionId,
+                ["object"] = "chat.completion.chunk",
+                ["created"] = created,
+                ["model"] = outModel,
+                ["choices"] = new JsonArray(new JsonObject
+                {
+                    ["index"] = 0,
+                    ["delta"] = delta,
+                    ["finish_reason"] = finish is null ? null : JsonValue.Create(finish),
+                }),
+            };
+            async Task ToolsSse(JsonNode payload)
+                => await toolsWriter.WriteAsync("data: " + payload.ToJsonString() + "\n\n");
+            var bufferedCalls = OpenAiTools.TryExtractCalls(fullText, toolSpecs!, toolChoice, parallelToolCalls);
+            if (bufferedCalls is { Count: > 0 })
+            {
+                for (var i = 0; i < bufferedCalls.Count; i++)
+                {
+                    var call = bufferedCalls[i];
+                    var callId = OpenAiTools.BuildCallId();
+                    await ToolsSse(ToolsChunk(new JsonObject
+                    {
+                        ["role"] = "assistant",
+                        ["tool_calls"] = new JsonArray(new JsonObject
+                        {
+                            ["index"] = i,
+                            ["id"] = callId,
+                            ["type"] = "function",
+                            ["function"] = new JsonObject { ["name"] = call.Name, ["arguments"] = "" },
+                        }),
+                    }, null));
+                    await toolsWriter.FlushAsync();
+                    await ToolsSse(ToolsChunk(new JsonObject
+                    {
+                        ["tool_calls"] = new JsonArray(new JsonObject
+                        {
+                            ["index"] = i,
+                            ["function"] = new JsonObject { ["arguments"] = call.ArgumentsJson },
+                        }),
+                    }, null));
+                    await toolsWriter.FlushAsync();
+                }
+                await ToolsSse(ToolsChunk(new JsonObject(), "tool_calls"));
+            }
+            else
+            {
+                await ToolsSse(ToolsChunk(new JsonObject { ["role"] = "assistant", ["content"] = fullText }, null));
+                await toolsWriter.FlushAsync();
+                await ToolsSse(ToolsChunk(new JsonObject(), "stop"));
+            }
+            if ((body["stream_options"] as JsonObject)?["include_usage"] is JsonValue toolsUv
+                && toolsUv.TryGetValue<bool>(out var toolsInclude) && toolsInclude)
+            {
+                await ToolsSse(new JsonObject
+                {
+                    ["id"] = completionId,
+                    ["object"] = "chat.completion.chunk",
+                    ["created"] = created,
+                    ["model"] = outModel,
+                    ["choices"] = new JsonArray(),
+                    ["usage"] = new JsonObject
+                    {
+                        ["prompt_tokens"] = JsonHelp.ApproxTokens(promptText),
+                        ["completion_tokens"] = JsonHelp.ApproxTokens(fullText),
+                        ["total_tokens"] = JsonHelp.ApproxTokens(promptText) + JsonHelp.ApproxTokens(fullText),
+                    },
+                });
+            }
+            await toolsWriter.WriteAsync("data: [DONE]\n\n");
+            await toolsWriter.FlushAsync();
             return;
         }
 

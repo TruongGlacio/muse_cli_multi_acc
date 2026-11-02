@@ -117,10 +117,46 @@ public static class Prompt
     {
         var images = new List<string>();
         var turns = new List<(string Role, string Text)>();
+        // v0.8.15 (OpenAI tools mode): remember which tool each tool_call_id
+        // belongs to, so a later role=tool message can be rendered with the
+        // tool name. Plain chat and the extension's own local-tools flow never
+        // send tool_calls or role=tool messages, so this changes nothing for
+        // them: their Flatten output is byte-identical to before.
+        var toolNamesById = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var msg in messages)
         {
             var role = Role(msg);
             var text = ContentToText(msg["content"], images).Trim();
+            if (role == "assistant" && msg["tool_calls"] is JsonArray assistantCalls && assistantCalls.Count > 0)
+            {
+                var lines = new List<string>();
+                foreach (var call in assistantCalls)
+                {
+                    if (call is not JsonObject callObj) continue;
+                    var src = callObj["function"] as JsonObject ?? callObj;
+                    var name = JsonHelp.Str(src["name"]);
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+                    var id = JsonHelp.Str(callObj["id"]);
+                    if (!string.IsNullOrWhiteSpace(id)) toolNamesById[id] = name;
+                    var argsText = src["arguments"] switch
+                    {
+                        JsonValue av when av.TryGetValue<string>(out var s) => s,
+                        JsonNode an => an.ToJsonString(),
+                        _ => "{}",
+                    };
+                    lines.Add($"[Assistant called tool {name} with arguments {argsText}]");
+                }
+                if (lines.Count > 0)
+                    text = text.Length > 0 ? text + "\n" + string.Join("\n", lines) : string.Join("\n", lines);
+            }
+            else if (role == "tool")
+            {
+                var id = JsonHelp.Str(msg["tool_call_id"]);
+                var label = id is not null && toolNamesById.TryGetValue(id, out var toolName)
+                    ? $"Tool result for {toolName}:"
+                    : id is not null ? $"Tool result for {id}:" : "Tool result:";
+                text = label + "\n" + text;
+            }
             if (text.Length > 0) turns.Add((role, text));
         }
         if (turns.Count == 0) return new FlatPrompt("", images);
