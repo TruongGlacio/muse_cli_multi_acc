@@ -313,6 +313,57 @@ public static class Dom
         })()
         """;
 
+    // v0.8.26: đếm nhóm tin nhắn user trên trang (cùng quy ước với
+    // ThreadHistory/ChatState: [class~="group/msg"] có ms-auto +
+    // items-end và KHÔNG chứa agent bubble, chỉ tính nhóm đang hiển
+    // thị). Dùng làm baseline trước Send để kiểm chứng sau gửi biết
+    // tin nhắn mới đã hiện hay chưa.
+    public static readonly string UserMessageCount = $$"""
+        (() => {
+          const visible = e => e.getClientRects().length > 0
+            && !e.closest('[hidden],[aria-hidden="true"],[inert]')
+            && getComputedStyle(e).visibility !== 'hidden';
+          const groups = [...document.querySelectorAll('[class~="group/msg"]')].filter(visible);
+          const users = groups.filter(e => e.classList.contains('ms-auto') && e.classList.contains('items-end')
+            && !e.querySelector({{Q(AgentBubble)}}));
+          return users.length;
+        })()
+        """;
+
+    // v0.8.26: kiểm chứng sau gửi — nhóm tin nhắn user CUỐI CÙNG có
+    // mang đúng các file vừa gửi không. Chỉ xét chip đính kèm bên
+    // trong nhóm đó (phần tử khớp selector Attachment), KHÔNG xét
+    // text của tin nhắn (vì text có thể tự nhắc tên file, gây dương
+    // tính giả). Trả { status, found, missing, attachmentCount,
+    // reason }: không có nhóm user nào → unknown/no-user-group;
+    // nhóm cuối không có chip nào → missing toàn bộ (file không đi
+    // cùng tin nhắn); chip có nhưng không chip nào mang tên file
+    // nào → unknown/names-not-rendered (không kết luận được bằng
+    // tên, tránh báo thiếu sai khi giao diện không render tên);
+    // khớp một phần → missing các tên còn lại; khớp đủ → ok.
+    public static string SentAttachments(string[] filenames) => $$"""
+        (() => {
+          const visible = e => e.getClientRects().length > 0
+            && !e.closest('[hidden],[aria-hidden="true"],[inert]')
+            && getComputedStyle(e).visibility !== 'hidden';
+          const groups = [...document.querySelectorAll('[class~="group/msg"]')].filter(visible);
+          const users = groups.filter(e => e.classList.contains('ms-auto') && e.classList.contains('items-end')
+            && !e.querySelector({{Q(AgentBubble)}}));
+          const names = {{JsonSerializer.Serialize(filenames)}};
+          if (!users.length) return { status: 'unknown', found: [], missing: names, attachmentCount: 0, reason: 'no-user-group' };
+          const last = users[users.length - 1];
+          const atts = [...last.querySelectorAll({{Q(Attachment)}})];
+          if (!atts.length) return { status: 'missing', found: [], missing: names, attachmentCount: 0, reason: 'no-attachments' };
+          const labelOf = e => ((e.textContent || '') + ' ' + (e.getAttribute('aria-label') || '')
+            + ' ' + (e.getAttribute('title') || '') + ' ' + (e.getAttribute('data-testid') || ''));
+          const found = names.filter(n => atts.some(a => labelOf(a).includes(n)));
+          const missing = names.filter(n => !found.includes(n));
+          if (missing.length === 0) return { status: 'ok', found, missing, attachmentCount: atts.length, reason: '' };
+          if (found.length === 0) return { status: 'unknown', found, missing, attachmentCount: atts.length, reason: 'names-not-rendered' };
+          return { status: 'missing', found, missing, attachmentCount: atts.length, reason: 'partial' };
+        })()
+        """;
+
     public static string AttachFile(string b64, string mime, string filename) => $$"""
         (() => {
           try {

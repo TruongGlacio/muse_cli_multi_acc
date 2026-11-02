@@ -612,19 +612,75 @@ public sealed class BrowserDriver : IMuseDriver
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes.ToArray()));
     }
 
+    // v0.8.26: quyết định thuần cho vòng lặp Send, tách ra để test
+    // không cần trình duyệt. Lỗ cũ: Send lặp 5 giây chờ "clicked"
+    // rồi bấm Enter bất kể kết quả cuối là gì; khi nút bị disabled
+    // (đúng trạng thái media còn đang xử lý) thì Enter gửi đi phần
+    // text trong khi đính kèm chưa sẵn sàng, còn InputEmpty sau đó
+    // chỉ chứng minh text đã đi, không chứng minh đính kèm đã đi
+    // cùng. Chính sách mới: "disabled" thì chờ tới khi nút sáng
+    // (tối đa SendDisabledTimeout) rồi mới bấm, hết hạn thì NÉM LỖI
+    // rõ ràng và TUYỆT ĐỐI KHÔNG bấm Enter — gửi thất bại rõ ràng
+    // tốt hơn gửi lén một tin nhắn không kèm file rồi để model chấm
+    // sai; "missing" (selector nút lỗi thời) thì giữ nguyên fallback
+    // Enter như cũ; đã từng thấy "disabled" trong lượt này thì không
+    // bao giờ bấm Enter nữa, kể cả khi sau đó nút chuyển sang
+    // "missing" (tránh Enter lén ngay sau trạng thái disabled).
+    internal enum SendLoopDecision { ReturnClicked, KeepWaiting, EnterFallback, ThrowDisabledTimeout }
+
+    internal static readonly TimeSpan SendMissingTimeout = TimeSpan.FromSeconds(5);
+    internal static readonly TimeSpan SendDisabledTimeout = TimeSpan.FromSeconds(120);
+
+    internal static SendLoopDecision DecideSendLoop(string? clickResult, TimeSpan elapsed, TimeSpan? disabledElapsed,
+        TimeSpan missingTimeout, TimeSpan disabledTimeout)
+    {
+        if (clickResult == "clicked") return SendLoopDecision.ReturnClicked;
+        if (clickResult == "disabled")
+            return disabledElapsed is { } d && d >= disabledTimeout
+                ? SendLoopDecision.ThrowDisabledTimeout : SendLoopDecision.KeepWaiting;
+        // missing / null (Eval lỗi) / kết quả lạ: chỉ bấm Enter khi
+        // chưa từng thấy disabled trong lượt này; đã thấy disabled
+        // thì chờ tới hết hạn disabled rồi ném, không Enter.
+        if (disabledElapsed is not null)
+            return disabledElapsed.Value >= disabledTimeout
+                ? SendLoopDecision.ThrowDisabledTimeout : SendLoopDecision.KeepWaiting;
+        return elapsed >= missingTimeout ? SendLoopDecision.EnterFallback : SendLoopDecision.KeepWaiting;
+    }
+
     private async Task Send(BrowserTab tab, string prompt, CancellationToken cancel = default)
     {
         cancel.ThrowIfCancellationRequested();
         var res = await Eval(tab.Page, Dom.FillInput(prompt), cancel);
         if (!BoolNode(res, "ok"))
             throw new UpstreamException($"cannot fill chat input: {Str(res, "err")}");
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
+        var started = DateTime.UtcNow;
+        DateTime? disabledSince = null;
+        while (true)
         {
             cancel.ThrowIfCancellationRequested();
-            if (await Eval(tab.Page, Dom.ClickSend, cancel) is System.Text.Json.Nodes.JsonValue v
-                && v.TryGetValue<string>(out var s) && s == "clicked") return;
-            await Task.Delay(100, cancel);
+            var click = await Eval(tab.Page, Dom.ClickSend, cancel);
+            var s = click is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<string>(out var sv) ? sv : null;
+            if (s == "disabled" && disabledSince is null) disabledSince = DateTime.UtcNow;
+            var elapsed = DateTime.UtcNow - started;
+            TimeSpan? disabledElapsed = disabledSince is null ? null : DateTime.UtcNow - disabledSince.Value;
+            switch (DecideSendLoop(s, elapsed, disabledElapsed, SendMissingTimeout, SendDisabledTimeout))
+            {
+                case SendLoopDecision.ReturnClicked:
+                    Diagnostic?.Invoke(disabledSince is null
+                        ? $"send_clicked {elapsed.TotalMilliseconds:F0}ms"
+                        : $"send_clicked {elapsed.TotalMilliseconds:F0}ms after_disabled_wait={disabledElapsed!.Value.TotalMilliseconds:F0}ms");
+                    return;
+                case SendLoopDecision.EnterFallback:
+                    Diagnostic?.Invoke($"send_enter_fallback {elapsed.TotalMilliseconds:F0}ms reason=missing");
+                    break;
+                case SendLoopDecision.ThrowDisabledTimeout:
+                    Diagnostic?.Invoke("send_disabled_timeout 120000ms");
+                    throw new UpstreamException("send button still disabled after 120s; attachments may still be processing, message not sent");
+                default:
+                    await Task.Delay(250, cancel);
+                    continue;
+            }
+            break;
         }
         cancel.ThrowIfCancellationRequested();
         await tab.Page.Keyboard.PressAsync("Enter").WaitAsync(TimeSpan.FromSeconds(10), cancel);
@@ -632,6 +688,58 @@ public sealed class BrowserDriver : IMuseDriver
         var empty = await Eval(tab.Page, Dom.InputEmpty, cancel);
         if (empty is not System.Text.Json.Nodes.JsonValue ev || !ev.TryGetValue<bool>(out var isEmpty) || !isEmpty)
             throw new UpstreamException("send button not found and Enter did not submit");
+    }
+
+    // v0.8.26: kiểm chứng sau gửi, CHỈ LOG chẩn đoán, không làm fail
+    // lượt chat (tránh false negative chặn user nhắn tin). Đếm nhóm
+    // tin nhắn user trước Send (baseline); sau Send poll tối đa 5
+    // giây chờ nhóm mới hiện, rồi kiểm tra nhóm cuối có mang đúng
+    // các file vừa gửi không (Dom.SentAttachments). Chỉ gọi khi
+    // files.Count > 0; baseline lấy không được thì log unknown chứ
+    // không báo thiếu sai.
+    private async Task<int> CountUserGroups(BrowserTab tab, CancellationToken cancel)
+    {
+        var n = await Eval(tab.Page, Dom.UserMessageCount, cancel);
+        return n is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<int>(out var c) ? c : -1;
+    }
+
+    private async Task VerifySentAttachments(BrowserTab tab, List<InputFile> files, int groupsBefore, CancellationToken cancel)
+    {
+        if (files.Count == 0) return;
+        if (groupsBefore < 0) { Diagnostic?.Invoke("sent_attachments_unknown no-baseline"); return; }
+        try
+        {
+            var started = DateTime.UtcNow;
+            var appeared = false;
+            while (DateTime.UtcNow - started < TimeSpan.FromSeconds(5))
+            {
+                cancel.ThrowIfCancellationRequested();
+                if (await CountUserGroups(tab, cancel) > groupsBefore) { appeared = true; break; }
+                await Task.Delay(250, cancel);
+            }
+            if (!appeared) { Diagnostic?.Invoke("sent_attachments_unknown no-new-user-group"); return; }
+            var names = files.Select(f => f.Filename).ToArray();
+            var r = await Eval(tab.Page, Dom.SentAttachments(names), cancel);
+            if (r is not System.Text.Json.Nodes.JsonObject o)
+            {
+                Diagnostic?.Invoke("sent_attachments_unknown check-error");
+                return;
+            }
+            var status = o["status"]?.GetValue<string>() ?? "unknown";
+            var reason = o["reason"]?.GetValue<string>() ?? "";
+            var found = o["found"] is System.Text.Json.Nodes.JsonArray fa
+                ? string.Join(",", fa.Select(n => n?.GetValue<string>() ?? "")) : "";
+            var missing = o["missing"] is System.Text.Json.Nodes.JsonArray ma
+                ? string.Join(",", ma.Select(n => n?.GetValue<string>() ?? "")) : "";
+            Diagnostic?.Invoke(status switch
+            {
+                "ok" => $"sent_attachments_ok {found}",
+                "missing" => $"sent_attachments_missing {missing}",
+                _ => $"sent_attachments_unknown {reason}",
+            });
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception) { Diagnostic?.Invoke("sent_attachments_unknown check-error"); }
     }
 
     private async Task DenyApprovals(BrowserTab tab)
@@ -746,7 +854,9 @@ public sealed class BrowserDriver : IMuseDriver
                     // dòng header transport) trước khi Send, để user đối
                     // chiếu với câu trả lời/từ chối của model web.
                     await LogWebPromptAsync(account, req, submitted, (saved is not null || live) ? "reused" : "new", images.Count, files.Count);
+                    var groupsBeforeLocal = await CountUserGroups(tab, req.Cancel);
                     await Send(tab, submitted, req.Cancel);
+                    await VerifySentAttachments(tab, files, groupsBeforeLocal, req.Cancel);
                     if (LocalConversationStore.IsThread(tab.Page.Url))
                     {
                         tab.ThreadUrl = tab.Page.Url;
@@ -793,7 +903,9 @@ public sealed class BrowserDriver : IMuseDriver
                 // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang trước khi
                 // Send (follow thì là nối tiếp thread cũ, ngược lại là mới).
                 await LogWebPromptAsync(account, req, prompt, threadKind, images.Count, files.Count);
+                var groupsBefore = await CountUserGroups(tab, req.Cancel);
                 await Send(tab, prompt, req.Cancel);
+                await VerifySentAttachments(tab, files, groupsBefore, req.Cancel);
                 return (tab, baseState);
             }
             finally { DeleteAttachTmpDir(attachTmp); }
