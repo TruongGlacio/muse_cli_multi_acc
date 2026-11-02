@@ -350,7 +350,9 @@ export class MuseSettingsPanel {
       const current = accounts.find((a) => a.id === id);
       const currentValue = field === 'email' ? current?.email : field === 'phone' ? current?.phone : current?.username;
       const value = await vscode.window.showInputBox({ title: spec.title, prompt: spec.prompt, value: currentValue || '' });
-      if (value === undefined) { return; } // user hủy hộp nhập
+      // v0.8.13: hủy hộp nhập cũng làm mới danh sách để nút Sửa
+      // email/sđt/tên hết loading (tín hiệu hoàn tất là 'accounts').
+      if (value === undefined) { await this.refreshAccounts(); this.onAccountsChanged(); return; } // user hủy hộp nhập
       const patch: { email?: string | null; phone?: string | null; username?: string | null } = {};
       const trimmed = value.trim();
       if (field === 'email') { patch.email = trimmed ? trimmed : null; }
@@ -372,7 +374,9 @@ export class MuseSettingsPanel {
     const answer = await vscode.window.showWarningMessage(
       'Gộp các tài khoản Muse trùng nhau? Các tài khoản có cùng email (hoặc cùng username khi không có email) sẽ gộp thành một tài khoản chính (tài khoản dùng gần nhất). Tài khoản bị gộp sẽ bị xóa khỏi gateway, session của tài khoản bị gộp sẽ chuyển sang tài khoản chính, và các hội thoại cũ vẫn nối tiếp được dưới tài khoản chính. Tài khoản chưa xác định được email/username sẽ được bỏ qua, không gộp.',
       'Gộp tài khoản trùng', 'Hủy');
-    if (answer !== 'Gộp tài khoản trùng') { return; }
+    // v0.8.13: hủy modal gộp cũng làm mới danh sách để nút Gộp trùng
+    // hết loading (tín hiệu hoàn tất là 'accounts').
+    if (answer !== 'Gộp tài khoản trùng') { await this.refreshAccounts(); this.onAccountsChanged(); return; }
     try {
       const info = await this.gateway.ensureStarted();
       const res = await mergeGatewayDuplicates(info.baseUrl, info.apiKey);
@@ -444,10 +448,15 @@ export class MuseSettingsPanel {
       }
     } catch (e) {
       void vscode.window.showErrorMessage(`Không thực hiện được thao tác tài khoản: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      // v0.8.13: finally thay cho làm mới sau try/catch, để các đường
+      // hủy modal bên trong try (đổi nhãn hủy, đăng xuất hủy, xóa
+      // hoàn toàn hủy) vẫn làm mới danh sách và nút hết loading — tín
+      // hiệu hoàn tất là message 'accounts' từ refreshAccounts.
+      await this.refreshAccounts();
+      // Báo cho khung chat làm mới trạng thái session (Đã logout phụ thuộc
+      // vào pool hiện tại). Callback này không gửi dữ liệu tài khoản sang chat.
+      this.onAccountsChanged();
     }
-    await this.refreshAccounts();
-    // Báo cho khung chat làm mới trạng thái session (Đã logout phụ thuộc
-    // vào pool hiện tại). Callback này không gửi dữ liệu tài khoản sang chat.
-    this.onAccountsChanged();
   }
 }

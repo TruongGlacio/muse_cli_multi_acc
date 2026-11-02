@@ -150,6 +150,27 @@ public static class DiagnosticLines
     /// (ví dụ "Kế hoạch tuần") giữ nguyên, kể cả khi nó chứa " -
     /// Muse" ở giữa (chỉ hậu tố cuối mới bị bỏ).
     /// </summary>
+    /// <summary>
+    /// Tiêu đề chung của app Muse (v0.8.13, hàm thuần dùng chung cho
+    /// mọi tầng làm sạch): chuẩn hóa bằng cách lowercase rồi bỏ MỌI
+    /// ký tự không phải chữ/số (khoảng trắng, gạch nối, gạch ngang
+    /// dài, gạch đứng, dấu hai chấm...), rồi so với tập {chat, muse,
+    /// chatmuse}. Nhờ vậy mọi biến thể "Chat", "Muse", "Chat - Muse",
+    /// "Chat-Muse" (gạch nối không khoảng trắng, đúng dạng user báo
+    /// ở 0.8.12), "Chat—Muse", "Chat | Muse", "chatmuse" đều bị loại,
+    /// trong khi tiêu đề thật như "Đọc repo muse-cli trên github"
+    /// chuẩn hóa thành chuỗi dài khác nên giữ nguyên. Chuỗi rỗng sau
+    /// chuẩn hóa không thuộc tập này (trả false); các caller vẫn loại
+    /// rỗng bằng kiểm tra riêng của chúng.
+    /// </summary>
+    public static bool IsGenericWebTitle(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return false;
+        var norm = System.Text.RegularExpressions.Regex.Replace(
+            title.ToLowerInvariant(), @"[^\p{L}\p{N}]+", "");
+        return norm == "chat" || norm == "muse" || norm == "chatmuse";
+    }
+
     public static string? CleanThreadTitle(string? title)
     {
         if (string.IsNullOrWhiteSpace(title)) return null;
@@ -158,8 +179,7 @@ public static class DiagnosticLines
         if (t.EndsWith(suffix, StringComparison.Ordinal))
             t = t[..^suffix.Length].Trim();
         if (t.Length == 0) return null;
-        if (t.Equals("Chat", StringComparison.Ordinal)
-            || t.Equals("Muse", StringComparison.Ordinal)) return null;
+        if (IsGenericWebTitle(t)) return null;
         return t;
     }
 
@@ -188,6 +208,10 @@ public static class DiagnosticLines
         if (t.EndsWith(suffix, StringComparison.Ordinal))
             t = t[..^suffix.Length].Trim();
         if (t.Length == 0) return null;
+        // v0.8.13: loại tiêu đề chung ở mọi dạng (kể cả "Chat-Muse"
+        // không khoảng trắng) trước khi xét nhãn điều khiển, để nút
+        // sidebar mang tiêu đề chung không bao giờ thành title thật.
+        if (IsGenericWebTitle(t)) return null;
         var norm = " " + System.Text.RegularExpressions.Regex.Replace(
             t.ToLowerInvariant(), @"[^\p{L}\p{N}]+", " ").Trim() + " ";
         if (norm == " history " || norm == " lịch sử " || norm == " sidebar "
@@ -195,8 +219,7 @@ public static class DiagnosticLines
             return null;
         if (t.Length > 80) t = t[..80].Trim();
         if (t.Length == 0) return null;
-        if (t.Equals("Chat", StringComparison.Ordinal)
-            || t.Equals("Muse", StringComparison.Ordinal)) return null;
+        if (IsGenericWebTitle(t)) return null;
         return t;
     }
 

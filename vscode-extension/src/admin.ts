@@ -386,6 +386,30 @@ export function fallbackWebTitle(threadUrl: string): string {
   return `Hội thoại web ${threadIdFromWebUrl(threadUrl)}`;
 }
 
+// Tiêu đề chung của app Muse (v0.8.13, dùng chung cho mọi tầng TS):
+// lowercase rồi bỏ MỌI ký tự không phải chữ/số, rồi so với tập
+// {chat, muse, chatmuse}. Nhờ vậy "Chat", "Muse", "Chat - Muse",
+// "Chat-Muse", "Chat—Muse", "Chat | Muse", "chatmuse" đều bị loại,
+// còn tiêu đề thật như "Đọc repo muse-cli trên github" giữ nguyên.
+// Chuỗi rỗng sau chuẩn hóa trả false; các caller vẫn loại rỗng riêng.
+export function isGenericWebTitle(title: string | null | undefined): boolean {
+  if (!title) { return false; }
+  const norm = title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  return norm === 'chat' || norm === 'muse' || norm === 'chatmuse';
+}
+
+// Suy tiêu đề từ tin nhắn user đầu tiên trong lịch sử (v0.8.13, hàm
+// thuần để test đơn vị): trim, gộp mọi khoảng trắng (kể cả xuống
+// dòng) thành một dòng duy nhất, cắt 80 ký tự; bỏ qua nếu tin đầu
+// rỗng hoặc chính nó cũng là tiêu đề chung. Trả null = không suy được.
+export function titleFromFirstUserMessage(messages: Array<{ role: string; content: string }>): string | null {
+  const first = (messages || []).find((m) => m.role === 'user' && typeof m.content === 'string');
+  if (!first) { return null; }
+  const oneLine = first.content.trim().replace(/\s+/g, ' ');
+  if (!oneLine || isGenericWebTitle(oneLine)) { return null; }
+  return oneLine.slice(0, 80);
+}
+
 export function isFallbackWebTitle(title: string, threadUrl: string): boolean {
   return !!threadUrl && title === fallbackWebTitle(threadUrl);
 }
@@ -394,7 +418,7 @@ export function resolveWebTitle(currentTitle: string, threadUrl: string, fetched
   if (!fetchedTitle) { return null; }
   const fresh = fetchedTitle.trim();
   if (!fresh) { return null; }
-  if (fresh.toLowerCase() === 'chat' || fresh.toLowerCase() === 'muse') { return null; }
+  if (isGenericWebTitle(fresh)) { return null; }
   if (!isFallbackWebTitle(currentTitle, threadUrl)) { return null; }
   if (fresh === fallbackWebTitle(threadUrl)) { return null; }
   return fresh.slice(0, 80);
@@ -426,12 +450,19 @@ export function resolveWebTitleUpdated(
   if (!fetchedTitle) { return null; }
   const fresh = fetchedTitle.trim();
   if (!fresh) { return null; }
-  if (fresh.toLowerCase() === 'chat' || fresh.toLowerCase() === 'muse') { return null; }
+  // v0.8.13: title mới là tiêu đề chung ở mọi dạng thì loại ngay,
+  // KỂ CẢ ở chế độ ép buộc — ép buộc chỉ ép title thật, không ép
+  // chuỗi chung đè lên các hội thoại.
+  if (isGenericWebTitle(fresh)) { return null; }
   if (fresh === fallbackWebTitle(threadUrl)) { return null; }
   if (fresh === currentTitle) { return null; }
   if (opts?.force) { return fresh.slice(0, 80); }
   const current = (currentTitle || '').trim();
-  if (isFallbackWebTitle(currentTitle, threadUrl) || current === '' || current === 'Hội thoại mới' || current === 'Hội thoại 1') {
+  // v0.8.13: title hiện tại là tiêu đề chung cũng được coi như tương
+  // đương dự phòng cho mục đích cập nhật ở chế độ thường, để các
+  // session đã nhiễm "Chat-Muse" ở 0.8.12 được sửa bằng title thật
+  // ngay trong lần đồng bộ thường, không cần chờ lệnh ép buộc.
+  if (isFallbackWebTitle(currentTitle, threadUrl) || current === '' || current === 'Hội thoại mới' || current === 'Hội thoại 1' || isGenericWebTitle(current)) {
     return fresh.slice(0, 80);
   }
   return null;

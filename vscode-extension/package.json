@@ -24,6 +24,7 @@
     "onCommand:muse.clearChatHistory",
     "onCommand:muse.syncFromWeb",
     "onCommand:muse.forceSyncTitles",
+    "onCommand:muse.fixGenericTitles",
     "onCommand:muse.generateImage",
     "onCommand:muse.editImage",
     "onCommand:muse.generateVideo",
@@ -149,6 +150,10 @@
       {
         "command": "muse.forceSyncTitles",
         "title": "Muse: Ép cập nhật tiêu đề hội thoại từ web"
+      },
+      {
+        "command": "muse.fixGenericTitles",
+        "title": "Muse: Sửa tiêu đề chung thành tiêu đề từ tin nhắn đầu tiên"
       },
       {
         "command": "muse.generateImage",
@@ -290,7 +295,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.8.12",
+  "version": "0.8.14",
   "extensionKind": [
     "ui",
     "workspace"

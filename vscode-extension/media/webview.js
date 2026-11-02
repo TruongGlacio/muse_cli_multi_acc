@@ -109,6 +109,59 @@
   var statusEl = document.getElementById('status');
   var inputEl = document.getElementById('input');
   var attachmentsEl = document.getElementById('attachments');
+  var sendBtnEl = document.getElementById('sendBtn');
+  var attachBtnEl = document.getElementById('attachBtn');
+  var syncBtnEl = document.getElementById('syncFromWebBtn');
+  var newSessionBtnEl = document.getElementById('newSessionBtn');
+  var renameSessionBtnEl = document.getElementById('renameSessionBtn');
+  var deleteSessionBtnEl = document.getElementById('deleteSessionBtn');
+  // Hiệu ứng loading cho nút bấm (v0.8.13): bấm thì disable nút, thêm
+  // class loading (spinner CSS + mờ đi), đổi text thành dạng đang xử
+  // lý (text gốc + "…"); nút chỉ có icon (text rỗng hoặc 1 ký tự) thì
+  // chỉ disable + mờ, không đổi text. Khi xong thì khôi phục ĐÚNG
+  // text gốc đã lưu và bỏ disable/class. Mọi trạng thái loading đều
+  // chỉ clear bằng message hoàn tất/lỗi tương ứng (done/sessions/
+  // syncDone/attachDone/error), KHÔNG BAO GIỜ clear bằng setTimeout
+  // đoán thời gian xử lý. Nhóm loading: 'send', 'sync', 'attach',
+  // 'session' — mỗi message hoàn tất chỉ clear đúng nhóm của nó, trừ
+  // 'error' thì clear tất cả để không còn đường nào kẹt loading.
+  // __BUTTON_LOADING_FN_START__
+  var loadingButtons = [];
+  function setButtonLoading(el, on, group) {
+    if (!el) { return; }
+    if (on) {
+      if (el.dataset && el.dataset.museLoading === '1') { return; }
+      if (el.dataset) {
+        el.dataset.museLoading = '1';
+        el.dataset.museOrigText = el.textContent;
+        el.dataset.museLoadingGroup = group || '';
+      }
+      if (loadingButtons.indexOf(el) < 0) { loadingButtons.push(el); }
+      if (el.classList) { el.classList.add('loading'); }
+      if (el.tagName === 'BUTTON') { el.disabled = true; }
+      else if (el.setAttribute) { el.setAttribute('aria-disabled', 'true'); }
+      var t = el.textContent || '';
+      if (t.trim().length > 1) { el.textContent = t + '…'; }
+    } else {
+      if (el.dataset && el.dataset.museLoading !== '1') { return; }
+      if (el.dataset && typeof el.dataset.museOrigText === 'string') { el.textContent = el.dataset.museOrigText; }
+      if (el.dataset) { delete el.dataset.museLoading; delete el.dataset.museOrigText; delete el.dataset.museLoadingGroup; }
+      var idx = loadingButtons.indexOf(el);
+      if (idx >= 0) { loadingButtons.splice(idx, 1); }
+      if (el.classList) { el.classList.remove('loading'); }
+      if (el.tagName === 'BUTTON') { el.disabled = false; }
+      else if (el.removeAttribute) { el.removeAttribute('aria-disabled'); }
+    }
+  }
+  function clearLoadingGroup(group) {
+    loadingButtons.slice().forEach(function (el) {
+      if (el.dataset && el.dataset.museLoadingGroup === group) { setButtonLoading(el, false); }
+    });
+  }
+  function clearAllButtonLoading() {
+    loadingButtons.slice().forEach(function (el) { setButtonLoading(el, false); });
+  }
+  // __BUTTON_LOADING_FN_END__
   var streamBubble = null;
   var streamRaw = '';
   // Panel Nhật ký (v0.6.0): dòng log runtime, mỗi dòng có giờ nhận do
@@ -221,6 +274,7 @@
     var text = inputEl.value.trim();
     if (!text) { return; }
     inputEl.value = '';
+    setButtonLoading(sendBtnEl, true, 'send');
     vscode.postMessage({ type: 'send', text: text });
   }
   document.getElementById('sendBtn').addEventListener('click', send);
@@ -228,6 +282,7 @@
     vscode.postMessage({ type: 'stop' });
   });
   document.getElementById('attachBtn').addEventListener('click', function () {
+    setButtonLoading(attachBtnEl, true, 'attach');
     vscode.postMessage({ type: 'attach' });
   });
   // Kéo thả file vào ô soạn thảo (v0.8.12): vùng nhận là khung soạn
@@ -295,11 +350,13 @@
       var uris = uriList.split(/\r?\n/).map(function (s) { return s.trim(); })
         .filter(function (s) { return s !== '' && s.charAt(0) !== '#'; });
       if (uris.length > 0) {
+        setButtonLoading(attachBtnEl, true, 'attach');
         vscode.postMessage({ type: 'dropUris', uris: uris });
         return;
       }
       var files = dt.files ? Array.prototype.slice.call(dt.files) : [];
       if (files.length === 0) { return; }
+      setButtonLoading(attachBtnEl, true, 'attach');
       Promise.all(files.map(readDroppedFile)).then(function (items) {
         vscode.postMessage({ type: 'dropFiles', files: items });
       });
@@ -311,9 +368,11 @@
     vscode.postMessage({ type: 'clearHistory' });
   });
   document.getElementById('newSessionBtn').addEventListener('click', function () {
+    setButtonLoading(newSessionBtnEl, true, 'session');
     vscode.postMessage({ type: 'newSession' });
   });
   document.getElementById('renameSessionBtn').addEventListener('click', function () {
+    setButtonLoading(renameSessionBtnEl, true, 'session');
     vscode.postMessage({ type: 'renameSession' });
   });
   document.getElementById('sidebarBtn').addEventListener('click', toggleSidebar);
@@ -348,9 +407,11 @@
   });
   logFilterEl.addEventListener('input', renderLogs);
   document.getElementById('deleteSessionBtn').addEventListener('click', function () {
+    setButtonLoading(deleteSessionBtnEl, true, 'session');
     vscode.postMessage({ type: 'deleteSession' });
   });
   document.getElementById('syncFromWebBtn').addEventListener('click', function () {
+    setButtonLoading(syncBtnEl, true, 'sync');
     vscode.postMessage({ type: 'syncFromWeb' });
   });
   document.getElementById('settingsBtn').addEventListener('click', function () {
@@ -372,6 +433,11 @@
     else if (m.type === 'toolResult') { addBubble('tool', 'Kết quả ' + (m.name || '') + ': ' + (m.detail || '')); }
     else if (m.type === 'status') { statusEl.textContent = m.text || ''; }
     else if (m.type === 'error') {
+      // v0.8.13: lỗi là tín hiệu kết thúc cho mọi nút đang loading
+      // (kể cả nút Gửi khi run() thoát sớm) — clear tất cả để không
+      // còn đường nào kẹt loading; 'done' sau đó (nếu có) chỉ clear
+      // lại nhóm 'send' nên không ảnh hưởng các nhóm khác.
+      clearAllButtonLoading();
       var errBubble = addBubble('error', m.text || 'Đã xảy ra lỗi.');
       statusEl.textContent = 'Có lỗi, xem khung đỏ ở trên.';
       // Fix 502 (v0.6.0): chỉ khi thông điệp chứa 502 hoặc
@@ -438,7 +504,15 @@
       attachmentsEl.appendChild(chip);
     }
     else if (m.type === 'attachmentsCleared') { attachmentsEl.innerHTML = ''; }
+    else if (m.type === 'attachDone') { clearLoadingGroup('attach'); }
+    else if (m.type === 'syncDone') { clearLoadingGroup('sync'); }
     else if (m.type === 'sessions') {
+      // v0.8.13: 'sessions' là tín hiệu hoàn tất của nhóm thao tác
+      // session (tạo mới/đổi tên/xóa/mở tab mới/xóa item) — clear
+      // nhóm 'session'; các span item cũng bị re-render nên trạng
+      // thái loading của chúng mất theo DOM mới, clear nhóm là để
+      // dọn các nút sidebar còn tồn tại.
+      clearLoadingGroup('session');
       renderAccountFilter(m.accountFilterOptions, m.accountFilter);
       // Khôi phục chiều rộng cột đã lưu (v0.8.10); đang kéo thì không
       // áp để khỏi giật lại chiều rộng giữa chừng.
@@ -494,6 +568,7 @@
         openTab.title = 'Mở hội thoại này trong tab mới (xem song song với hội thoại hiện tại)';
         openTab.addEventListener('click', function (ev) {
           ev.stopPropagation();
+          setButtonLoading(openTab, true, 'session');
           vscode.postMessage({ type: 'openInNewTab', id: s.id });
         });
         item.appendChild(openTab);
@@ -507,6 +582,7 @@
         delBtn.title = 'Xóa hội thoại này (chỉ xóa trong extension và mapping gateway, thread gốc vẫn còn trên web muse.ai)';
         delBtn.addEventListener('click', function (ev) {
           ev.stopPropagation();
+          setButtonLoading(delBtn, true, 'session');
           vscode.postMessage({ type: 'deleteSessionById', id: s.id });
         });
         item.appendChild(delBtn);
@@ -554,6 +630,6 @@
       renderLogs();
     }
     else if (m.type === 'preset') { inputEl.value = m.text || ''; send(); }
-    else if (m.type === 'done') { statusEl.textContent = 'Sẵn sàng.'; }
+    else if (m.type === 'done') { clearLoadingGroup('send'); statusEl.textContent = 'Sẵn sàng.'; }
   });
 })();

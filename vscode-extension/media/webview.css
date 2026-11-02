@@ -34,6 +34,14 @@ body.sidebar-resizing { user-select: none; cursor: col-resize; }
 .subtitle { color: var(--vscode-descriptionForeground); margin: 2px 0 6px; }
 button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 0; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
 button:hover { background: var(--vscode-button-hoverBackground); }
+/* Hiệu ứng loading cho nút bấm (v0.8.13): nút đang xử lý thì mờ đi,
+   con trỏ chờ, và spinner CSS nhỏ sau text (xoay bằng keyframes).
+   Text đã được đổi thành dạng "… " bằng JS; nút chỉ có icon thì chỉ
+   mờ + spinner, không đổi text. Không dùng ảnh hay gif ngoài. */
+button.loading, .open-tab-btn.loading, .delete-session-btn.loading { opacity: 0.65; cursor: wait; }
+button:disabled { opacity: 0.65; cursor: wait; }
+button.loading::after, .open-tab-btn.loading::after, .delete-session-btn.loading::after { content: ''; display: inline-block; width: 10px; height: 10px; margin-left: 6px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: muse-spin 0.8s linear infinite; vertical-align: -1px; }
+@keyframes muse-spin { to { transform: rotate(360deg); } }
 #chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 #chips button { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
 #sessionList { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; margin-top: 8px; flex: 1; min-height: 0; }

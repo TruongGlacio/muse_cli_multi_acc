@@ -3,12 +3,62 @@
   var accountStatusEl = document.getElementById('accountStatus');
   var accountListEl = document.getElementById('accountList');
   var configListEl = document.getElementById('configList');
+  // Hiệu ứng loading cho nút bấm (v0.8.13, cùng mẫu với webview.js):
+  // bấm thì disable nút, thêm class loading (spinner CSS + mờ đi),
+  // đổi text thành dạng đang xử lý (text gốc + "…"); nút chỉ có icon
+  // (text rỗng hoặc 1 ký tự) thì chỉ disable + mờ, không đổi text.
+  // Khi xong thì khôi phục ĐÚNG text gốc và bỏ disable/class. Tín
+  // hiệu hoàn tất của panel là message làm mới danh sách tài khoản
+  // ('accounts' cho nhóm tài khoản, 'quota' cho nút Xem quota,
+  // 'config' cho nút Đọc lại cấu hình) — KHÔNG BAO GIỜ clear bằng
+  // setTimeout đoán thời gian xử lý. Lưu ý: 'accounts' còn re-render
+  // toàn bộ #accountList nên nút trên từng tài khoản mất theo DOM mới;
+  // clear nhóm vẫn cần cho các nút ngoài danh sách (Làm mới, Khởi
+  // động lại gateway, Cài Chromium, Gộp trùng).
+  // __BUTTON_LOADING_FN_START__
+  var loadingButtons = [];
+  function setButtonLoading(el, on, group) {
+    if (!el) { return; }
+    if (on) {
+      if (el.dataset && el.dataset.museLoading === '1') { return; }
+      if (el.dataset) {
+        el.dataset.museLoading = '1';
+        el.dataset.museOrigText = el.textContent;
+        el.dataset.museLoadingGroup = group || '';
+      }
+      if (loadingButtons.indexOf(el) < 0) { loadingButtons.push(el); }
+      if (el.classList) { el.classList.add('loading'); }
+      if (el.tagName === 'BUTTON') { el.disabled = true; }
+      else if (el.setAttribute) { el.setAttribute('aria-disabled', 'true'); }
+      var t = el.textContent || '';
+      if (t.trim().length > 1) { el.textContent = t + '…'; }
+    } else {
+      if (el.dataset && el.dataset.museLoading !== '1') { return; }
+      if (el.dataset && typeof el.dataset.museOrigText === 'string') { el.textContent = el.dataset.museOrigText; }
+      if (el.dataset) { delete el.dataset.museLoading; delete el.dataset.museOrigText; delete el.dataset.museLoadingGroup; }
+      var idx = loadingButtons.indexOf(el);
+      if (idx >= 0) { loadingButtons.splice(idx, 1); }
+      if (el.classList) { el.classList.remove('loading'); }
+      if (el.tagName === 'BUTTON') { el.disabled = false; }
+      else if (el.removeAttribute) { el.removeAttribute('aria-disabled'); }
+    }
+  }
+  function clearLoadingGroup(group) {
+    loadingButtons.slice().forEach(function (el) {
+      if (el.dataset && el.dataset.museLoadingGroup === group) { setButtonLoading(el, false); }
+    });
+  }
+  function clearAllButtonLoading() {
+    loadingButtons.slice().forEach(function (el) { setButtonLoading(el, false); });
+  }
+  // __BUTTON_LOADING_FN_END__
 
   function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  document.getElementById('refreshAccountsBtn').addEventListener('click', function () {
+  document.getElementById('refreshAccountsBtn').addEventListener('click', function (ev) {
+    setButtonLoading(ev.currentTarget, true, 'accounts');
     accountStatusEl.textContent = 'Đang kiểm tra tài khoản Muse…';
     vscode.postMessage({ type: 'refreshAccounts' });
   });
@@ -18,7 +68,12 @@
   document.getElementById('openDashboardBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'openDashboard' });
   });
-  document.getElementById('restartGatewayBtn').addEventListener('click', function () {
+  document.getElementById('restartGatewayBtn').addEventListener('click', function (ev) {
+    // Lưu ý: extension hẹn làm mới sau khi lệnh khởi động lại chạy
+    // xong (setTimeout 3s ở settings.ts chỉ hoãn request làm mới, không
+    // phải đoán thời gian để clear loading) — loading chỉ clear khi
+    // message 'accounts' về, đúng quy tắc chống kẹt của v0.8.13.
+    setButtonLoading(ev.currentTarget, true, 'accounts');
     vscode.postMessage({ type: 'restartGateway' });
   });
   document.getElementById('openVscodeSettingsBtn').addEventListener('click', function () {
@@ -32,20 +87,23 @@
   document.getElementById('cancelBrowserLoginBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'cancelBrowserLogin' });
   });
-  document.getElementById('installBrowserBtn').addEventListener('click', function () {
+  document.getElementById('installBrowserBtn').addEventListener('click', function (ev) {
+    setButtonLoading(ev.currentTarget, true, 'accounts');
     vscode.postMessage({ type: 'installBrowser' });
   });
-  document.getElementById('refreshConfigBtn').addEventListener('click', function () {
+  document.getElementById('refreshConfigBtn').addEventListener('click', function (ev) {
+    setButtonLoading(ev.currentTarget, true, 'config');
     vscode.postMessage({ type: 'refreshConfig' });
   });
-  document.getElementById('mergeDuplicatesBtn').addEventListener('click', function () {
+  document.getElementById('mergeDuplicatesBtn').addEventListener('click', function (ev) {
+    setButtonLoading(ev.currentTarget, true, 'accounts');
     vscode.postMessage({ type: 'mergeDuplicates' });
   });
 
   function actionBtn(label, action, id) {
     var btn = document.createElement('button');
     btn.textContent = label;
-    btn.addEventListener('click', function () { vscode.postMessage({ type: 'accountAction', action: action, id: id }); });
+    btn.addEventListener('click', function (ev) { setButtonLoading(ev.currentTarget, true, 'accounts'); vscode.postMessage({ type: 'accountAction', action: action, id: id }); });
     return btn;
   }
 
@@ -114,7 +172,8 @@
       quotaBtn.textContent = 'Xem quota';
       var quotaBox = document.createElement('pre');
       quotaBox.textContent = '';
-      quotaBtn.addEventListener('click', function () {
+      quotaBtn.addEventListener('click', function (ev) {
+        setButtonLoading(ev.currentTarget, true, 'quota');
         quotaBox.textContent = 'Đang đọc quota…';
         vscode.postMessage({ type: 'accountQuota', id: a.id });
       });
@@ -130,7 +189,7 @@
       var profileBtn = document.createElement('button');
       profileBtn.textContent = 'Cập nhật thông tin hồ sơ';
       profileBtn.title = 'Lấy email/username từ trang Muse cho tài khoản này mà không cần đăng nhập lại';
-      profileBtn.addEventListener('click', function () { vscode.postMessage({ type: 'profileRefresh', id: a.id }); });
+      profileBtn.addEventListener('click', function (ev) { setButtonLoading(ev.currentTarget, true, 'accounts'); vscode.postMessage({ type: 'profileRefresh', id: a.id }); });
       row.appendChild(profileBtn);
       // Nhập tay hồ sơ (v0.8.5): user tự nhập email/số điện thoại/tên
       // hiển thị; gateway kiểm tra hợp lệ rồi mới lưu, giá trị hợp lệ
@@ -140,7 +199,7 @@
         var editBtn = document.createElement('button');
         editBtn.textContent = pair[0];
         editBtn.title = 'Tự nhập giá trị này cho tài khoản (để trống trong hộp nhập để xóa)';
-        editBtn.addEventListener('click', function () { vscode.postMessage({ type: 'editProfileField', id: a.id, field: pair[1] }); });
+        editBtn.addEventListener('click', function (ev) { setButtonLoading(ev.currentTarget, true, 'accounts'); vscode.postMessage({ type: 'editProfileField', id: a.id, field: pair[1] }); });
         row.appendChild(editBtn);
       });
       var reloginBtn = document.createElement('button');
@@ -166,8 +225,9 @@
 
   window.addEventListener('message', function (event) {
     var m = event.data || {};
-    if (m.type === 'accounts') { renderAccounts(m); }
+    if (m.type === 'accounts') { clearLoadingGroup('accounts'); renderAccounts(m); }
     else if (m.type === 'config') {
+      clearLoadingGroup('config');
       configListEl.innerHTML = '';
       (m.items || []).forEach(function (it) {
         var row = document.createElement('div');
@@ -179,6 +239,7 @@
       });
     }
     else if (m.type === 'quota') {
+      clearLoadingGroup('quota');
       var boxes = accountListEl.querySelectorAll('pre[data-account-id="' + m.id + '"]');
       boxes.forEach(function (b) {
         b.textContent = m.error ? ('Không đọc được quota: ' + m.error) : JSON.stringify(m.quota, null, 2);

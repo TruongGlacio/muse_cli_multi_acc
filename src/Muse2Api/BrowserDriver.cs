@@ -1584,6 +1584,11 @@ public sealed class BrowserDriver : IMuseDriver
                 if (!seen.Add(normalized)) continue;
                 var title = Str(link, "title") ?? "";
                 if (title.Length > 200) title = title[..200];
+                // v0.8.13: anchor mang tiêu đề chung của app (mọi dạng
+                // Chat/Muse/Chat-Muse) thì lưu thành "" để extension rơi
+                // về dự phòng "Hội thoại web <id>", không lưu chuỗi
+                // chung làm title thật khiến mọi hội thoại giống nhau.
+                if (DiagnosticLines.IsGenericWebTitle(title)) title = "";
                 threads.Add((normalized, title));
             }
         }

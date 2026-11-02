@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { GatewayManager, GatewayConfig, GatewayState } from './gateway';
-import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, deleteGatewayAccount, formatAccountLine, fetchWebThreads, registerConversation, deleteGatewayConversation, fetchConversationOwner, fetchThreadMessages, resolveWebTitleUpdated, sessionMatchesAccountFilter } from './admin';
+import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, deleteGatewayAccount, formatAccountLine, fetchWebThreads, registerConversation, deleteGatewayConversation, fetchConversationOwner, fetchThreadMessages, resolveWebTitleUpdated, sessionMatchesAccountFilter, isGenericWebTitle, titleFromFirstUserMessage, fallbackWebTitle, isFallbackWebTitle } from './admin';
 import { BackgroundProcesses } from './processes';
 import { generateImages, editImage, createVideo, downloadMedia, dataUrlOfImageFile, MAX_IMAGE_BYTES } from './media';
 import { ComputerHelper, COMPUTER_TOOLS, approveComputerAction, describeComputerCall } from './computer';
@@ -371,7 +371,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // là trách nhiệm của user — xem README.
   async openSessionInPanel(sessionId?: string): Promise<void> {
     const target = (sessionId ? this.store.find(sessionId) : undefined) ?? this.currentSession();
-    if (!target) { return; }
+    if (!target) { this.postSessions(); return; }
     const surface = new MuseChatProvider(this.context, this.gateway, this.store, { initialSessionId: target.id });
     const panel = vscode.window.createWebviewPanel('muse.chatPanel', `Muse: ${target.title}`, vscode.ViewColumn.Beside, {
       enableScripts: true,
@@ -379,6 +379,9 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       retainContextWhenHidden: true,
     });
     surface.attachPanel(panel);
+    // v0.8.13: bề mặt gốc (nơi bấm "Tab mới") cũng nhận 'sessions'
+    // để nút Tab mới hết loading; attachPanel chỉ post cho panel mới.
+    this.postSessions();
   }
 
   private attachPanel(panel: vscode.WebviewPanel): void {
@@ -843,6 +846,14 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       session.updatedAt = Date.now();
       const newTitle = resolveWebTitleUpdated(session.title, session.threadUrl, result.title, { titleEditedManually: session.titleEditedManually });
       if (newTitle) { session.title = newTitle; }
+      // v0.8.13: sau khi tải được lịch sử, nếu title vẫn là tiêu đề
+      // chung hoặc dự phòng và session chưa sửa tay thì suy title từ
+      // tin nhắn user đầu tiên trong lịch sử vừa tải (một dòng, tối
+      // đa 80 ký tự; tin đầu rỗng hoặc cũng generic thì giữ nguyên).
+      if (!session.titleEditedManually && (isGenericWebTitle(session.title) || isFallbackWebTitle(session.title, session.threadUrl))) {
+        const derived = titleFromFirstUserMessage(session.messages.map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })));
+        if (derived && derived !== session.title) { session.title = derived; }
+      }
       if (session.id === this.currentSessionId) {
         this.history = session.messages;
         this.historySessionId = session.id;
@@ -957,17 +968,22 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // cả nút cột trái, lệnh palette và nút tạo trong tab panel (cùng
   // một hàm này, không có đường tạo mới riêng nào khác).
   async newSession(): Promise<boolean> {
-    if (this.running) { this.post('error', { text: 'Đang có một yêu cầu chạy. Bấm Dừng rồi mới tạo hội thoại mới.' }); return false; }
+    // v0.8.13: các đường thoát sớm cũng postSessions để nút Hội thoại
+    // mới ở webview không kẹt loading (tín hiệu hoàn tất của nhóm
+    // thao tác session là message 'sessions').
+    if (this.running) { this.post('error', { text: 'Đang có một yêu cầu chạy. Bấm Dừng rồi mới tạo hội thoại mới.' }); this.postSessions(); return false; }
     let accounts: Array<{ id: string; label: string; enabled: boolean; status: string; email: string | null; username: string | null }>;
     try {
       accounts = await this.fetchAccountsCached();
     } catch (e) {
       void vscode.window.showErrorMessage(`Không đọc được danh sách tài khoản từ gateway nên chưa tạo hội thoại mới: ${e instanceof Error ? e.message : String(e)}`);
+      this.postSessions();
       return false;
     }
     if (accounts.length === 0) {
       void vscode.window.showInformationMessage('Chưa có tài khoản Muse nào trong gateway, hãy thêm tài khoản trong Cài đặt rồi tạo hội thoại mới.');
       this.openSettings();
+      this.postSessions();
       return false;
     }
     // v0.8.8, việc 2d: bộ lọc đang là một tài khoản cụ thể thì gán
@@ -993,7 +1009,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         accounts.map((a) => ({ ...this.accountPickLabel(a), account: a })),
         { placeHolder: 'Chọn tài khoản cho hội thoại mới' },
       );
-      if (!pick) { return false; }
+      if (!pick) { this.postSessions(); return false; }
       chosen = pick.account;
     }
     this.syncCurrentSession();
@@ -1013,9 +1029,9 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
 
   async renameSession(): Promise<void> {
     const session = this.currentSession();
-    if (!session) { void vscode.window.showInformationMessage('Chưa có hội thoại nào để đổi tên.'); return; }
+    if (!session) { void vscode.window.showInformationMessage('Chưa có hội thoại nào để đổi tên.'); this.postSessions(); return; }
     const name = await vscode.window.showInputBox({ prompt: 'Đặt tên mới cho hội thoại hiện tại', value: session.title });
-    if (!name || name.trim().length === 0) { return; }
+    if (!name || name.trim().length === 0) { this.postSessions(); return; }
     session.title = name.trim().slice(0, 80);
     // v0.8.12: đổi tên tay đặt cờ bảo vệ — từ nay đồng bộ thường và
     // lệnh ép buộc đều không ghi đè tiêu đề này. Lưu ý: hội thoại đổi
@@ -1028,7 +1044,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
 
   async deleteSession(): Promise<void> {
     const session = this.currentSession();
-    if (!session) { void vscode.window.showInformationMessage('Chưa có hội thoại nào để xóa.'); return; }
+    if (!session) { void vscode.window.showInformationMessage('Chưa có hội thoại nào để xóa.'); this.postSessions(); return; }
     await this.deleteSessionById(session.id);
   }
 
@@ -1046,14 +1062,14 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // trong removeSession + saveSessions), và KHÔNG xóa thread trên web.
   async deleteSessionById(id: string): Promise<void> {
     const session = this.store.find(id);
-    if (!session) { return; }
+    if (!session) { this.postSessions(); return; }
     if (this.running && id === this.currentSessionId) { this.abort?.abort(); }
     let msg = `Xóa hội thoại "${session.title}"? Lịch sử của hội thoại này sẽ mất.`;
     if (session.threadUrl) {
       msg += ' Chỉ xóa trong extension và mapping gateway; thread gốc vẫn còn trên web muse.ai trừ khi bạn xóa tay trên web, và đồng bộ sau sẽ không tự nhập lại thread này nữa (muốn nhập lại thì dùng lệnh "Muse: Cho phép nhập lại các hội thoại đã xóa").';
     }
     const answer = await vscode.window.showWarningMessage(msg, 'Xóa', 'Hủy');
-    if (answer !== 'Xóa') { return; }
+    if (answer !== 'Xóa') { this.postSessions(); return; }
     // Tombstone trước khi xóa khỏi danh sách (điểm c).
     if (session.threadUrl) { this.addDeletedThreadUrl(session.threadUrl); }
     // Xóa mapping gateway (điểm b): best-effort, lỗi thì vẫn xóa
@@ -1067,7 +1083,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       mappingError = e instanceof Error ? e.message : String(e);
     }
     const wasCurrent = id === this.currentSessionId;
-    if (!this.store.removeSession(id)) { return; }
+    if (!this.store.removeSession(id)) { this.postSessions(); return; }
     if (wasCurrent) {
       const next = [...this.store.sessions].sort((a, b) => b.updatedAt - a.updatedAt)[0];
       if (next) {
@@ -1124,6 +1140,56 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       { modal: true }, 'Ép cập nhật', 'Hủy');
     if (answer !== 'Ép cập nhật') { return; }
     await this.syncFromWeb(true);
+  }
+
+  // Lệnh palette v0.8.13 "Muse: Sửa tiêu đề chung thành tiêu đề từ tin
+  // nhắn đầu tiên": lệnh opt-in RIÊNG để sửa title hàng loạt, KHÔNG
+  // đổi logic đồng bộ mức 1 thường (đồng bộ thường vẫn không tải nội
+  // dung tin nhắn). Duyệt các session import từ web có title chung
+  // hoặc dự phòng và không có cờ sửa tay; session nào đã có messages
+  // thì suy ra ngay từ tin user đầu tiên đã lưu; session nào messages
+  // rỗng thì gọi đúng đường loadWebThreadHistory hiện có để tải rồi
+  // suy ra (đường đó tự suy title từ tin đầu sau khi tải). Chạy tuần
+  // tự, mỗi session báo trạng thái qua post status, cuối cùng báo
+  // tổng số đã sửa / không sửa được / bỏ qua, lưu lại và postSessions.
+  async fixGenericTitlesFromFirstMessage(): Promise<void> {
+    const eligible = this.store.sessions.filter((s) =>
+      s.importedFromWeb === true && !s.titleEditedManually && !!s.threadUrl &&
+      (isGenericWebTitle(s.title) || isFallbackWebTitle(s.title, s.threadUrl as string)));
+    if (eligible.length === 0) {
+      void vscode.window.showInformationMessage('Không có hội thoại import từ web nào đang mang tiêu đề chung hoặc dự phòng để sửa.');
+      return;
+    }
+    let fixed = 0;
+    let failed = 0;
+    let skipped = 0;
+    let changed = false;
+    for (const session of eligible) {
+      const before = session.title;
+      if (session.messages.length > 0) {
+        const derived = titleFromFirstUserMessage(session.messages.map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })));
+        if (derived && derived !== before) { session.title = derived; fixed++; changed = true; }
+        else { failed++; }
+        this.post('status', { text: `Sửa tiêu đề: ${session.title}` });
+        continue;
+      }
+      const res = await this.loadWebThreadHistory(session, false);
+      if (res === 'skipped') { skipped++; this.post('status', { text: `Bỏ qua (không xác định được tài khoản): ${before}` }); continue; }
+      // loadWebThreadHistory đã tự suy title từ tin đầu khi tải được;
+      // nếu sau đó title vẫn chung/dự phòng thì thử suy lại một lần
+      // từ messages vừa tải (trường hợp tin đầu rỗng/generic).
+      if (session.title !== before && !isGenericWebTitle(session.title) && !isFallbackWebTitle(session.title, session.threadUrl as string)) {
+        fixed++; changed = true;
+      } else {
+        const derived = titleFromFirstUserMessage(session.messages.map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })));
+        if (derived && derived !== before) { session.title = derived; fixed++; changed = true; }
+        else { failed++; }
+      }
+      this.post('status', { text: `Sửa tiêu đề: ${session.title}` });
+    }
+    if (changed) { this.store.persist(); }
+    this.postSessions();
+    void vscode.window.showInformationMessage(`Đã sửa ${fixed}/${eligible.length} tiêu đề chung từ tin nhắn đầu tiên (không sửa được ${failed}, bỏ qua ${skipped}).`);
   }
 
   // v0.8.12: forceTitles=true là chế độ ép buộc của lệnh palette
@@ -1197,6 +1263,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       let tombstoned = 0;
       let errors = 0;
       let titlesUpdated = 0;
+      let titlesReset = 0;
       for (const thread of threads) {
         const url = normalizeUrl(thread.url);
         if (tombstones.has(url)) { tombstoned++; continue; }
@@ -1217,13 +1284,28 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
             force: forceTitles && oldSession.importedFromWeb === true,
           });
             if (newTitle) { oldSession.title = newTitle; titlesUpdated++; }
+            // v0.8.13: session đã nhiễm tiêu đề chung mà lần quét này
+            // không cho title thật (kể cả khi title quét được cũng là
+            // chung và đã bị resolver loại) thì đặt lại thành dự phòng
+            // theo id, để ít nhất các item phân biệt được với nhau thay
+            // vì 10 item cùng mang "Chat-Muse". Không bao giờ đụng
+            // session có cờ sửa tay, kể cả khi title của nó trùng
+            // chuỗi chung.
+            else if (!oldSession.titleEditedManually && isGenericWebTitle(oldSession.title)) {
+              const fallback = fallbackWebTitle(url);
+              if (oldSession.title !== fallback) { oldSession.title = fallback; titlesReset++; }
+            }
           }
           skipped++; continue;
         }
         const conversationId = crypto.randomUUID();
+        // v0.8.13: title mới là tiêu đề chung ở mọi dạng (kể cả khi
+        // gateway cũ vẫn trả chuỗi chung) thì dùng dự phòng theo id,
+        // không dùng chuỗi chung làm title của session mới.
+        const rawNewTitle = (thread.title || '').trim();
         const session: ChatSession = {
           id: crypto.randomUUID(),
-          title: thread.title ? thread.title.slice(0, 80) : `Hội thoại web ${threadIdFromUrl(url)}`,
+          title: rawNewTitle && !isGenericWebTitle(rawNewTitle) ? rawNewTitle.slice(0, 80) : `Hội thoại web ${threadIdFromUrl(url)}`,
           conversationId,
           messages: [],
           createdAt: Date.now(),
@@ -1261,10 +1343,11 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
             this.saveSessions();
           }
         }
-      } else if (titlesUpdated > 0) {
+      } else if (titlesUpdated > 0 || titlesReset > 0) {
         // Chỉ cập nhật title, không thêm session: persist trực tiếp
         // (không qua saveSessions để khỏi bump updatedAt của session
-        // đang mở một cách không liên quan).
+        // đang mở một cách không liên quan). titlesReset cũng cần
+        // persist vì nó đổi title của session đã có về dự phòng.
         this.store.persist();
       }
       this.postSessions();
@@ -1274,6 +1357,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       // đọc được để user biết lỗi ở khâu nào.
       let msg = `Đã thêm ${added} hội thoại mới từ web (gateway đọc được ${threads.length} thread), bỏ qua ${skipped} hội thoại đã có trong danh sách`;
       if (titlesUpdated > 0) { msg += `, cập nhật ${titlesUpdated} tiêu đề thật cho hội thoại đã import trước đó${forceTitles ? ' (chế độ ép buộc, bỏ qua hội thoại sửa tay)' : ''}`; }
+      if (titlesReset > 0) { msg += `, đặt lại ${titlesReset} tiêu đề chung về dự phòng theo id (chưa có tiêu đề thật trong lần quét này)`; }
       if (tombstoned > 0) { msg += `, ${tombstoned} hội thoại đã xóa nên không nhập lại`; }
       if (errors > 0) { msg += `, ${errors} hội thoại lỗi khi đăng ký`; }
       if (added === 0 && debug) {
@@ -1298,6 +1382,11 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       void vscode.window.showInformationMessage(msg);
     } catch (e) {
       void vscode.window.showErrorMessage(`Không đồng bộ được hội thoại từ web: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      // v0.8.13: tín hiệu hoàn tất cho hiệu ứng loading của nút Đồng
+      // bộ từ web — finally bao mọi đường thoát (kể cả hủy QuickPick,
+      // không có tài khoản, lỗi) nên nút không bao giờ kẹt loading.
+      this.post('syncDone', {});
     }
   }
 
@@ -1366,10 +1455,17 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       // file nào lỗi thì hàm đó báo riêng và vẫn tiếp tục file khác.
       const uris = Array.isArray(m.uris) ? m.uris.filter((u): u is string => typeof u === 'string' && u.length > 0) : [];
       void (async () => {
-        for (const raw of uris) {
-          let filePath = raw;
-          try { if (raw.startsWith('file://')) { filePath = vscode.Uri.parse(raw).fsPath; } } catch { /* giữ nguyên chuỗi gốc, hàm xử lý sẽ báo lỗi riêng */ }
-          await this.processAttachmentFile(filePath);
+        try {
+          for (const raw of uris) {
+            let filePath = raw;
+            try { if (raw.startsWith('file://')) { filePath = vscode.Uri.parse(raw).fsPath; } } catch { /* giữ nguyên chuỗi gốc, hàm xử lý sẽ báo lỗi riêng */ }
+            await this.processAttachmentFile(filePath);
+          }
+        } finally {
+          // v0.8.13: tín hiệu hoàn tất cho nút Đính kèm khi kéo thả
+          // theo URI xong (kể cả khi có file lỗi, vì hàm xử lý đã
+          // báo riêng từng file).
+          this.post('attachDone', {});
         }
       })();
     } else if (m.type === 'dropFiles') {
@@ -1377,7 +1473,13 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       // qua File API nên gửi kèm dataUrl/text trong bộ nhớ; extension
       // xử lý bằng addDroppedFileAttachment với cùng giới hạn cũ.
       const files = Array.isArray(m.files) ? m.files.filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null) : [];
-      for (const f of files) { this.addDroppedFileAttachment(f); }
+      try {
+        for (const f of files) { this.addDroppedFileAttachment(f); }
+      } finally {
+        // v0.8.13: tín hiệu hoàn tất cho nút Đính kèm khi kéo thả
+        // theo File API xong.
+        this.post('attachDone', {});
+      }
     }
     else if (m.type === 'clearHistory') { this.clearHistory(); }
     else if (m.type === 'newSession') { void this.newSession(); }
@@ -1447,12 +1549,18 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // processAttachmentFile dùng chung với đường kéo thả theo URI, file
   // nào lỗi thì báo riêng file đó và vẫn tiếp tục các file còn lại.
   private async attachFile(): Promise<void> {
-    const picked = await vscode.window.showOpenDialog({
-      canSelectMany: true,
-      title: 'Chọn tệp đính kèm vào chat Muse (ảnh, văn bản, video)',
-    });
-    if (!picked || picked.length === 0) { return; }
-    for (const uri of picked) { await this.processAttachmentFile(uri.fsPath); }
+    try {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectMany: true,
+        title: 'Chọn tệp đính kèm vào chat Muse (ảnh, văn bản, video)',
+      });
+      if (!picked || picked.length === 0) { return; }
+      for (const uri of picked) { await this.processAttachmentFile(uri.fsPath); }
+    } finally {
+      // v0.8.13: tín hiệu hoàn tất cho hiệu ứng loading của nút Đính
+      // kèm — finally bao cả đường hủy hộp chọn, nên nút không kẹt.
+      this.post('attachDone', {});
+    }
   }
 
   // Xử lý MỘT file theo đường dẫn (v0.8.12, tách từ attachFile cũ để
@@ -1565,10 +1673,13 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
 
   // ---------------- Vòng lặp agent: gọi gateway, parse tool, thực thi ----------------
   async run(userText: string): Promise<void> {
-    if (this.running) { this.post('error', { text: 'Đang có một yêu cầu chạy. Bấm Dừng rồi gửi lại.' }); return; }
+    // v0.8.13: hai đường thoát sớm này cũng post 'done' như các đường
+    // khác của run(), để nút Gửi ở webview không kẹt loading.
+    if (this.running) { this.post('error', { text: 'Đang có một yêu cầu chạy. Bấm Dừng rồi gửi lại.' }); this.post('done', {}); return; }
     const root = workspaceRoot();
     if (!root) {
       this.post('error', { text: 'Hãy mở một thư mục dự án trong VS Code trước (File > Open Folder), rồi gửi lại yêu cầu.' });
+      this.post('done', {});
       return;
     }
     const conf = cfg();
@@ -2479,6 +2590,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('muse.deleteSession', () => { void provider.deleteSession(); }),
     vscode.commands.registerCommand('muse.syncFromWeb', () => { void provider.syncFromWeb(); }),
     vscode.commands.registerCommand('muse.forceSyncTitles', () => { void provider.forceSyncTitlesFromWeb(); }),
+    vscode.commands.registerCommand('muse.fixGenericTitles', () => { void provider.fixGenericTitlesFromFirstMessage(); }),
     vscode.commands.registerCommand('muse.refreshGatewayAccounts', async () => {
       await provider.refreshAccounts();
       void vscode.window.showInformationMessage('Đã làm mới trạng thái tài khoản Muse, xem trong panel Cài đặt (Muse: Cài đặt) và trạng thái session trong khung chat.');
