@@ -944,12 +944,15 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     MuseChatProvider.refreshAllAccounts();
   }
 
+  // v0.8.21: danh sách chọn nhanh cũng xếp mới nhất lên đầu, đồng bộ
+  // với cột trái (0.8.19). Chỉ đổi thứ tự hiển thị: sort trên bản sao
+  // nên thứ tự lưu trong store không đổi.
   listSessions(): Array<{ id: string; title: string }> {
-    return this.store.sessions.map((s) => ({ id: s.id, title: s.title }));
+    return sortSessionsNewestFirst(this.store.sessions).map((s) => ({ id: s.id, title: s.title }));
   }
 
   listSessionsWithAccounts(): Array<{ id: string; title: string; accountId?: string; accountLabel?: string }> {
-    return this.store.sessions.map((s) => ({ id: s.id, title: s.title, accountId: s.accountId, accountLabel: s.accountLabel }));
+    return sortSessionsNewestFirst(this.store.sessions).map((s) => ({ id: s.id, title: s.title, accountId: s.accountId, accountLabel: s.accountLabel }));
   }
 
   openSettings(): void {

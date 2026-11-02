@@ -1,4 +1,10 @@
-# Muse cho VS Code (v0.8.20)
+# Muse cho VS Code (v0.8.21)
+
+## Mới trong v0.8.21: danh sách chọn nhanh cũng xếp hội thoại mới nhất lên đầu
+
+**Vấn đề cũ.** Từ 0.8.19, danh sách hội thoại ở cột trái đã xếp mới nhất lên đầu (theo thời gian tương tác cuối, `updatedAt` desc), nhưng các danh sách chọn nhanh (QuickPick) vẫn xếp theo thứ tự tạo cũ lên trước, vì chúng đi qua `listSessions()` và `listSessionsWithAccounts()` mà hai hàm này map trực tiếp trên thứ tự lưu trong store, không sắp xếp.
+
+**Cách sửa.** Cả hai hàm nay đều trả về theo đúng thứ tự `sortSessionsNewestFirst()` đã có từ 0.8.19 (mới nhất lên đầu, tie-break `createdAt` desc, sort trên bản sao nên thứ tự lưu trong store không đổi). Nhờ đó QuickPick "Chọn hội thoại để làm việc tiếp", QuickPick "Chọn hội thoại để mở trong tab mới" và danh sách hội thoại trong panel Cài đặt đều xếp đồng bộ với cột trái. Không đổi hành vi cột trái, không đổi cách chọn hội thoại mở mặc định (`pickInitialSession`), không đổi thứ tự lưu, tổng số hội thoại hay logic lọc tài khoản. Các danh sách không phải hội thoại (tài khoản, cửa sổ đích cho điều khiển màn hình) giữ nguyên, không áp dụng kiểu sắp xếp này.
 
 ## Mới trong v0.8.20: gửi nguyên file (video, pdf, zip, ...) lên web + kéo thả file từ Explorer/Finder
 
