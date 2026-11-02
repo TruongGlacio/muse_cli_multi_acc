@@ -1,4 +1,10 @@
-# Muse cho VS Code (v0.8.18)
+# Muse cho VS Code (v0.8.19)
+
+## Mới trong v0.8.19: mở extension vào ngay hội thoại mới nhất, vào chat là thấy tin cuối cùng
+
+**Việc 1 — mở extension thì vào hội thoại tương tác mới nhất.** Trước đây bề mặt chat mới mở theo `savedCurrentSessionId` cũ trong globalState, còn danh sách giữ nguyên thứ tự tạo (tạo trước đứng trước) nên hội thoại vừa tương tác nằm tận dưới, user phải scroll xuống mới thấy. Từ bản này: khi mở sidebar/panel bình thường mà không có `initialSessionId` tường minh, session mở mặc định là session có `updatedAt` lớn nhất trong store; đường `initialSessionId` tường minh (mở tab mới cho một session cụ thể) giữ nguyên, không bị override. Danh sách gửi qua `postSessions()` nay sắp xếp mới nhất lên đầu theo `updatedAt` desc (tie-break `createdAt` desc rồi giữ thứ tự gốc); chỉ đổi thứ tự hiển thị, không đổi thứ tự lưu trong store, không đổi tổng số session hay logic lọc tài khoản. Lưới an toàn ở webview: sau khi render xong danh sách, nếu session đang mở nằm ngoài vùng nhìn thấy thì cuộn danh sách tới đúng item đó (`scrollIntoView`, block nearest). Store rỗng thì giữ nguyên trạng thái trống, không tự tạo session.
+
+**Việc 2 — vừa vào đoạn chat thì cuộn xuống tin cuối cùng.** Trước đây handler `history` chỉ render từng bubble (mỗi lần append có cuộn, nhưng layout chưa ổn định ngay sau khi render nên vị trí cuối cùng không nằm ở tin cuối), còn handler `importedBanner` ép `scrollTop = 0` về đầu. Từ bản này: sau khi handler `history` render xong cả lô thì cuộn chốt xuống cuối một lần, rồi gọi lại sau 2 frame để chiều cao thực tế sau khi trình duyệt tính layout xong vẫn về đúng cuối; áp dụng cả lần mở panel đầu tiên lẫn mỗi lần chuyển hội thoại. Handler `importedBanner` bỏ việc ép về đầu: banner vẫn chèn ở đầu để user cuộn lên xem, nhưng điểm vào mặc định là tin cuối như mọi lần vào chat khác. Không cuộn thêm trong các handler khác (`streamDelta` đã tự cuộn, `sessions` chỉ render danh sách) để tránh giật cuộn khi đang chat.
 
 ## Mới trong v0.8.18: model tự lấy ảnh và khung hình video trong workspace (không cần đính kèm tay)
 

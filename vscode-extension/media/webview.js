@@ -216,6 +216,17 @@
   // scrollIntoView cũ không còn cuộn được body, nhưng ghi rõ đích
   // để khỏi phụ thuộc hành vi cuộn tổ tiên).
   function scrollMessagesToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+  // v0.8.19: cuộn chốt xuống tin cuối sau khi render xong cả lô
+  // (mở panel lần đầu hoặc chuyển hội thoại). addBubble đã cuộn từng
+  // bubble, nhưng layout chưa ổn định ngay sau khi render (trình duyệt
+  // chưa tính xong chiều cao thực tế) nên gọi lại sau 2 frame để vị
+  // trí cuối cùng vẫn đúng. Chỉ dùng ở handler history/importedBanner,
+  // không dùng trong streamDelta (đã tự cuộn) hay sessions (chỉ render
+  // danh sách) để tránh giật cuộn khi đang chat.
+  function scrollMessagesToBottomSettled() {
+    scrollMessagesToBottom();
+    requestAnimationFrame(function () { requestAnimationFrame(scrollMessagesToBottom); });
+  }
   function addBubble(cls, text, details) {
     var div = document.createElement('div');
     div.className = 'bubble ' + cls;
@@ -471,8 +482,10 @@
       banner.className = 'imported-banner';
       banner.textContent = m.text || '';
       messagesEl.insertBefore(banner, messagesEl.firstChild);
-      // Banner nằm đầu danh sách nên cuộn #messages về đầu (v0.8.11).
-      messagesEl.scrollTop = 0;
+      // v0.8.19: bỏ việc ép scrollTop = 0 của v0.8.11. Banner vẫn nằm
+      // ở đầu để user cuộn lên xem, nhưng điểm vào mặc định khi vừa
+      // vào chat là tin cuối, như mọi lần vào chat khác.
+      scrollMessagesToBottomSettled();
     }
     else if (m.type === 'streamStart') { streamRaw = ''; streamBubble = addBubble('assistant', ''); }
     else if (m.type === 'streamDelta') {
@@ -532,6 +545,7 @@
         currentSessionLabel.textContent = 'Chưa có hội thoại nào.';
         if (currentSessionAccountEl) { currentSessionAccountEl.textContent = ''; }
       }
+      var currentSessionItem = null;
       sessions.forEach(function (s) {
         var item = document.createElement('button');
         item.className = 'session-item' + (s.id === m.currentId ? ' current' : '');
@@ -592,6 +606,11 @@
         });
         sessionListEl.appendChild(item);
         if (s.id === m.currentId) {
+          // v0.8.19: lưới an toàn — session đang mở phải thấy ngay
+          // trong danh sách mà không cần scroll tay, kể cả khi thứ tự
+          // hiển thị đã đổi (mới nhất lên đầu). block 'nearest' chỉ
+          // cuộn khi item đang ngoài vùng nhìn thấy.
+          currentSessionItem = item;
           currentSessionLabel.textContent = 'Hội thoại hiện tại: ' + (s.title || 'Hội thoại');
           // Header chat (v0.7.0, điểm 3 bổ sung): dòng tài khoản của
           // hội thoại đang mở, cùng thứ tự ưu tiên như danh sách.
@@ -606,6 +625,9 @@
           }
         }
       });
+      // v0.8.19: cuộn danh sách tới session đang mở (nếu ngoài vùng
+      // nhìn thấy) sau khi render xong cả danh sách.
+      if (currentSessionItem && currentSessionItem.scrollIntoView) { currentSessionItem.scrollIntoView({ block: 'nearest' }); }
       // v0.8.8: session đang mở mà bị lọc khỏi danh sách vẫn phải
       // hiện tiêu đề/tài khoản ở header (không dùng sessions đã lọc
       // để suy ra header, mà dùng currentSession ngoài danh sách).
@@ -621,6 +643,10 @@
     }
     else if (m.type === 'history') {
       (m.messages || []).forEach(function (h) { addBubble(h.role === 'user' ? 'user' : 'assistant', h.text || ''); });
+      // v0.8.19: vừa vào đoạn chat của một hội thoại thì điểm vào
+      // mặc định là tin cuối cùng, áp dụng cả lần mở panel đầu tiên
+      // lẫn mỗi lần chuyển hội thoại.
+      scrollMessagesToBottomSettled();
     }
     else if (m.type === 'historyCleared') { messagesEl.innerHTML = ''; attachmentsEl.innerHTML = ''; streamBubble = null; streamRaw = ''; }
     else if (m.type === 'logLine') { addLogLine(m.time || '', m.text || ''); }

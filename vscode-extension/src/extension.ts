@@ -135,6 +135,31 @@ export function toolResultContent(callName: string, result: string, images: stri
     ...images.map((url) => ({ type: 'image_url', image_url: { url } })),
   ];
 }
+
+// v0.8.19: thứ tự hiển thị danh sách hội thoại, mới nhất lên đầu.
+// Chỉ đổi thứ tự hiển thị: không đổi thứ tự lưu trong store (sort trên
+// bản sao), tie-break createdAt desc rồi giữ thứ tự gốc nhờ sort ổn định.
+export function sortSessionsNewestFirst<T extends { updatedAt: number; createdAt: number }>(sessions: T[]): T[] {
+  return [...sessions].sort((a, b) => (b.updatedAt - a.updatedAt) || (b.createdAt - a.createdAt));
+}
+
+// v0.8.19: chọn session mở mặc định khi tạo bề mặt chat mới.
+// - Có initialSessionId tường minh (mở tab mới cho một session cụ thể):
+//   giữ nguyên hành vi cũ, tìm đúng session đó, không tìm thấy thì về
+//   savedCurrentSessionId cũ, vẫn không thấy thì không chọn gì.
+// - Không có initialSessionId (mở sidebar/panel bình thường): chọn
+//   session có updatedAt lớn nhất, kể cả khi savedCurrentSessionId cũ
+//   đang trỏ session khác (đó chính là lỗi mở lên không vào hội thoại
+//   vừa tương tác). Store rỗng thì không chọn gì, không tự tạo session.
+export function pickInitialSession<T extends { id: string; updatedAt: number; createdAt: number }>(
+  sessions: T[], initialSessionId: string | undefined, savedCurrentSessionId: string,
+): T | undefined {
+  if (initialSessionId) {
+    return sessions.find((s) => s.id === initialSessionId)
+      ?? sessions.find((s) => s.id === savedCurrentSessionId);
+  }
+  return sortSessionsNewestFirst(sessions)[0];
+}
 const SYSTEM_PROMPT = [
   'Bạn là Muse, trợ lý lập trình chạy trong VS Code, làm việc trực tiếp trên',
   'dự án người dùng đang mở. Nói tiếng Việt rõ ràng, ngắn gọn.',
@@ -346,9 +371,11 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       this.post('logLine', { text: line, time: logTimeNow() });
     });
     this.removeStoreListener = this.store.addListener((change, source) => { this.onStoreChanged(change, source); });
-    const savedCurrent = this.store.savedCurrentSessionId();
-    const current = (options?.initialSessionId ? this.store.find(options.initialSessionId) : undefined)
-      ?? this.store.find(savedCurrent);
+    // v0.8.19: mở bề mặt mới không có initialSessionId thì mặc định
+    // vào session tương tác mới nhất (updatedAt lớn nhất), thay vì
+    // savedCurrentSessionId cũ; đường initialSessionId tường minh giữ
+    // nguyên hành vi cũ qua pickInitialSession, không bị override.
+    const current = pickInitialSession(this.store.sessions, options?.initialSessionId, this.store.savedCurrentSessionId());
     // v0.8.2, việc 2d: danh sách được phép rỗng (user đã xóa hết).
     // KHÔNG tự tạo "Hội thoại 1" ở đây, nếu không lần khởi động sau
     // sẽ làm sống lại danh sách vừa bị xóa. currentSession() trả null
@@ -635,7 +662,10 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
 
   private postSessions(): void {
     const filter = this.accountFilter();
-    const visible = this.store.sessions.filter((s) => sessionMatchesAccountFilter(s.accountId, filter));
+    // v0.8.19: danh sách hiển thị mới nhất lên đầu (chỉ đổi thứ tự
+    // hiển thị; sortSessionsNewestFirst sort trên bản sao nên thứ tự
+    // lưu trong store, totalSessionCount và logic lọc không đổi).
+    const visible = sortSessionsNewestFirst(this.store.sessions.filter((s) => sessionMatchesAccountFilter(s.accountId, filter)));
     const current = this.currentSession();
     this.post('sessions', {
       sessions: visible.map((s) => {
