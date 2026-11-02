@@ -464,29 +464,95 @@ public sealed class BrowserDriver : IMuseDriver
         if (images.Count > 0) await Task.Delay(1000, cancel);
     }
 
-    // v0.8.20: attach file generic qua đúng Dom.AttachFile như ảnh
-    // (DataTransfer + ô file input của web), nhưng giữ filename +
-    // mime thật thay vì đổi tên thành input_N.ext — web hiển thị
-    // đúng tên file user gửi. Đường này được chọn thay vì
-    // Playwright setInputFiles vì: (a) nó là đường ảnh đã chạy,
-    // (b) user đã thử thật và xác nhận web nhận file mp4 qua ô
-    // input này, (c) không cần ghi file tạm ra đĩa. Rủi ro còn lại
-    // là file 25 MB qua chuỗi Eval base64 sẽ chậm hơn ảnh nhỏ —
-    // đó là giá của việc tái dùng đường đã kiểm chứng, và nếu
-    // thực tế upload 25 MB hay timeout thì bước tiếp theo mới là
-    // chuyển riêng file sang setInputFiles (không đụng đường ảnh).
-    private async Task AttachFiles(BrowserTab tab, List<InputFile> files, CancellationToken cancel = default)
+    // v0.8.25: attach file generic qua Playwright native setInputFiles
+    // thay vì JS DataTransfer eval (đường cũ của 0.8.20–0.8.24).
+    // Lý do đổi, bằng chứng từ phép thử 0.8.24: chờ theo tín hiệu DOM
+    // lâu hơn không đổi gì — model vẫn thấy khung hình cũ y hệt
+    // (bé gái áo đỏ) qua mọi lượt — nên giả thuyết "gửi quá nhanh"
+    // đã yếu đi; nghi vấn còn lại là sự kiện change tổng hợp không
+    // đăng ký media với pipeline của web giống đính kèm thật bằng
+    // file-picker: bản ghi file thì có (model xác nhận đúng kích
+    // thước) nhưng media job không chạy cho file đó, hoặc slot media
+    // kẹt ở đính kèm cũ. setInputFiles kích hoạt change một cách
+    // native/trusted nên KHÔNG phát thêm sự kiện change nào sau nó.
+    // setInputFiles cần đường dẫn file thật nên ghi bytes ra file tạm
+    // dưới AttachTmpDir: mỗi lượt một thư mục con Guid, mỗi file một
+    // thư mục con số thứ tự để giữ đúng basename (web hiển thị đúng
+    // tên user gửi, tín hiệu chờ 0.8.24 khớp tên không bị lệch).
+    // Dọn thư mục tạm SAU KHI Send (không dọn ngay sau chờ): trình
+    // duyệt có thể đọc nội dung file một cách lazy lúc submit nên
+    // dọn sau chờ sẽ phá đúng trường hợp đó; dọn nằm ở BeginChat
+    // (finally quanh chờ + log + Send) nên cả thành công, timeout
+    // lẫn lỗi đều dọn, cộng thêm quét dọn thư mục con quá 24 giờ
+    // nếu gateway bị giết giữa lượt. Trả về thư mục tạm của lượt
+    // (null khi không có file) để BeginChat dọn sau Send. Đường ảnh
+    // (Attach) giữ nguyên, không đụng.
+    private async Task<string?> AttachFiles(BrowserTab tab, List<InputFile> files, CancellationToken cancel = default)
     {
-        foreach (var f in files)
+        if (files.Count == 0) return null;
+        SweepAttachTmpDirs();
+        var runDir = Path.Combine(_settings.AttachTmpDir, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(runDir);
+        try
         {
-            var res = await Eval(tab.Page, Dom.AttachFile(
-                Convert.ToBase64String(f.Data), f.Mime, f.Filename), cancel);
-            if (!BoolNode(res, "ok"))
-                throw new UpstreamException($"failed to attach file: {Str(res, "err")}");
+            var paths = new List<string>();
+            for (var i = 0; i < files.Count; i++)
+            {
+                var name = Path.GetFileName(files[i].Filename);
+                if (string.IsNullOrEmpty(name)) name = "attachment";
+                var sub = Path.Combine(runDir, i.ToString());
+                Directory.CreateDirectory(sub);
+                var path = Path.Combine(sub, name);
+                await File.WriteAllBytesAsync(path, files[i].Data, cancel);
+                paths.Add(path);
+            }
+            // Ô file input của composer (Dom.ComposerFileInputIndex);
+            // fallback về ô đầu tiên đúng như đường cũ khi không xác
+            // định được scope composer.
+            var idxNode = await Eval(tab.Page, Dom.ComposerFileInputIndex, cancel);
+            var idx = idxNode is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<int>(out var n) ? n : -1;
+            if (idx < 0)
+                throw new UpstreamException("failed to attach file: no-file-input");
+            var input = await tab.Page.Locator(Dom.FileInput).Nth(idx).ElementHandleAsync();
+            if (input is null)
+                throw new UpstreamException("failed to attach file: no-file-input");
+            // Ô multiple thì đưa cả lượt một lần như chọn nhiều file
+            // bằng file-picker thật; ô đơn thì đưa từng file như cũ
+            // (giao diện tự cộng dồn qua mỗi lần change).
+            if (await input.EvaluateAsync<bool>("el => el.multiple"))
+                await input.SetInputFilesAsync(paths);
+            else
+                foreach (var p in paths) await input.SetInputFilesAsync(new[] { p });
+            // KHÔNG phát thêm change: setInputFiles đã kích hoạt native.
+            return runDir;
         }
-        // v0.8.24: KHÔNG delay cố định ở đây nữa; điểm chờ theo tín
-        // hiệu thật nằm ở WaitForAttachmentsReady, gọi ngay sau
-        // AttachFiles trong BeginChat (chỉ khi có file).
+        catch
+        {
+            DeleteAttachTmpDir(runDir);
+            throw;
+        }
+    }
+
+    // v0.8.25: dọn thư mục tạm của một lượt (best-effort, không ném).
+    private static void DeleteAttachTmpDir(string? runDir)
+    {
+        if (string.IsNullOrEmpty(runDir)) return;
+        try { if (Directory.Exists(runDir)) Directory.Delete(runDir, true); } catch { }
+    }
+
+    // v0.8.25: quét dọn thư mục con attach-tmp quá 24 giờ (best-effort),
+    // để gateway bị giết giữa lượt cũng không để file 25 MB tồn đọng.
+    private void SweepAttachTmpDirs()
+    {
+        try
+        {
+            var root = _settings.AttachTmpDir;
+            if (!Directory.Exists(root)) return;
+            var cutoff = DateTime.UtcNow.AddHours(-24);
+            foreach (var d in Directory.EnumerateDirectories(root))
+                try { if (Directory.GetCreationTimeUtc(d) < cutoff) Directory.Delete(d, true); } catch { }
+        }
+        catch { }
     }
 
     // v0.8.24: chờ web xử lý xong file đính kèm mới Send. Lỗi 0.8.23
@@ -667,22 +733,28 @@ public sealed class BrowserDriver : IMuseDriver
                 // never silently creates another upstream thread on the next run.
                 _localConversations.Save(account.Id, hint, IsThreadUrl(tab.Page.Url) ? tab.Page.Url : saved?.Url ?? "", true, imageHash, fileHash);
                 await Attach(tab, images, req.Cancel);
-                await AttachFiles(tab, files, req.Cancel);
-                await WaitForAttachmentsReady(tab, files, req.Cancel);
-                var requestId = Guid.NewGuid().ToString("N");
-                state!["submittedRequestId"] = requestId;
-                var submitted = "MUSE_LOCAL_REQUEST_ID: " + requestId + "\n(Transport metadata for the app; do not echo it in your answer.)\n\n" + prompt;
-                // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang (kèm
-                // dòng header transport) trước khi Send, để user đối
-                // chiếu với câu trả lời/từ chối của model web.
-                await LogWebPromptAsync(account, req, submitted, (saved is not null || live) ? "reused" : "new", images.Count, files.Count);
-                await Send(tab, submitted, req.Cancel);
-                if (LocalConversationStore.IsThread(tab.Page.Url))
+                // v0.8.25: dọn file tạm setInputFiles SAU KHI Send
+                // (finally), không dọn sau chờ — xem AttachFiles.
+                var attachTmpLocal = await AttachFiles(tab, files, req.Cancel);
+                try
                 {
-                    tab.ThreadUrl = tab.Page.Url;
-                    _localConversations.Save(account.Id, hint, tab.ThreadUrl, true, imageHash, fileHash);
+                    await WaitForAttachmentsReady(tab, files, req.Cancel);
+                    var requestId = Guid.NewGuid().ToString("N");
+                    state!["submittedRequestId"] = requestId;
+                    var submitted = "MUSE_LOCAL_REQUEST_ID: " + requestId + "\n(Transport metadata for the app; do not echo it in your answer.)\n\n" + prompt;
+                    // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang (kèm
+                    // dòng header transport) trước khi Send, để user đối
+                    // chiếu với câu trả lời/từ chối của model web.
+                    await LogWebPromptAsync(account, req, submitted, (saved is not null || live) ? "reused" : "new", images.Count, files.Count);
+                    await Send(tab, submitted, req.Cancel);
+                    if (LocalConversationStore.IsThread(tab.Page.Url))
+                    {
+                        tab.ThreadUrl = tab.Page.Url;
+                        _localConversations.Save(account.Id, hint, tab.ThreadUrl, true, imageHash, fileHash);
+                    }
+                    return (tab, state);
                 }
-                return (tab, state);
+                finally { DeleteAttachTmpDir(attachTmpLocal); }
             }
             List<BrowserTab> others;
             lock (_lock) others = _tabs.GetValueOrDefault(account.Id, new()).Where(t => t != tab && t.HasState).ToList();
@@ -712,13 +784,19 @@ public sealed class BrowserDriver : IMuseDriver
             }
             var baseState = await ChatState(tab);
             await Attach(tab, images, req.Cancel);
-            await AttachFiles(tab, files, req.Cancel);
-            await WaitForAttachmentsReady(tab, files, req.Cancel);
-            // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang trước khi
-            // Send (follow thì là nối tiếp thread cũ, ngược lại là mới).
-            await LogWebPromptAsync(account, req, prompt, threadKind, images.Count, files.Count);
-            await Send(tab, prompt, req.Cancel);
-            return (tab, baseState);
+            // v0.8.25: dọn file tạm setInputFiles SAU KHI Send
+            // (finally), không dọn sau chờ — xem AttachFiles.
+            var attachTmp = await AttachFiles(tab, files, req.Cancel);
+            try
+            {
+                await WaitForAttachmentsReady(tab, files, req.Cancel);
+                // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang trước khi
+                // Send (follow thì là nối tiếp thread cũ, ngược lại là mới).
+                await LogWebPromptAsync(account, req, prompt, threadKind, images.Count, files.Count);
+                await Send(tab, prompt, req.Cancel);
+                return (tab, baseState);
+            }
+            finally { DeleteAttachTmpDir(attachTmp); }
         }
         catch (Exception)
         {

@@ -42,6 +42,10 @@ public sealed class Settings
 
     public string EffectiveAdminKey => string.IsNullOrEmpty(AdminKey) ? ApiKey : AdminKey;
     public string MediaDir => Path.Combine(DataDir, "media");
+    // v0.8.25: thư mục file tạm cho setInputFiles (mỗi lượt một thư
+    // mục con Guid, dọn sau khi Send). Nằm dưới DataDir để chạy
+    // đúng trên Windows/Mac của user, không dùng /tmp hệ thống.
+    public string AttachTmpDir => Path.Combine(DataDir, "attach-tmp");
     public string AccountsFile => Path.Combine(DataDir, "accounts.json");
     public string TasksFile => Path.Combine(DataDir, "tasks.json");
     public string RequestsFile => Path.Combine(DataDir, "requests.db");

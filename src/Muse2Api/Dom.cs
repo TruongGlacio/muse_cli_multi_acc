@@ -282,6 +282,37 @@ public static class Dom
         })()
         """;
 
+    // v0.8.25: chỉ số của ô file input thuộc vùng composer trong
+    // danh sách mọi input[type="file"] của trang, để setInputFiles
+    // nhắm đúng ô đó thay vì ô đầu tiên một cách mù. Cách tìm: leo
+    // từ textarea lên, tổ tiên đầu tiên có chứa input file mà KHÔNG
+    // chứa bubble/group tin nhắn chính là scope composer (cùng quy
+    // ước scope với AttachmentReady); nếu leo tới root mà không gặp
+    // scope nào như vậy (ô input nằm ngoài vùng composer, ví dụ ở
+    // cấp body) thì trả 0, tức giữ đúng hành vi cũ là lấy ô đầu
+    // tiên. Không có ô file input nào thì trả -1 để C# báo lỗi
+    // no-file-input như đường DataTransfer cũ.
+    public const string ComposerFileInputIndex = """
+        (() => {
+          const inputs = [...document.querySelectorAll('input[type="file"]')];
+          if (!inputs.length) return -1;
+          const ta = document.querySelector('textarea');
+          if (ta) {
+            const hasMsg = el => !!(el.querySelector('div[class*="hatch-agent-bubble-bg"]')
+              || el.querySelector('[class~="group/msg"]'));
+            let node = ta.parentElement;
+            while (node) {
+              if (!hasMsg(node)) {
+                const input = node.querySelector('input[type="file"]');
+                if (input) return inputs.indexOf(input);
+              }
+              node = node.parentElement;
+            }
+          }
+          return 0;
+        })()
+        """;
+
     public static string AttachFile(string b64, string mime, string filename) => $$"""
         (() => {
           try {
