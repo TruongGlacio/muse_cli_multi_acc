@@ -1,4 +1,12 @@
-# Muse cho VS Code (v0.8.16)
+# Muse cho VS Code (v0.8.17)
+
+## Mới trong v0.8.17: sửa icon activity bar chỉ còn hình vuông xám
+
+**Vấn đề.** Icon activity bar của extension (`media/icon.svg`) chỉ hiện thành hình vuông màu xám, không thấy chữ M. Logo danh sách Extensions (`images/icon.png`) không có vấn đề gì và không bị đụng tới trong bản này.
+
+**Nguyên nhân.** File `media/icon.svg` cũ có một rect nền tím kín toàn bộ 24x24 cộng nét chữ M trắng bên trên. VS Code tô icon activity bar bằng màu foreground của theme theo dạng mask, nên cả nền tím lẫn chữ M đều bị tô thành cùng một khối màu đặc, chữ M chìm hẳn vào nền và chỉ còn thấy hình vuông xám.
+
+**Cách sửa.** Bỏ hoàn toàn rect nền khỏi `media/icon.svg`, nền để trong suốt, chỉ giữ nét chữ M một màu duy nhất (giữ nguyên path M cũ, viewBox 0 0 24 24, stroke-width 2.2, linecap/linejoin round). Không vẽ lại logo, không thêm chi tiết. VS Code tô nét M theo màu foreground của theme nên logo hiện đúng trên cả theme sáng và tối.
 
 ## Mới trong v0.8.16: log đúng prompt gateway gửi lên muse.ai (chẩn đoán câu từ chối của model web)
 
