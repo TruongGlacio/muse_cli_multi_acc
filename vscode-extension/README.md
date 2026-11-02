@@ -1,4 +1,14 @@
-# Muse cho VS Code (v0.8.17)
+# Muse cho VS Code (v0.8.18)
+
+## Mới trong v0.8.18: model tự lấy ảnh và khung hình video trong workspace (không cần đính kèm tay)
+
+**Vấn đề cũ.** File text/code thì model đã tự lấy được qua vòng lặp tool (`read_file`/`read_files`/`search_files`/`list_files`), nhưng file media thì không: model không có tool nào để lấy ảnh hay video trong workspace, nên user vẫn phải đính kèm tay. Đính kèm tay thì ảnh gửi dạng ảnh, còn video chỉ trích 1 khung ở giây 1 bằng ffmpeg (không có ffmpeg thì chỉ gửi ghi chú).
+
+**2 tool đọc-only mới.** `read_image {path}` đọc 1 file ảnh trong workspace và gửi ảnh kèm message kết quả của chính call đó; chỉ nhận `.png`/`.jpg`/`.jpeg`/`.webp`/`.gif`, tối đa 20 MiB/ảnh, sai định dạng, rỗng, quá lớn hoặc ngoài workspace đều trả lỗi text rõ ràng, không bịa ảnh. `read_video_frames {path, times?}` trích khung hình video bằng ffmpeg theo đúng mẫu đính kèm tay (mỗi mốc một file tạm, dọn sau khi đọc); `times` mặc định `[1]`, tối đa 4 mốc, mỗi mốc >= 0, sai thì trả lỗi text; mỗi khung thành một ảnh kèm cùng message kết quả. Không có ffmpeg hoặc trích hỏng hết thì chỉ trả ghi chú thành thật, tuyệt đối không bịa khung hình. Text kết quả luôn ghi rõ đây chỉ là khung hình mẫu, không phải toàn bộ video. Cả 2 tool đều nằm trong nhóm đọc-only nên không hỏi duyệt modal (giống `read_file`), vẫn bị chặn ngoài workspace, và khi `muse.localTools=false` thì bị từ chối toàn bộ như mọi tool khác. System prompt dặn model chỉ gọi 2 tool này khi user yêu cầu kiểm tra media trong workspace, không tự quét media toàn workspace khi chưa được yêu cầu.
+
+**Đường gửi ảnh tái dùng, không làm mới.** Vòng lặp chat nay tổng quát hóa cơ chế ảnh vốn chỉ dành cho screenshot `computer_*`: tool nào trả về ảnh thì message kết quả của call đó kèm đúng các ảnh tương ứng, tool khác vẫn text thuần, hành vi `computer_*` giữ nguyên. Phía gateway KHÔNG phải sửa gì: `Prompt.Flatten` đã gom `image_url` từ mọi message (kể cả message kết quả tool), handler chat nạp ảnh qua `LoadImageRefs` và `BrowserDriver.Attach` đưa lên web, kèm dedup `ImageBatchId`/`ImageHash` sẵn có; ảnh kết quả tool không có `attachment_id` nên không bị dedup bỏ qua, và các lượt sau chỉ attach thêm ảnh mới vượt quá số lượng đã attach.
+
+**Giới hạn, nói thẳng.** Video gốc không bao giờ được gửi lên web qua đường này, chỉ có khung hình mẫu; muốn xem toàn bộ video thì vẫn phải mở file gốc trên máy. Ảnh quá 20 MiB, video không có ffmpeg, hoặc media ngoài workspace đều không gửi được và model chỉ nhận ghi chú lỗi.
 
 ## Mới trong v0.8.17: sửa icon activity bar chỉ còn hình vuông xám
 

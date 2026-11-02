@@ -96,6 +96,45 @@ export function buildDroppedAttachment(file: { name?: unknown; size?: unknown; d
   }
   return { name, size, kind: 'file', kindLabel: 'Tệp', note: `Tệp ${name} (${Math.round(size / 1024)} KiB) là tệp nhị phân nên gateway chat không đọc được nội dung; chỉ gửi kèm tên và dung lượng để bạn mô tả thêm.` };
 }
+
+// v0.8.18: hàm thuần cho 2 tool media mới, để test đơn vị trực tiếp
+// từ out/extension.js mà không cần khởi tạo panel chat.
+// validateImageExt trả null nếu đuôi ảnh được hỗ trợ, ngược lại trả
+// thông báo lỗi (so sánh không phân biệt hoa thường).
+export function validateImageExt(ext: string): string | null {
+  if (IMAGE_EXTS.includes(ext.toLowerCase())) { return null; }
+  return `read_image chỉ nhận ảnh ${IMAGE_EXTS.join(', ')}`;
+}
+
+// parseVideoTimes: times bỏ trống thì mặc định [1]; ngược lại phải là
+// mảng 1-4 số hữu hạn, mỗi mốc >= 0. Trả { times } hoặc { error }.
+export function parseVideoTimes(raw: unknown): { times: number[] } | { error: string } {
+  if (raw === undefined) { return { times: [1] }; }
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 4) {
+    return { error: 'read_video_frames cần times là mảng 1-4 mốc giây.' };
+  }
+  const times: number[] = [];
+  for (const t of raw) {
+    if (typeof t !== 'number' || !Number.isFinite(t) || t < 0) {
+      return { error: `Mốc thời gian phải là số >= 0, nhận được '${String(t)}'.` };
+    }
+    times.push(t);
+  }
+  return { times };
+}
+
+// toolResultContent: dựng nội dung message TOOL_RESULT cho một call.
+// Có ảnh thì trả parts [text, ...image_url], không ảnh thì trả text
+// thuần — đúng dạng gateway đã gom image_url từ mọi message (xem
+// Prompt.Flatten), tái dùng cho cả read_image, read_video_frames và
+// ảnh screenshot computer_*.
+export function toolResultContent(callName: string, result: string, images: string[]): ChatContent {
+  if (images.length === 0) { return `TOOL_RESULT ${callName}:\n${result}`; }
+  return [
+    { type: 'text', text: `TOOL_RESULT ${callName}:\n${result}` },
+    ...images.map((url) => ({ type: 'image_url', image_url: { url } })),
+  ];
+}
 const SYSTEM_PROMPT = [
   'Bạn là Muse, trợ lý lập trình chạy trong VS Code, làm việc trực tiếp trên',
   'dự án người dùng đang mở. Nói tiếng Việt rõ ràng, ngắn gọn.',
@@ -104,7 +143,10 @@ const SYSTEM_PROMPT = [
   'tìm). Với câu chào hỏi, câu hỏi chung, trò chuyện thông thường thì trả',
   "lời trực tiếp, KHÔNG quét workspace trước, KHÔNG gọi tool để 'tìm hiểu",
   'ngữ cảnh khi user chưa yêu cầu. Không tự nhận đã làm gì khi chưa có kết',
-  'quả công cụ trả về, không bịa nội dung tệp.',
+  'quả công cụ trả về, không bịa nội dung tệp. Với ảnh/video cũng vậy:',
+  'chỉ gọi read_image/read_video_frames khi user yêu cầu kiểm tra media',
+  'trong workspace, không tự quét media toàn workspace khi chưa được yêu',
+  'cầu; khung hình video chỉ là mẫu, không bao giờ nhận đó là toàn bộ video.',
   '',
   'CÔNG CỤ (gửi đúng một khối JSON trong một code fence ```json):',
   '```json',
@@ -115,6 +157,11 @@ const SYSTEM_PROMPT = [
   '50; dùng limit/offset để xem tiếp, không quét đệ quy toàn bộ workspace',
   'khi chưa cần), read_file {path, start_line,',
   'max_lines}, read_files {paths}, search_files {query, path, case_sensitive},',
+  'read_image {path} (chỉ ảnh .png/.jpg/.jpeg/.webp/.gif trong workspace,',
+  'tối đa 20 MiB/ảnh, ảnh gửi kèm kết quả), read_video_frames {path,',
+  'times?} (video trong workspace, trích tối đa 4 khung hình tại các mốc',
+  'giây trong times, mặc định [1], cần ffmpeg; chỉ gửi khung hình mẫu,',
+  'không gửi video gốc),',
   'write_file {path, content}, edit_file {path, old_text, new_text} hoặc',
   'edit_file {path, edits:[{old_text, new_text}]}, run_command {command,',
   'workdir, shell, timeout_seconds} hoặc run_command {command, background:true,',
@@ -158,7 +205,7 @@ const SYSTEM_PROMPT_CHAT_ONLY = [
   '"Muse: Bật/Tắt tool cục bộ" rồi mới làm được việc đó.',
 ].join('\n');
 
-const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'read_files', 'search_files', 'git_status', 'git_diff']);
+const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'read_files', 'search_files', 'git_status', 'git_diff', 'read_image', 'read_video_frames']);
 const SKIP_DIRS = new Set(['bin', 'obj', 'node_modules', '.git', '.vs', 'dist']);
 const ALIASES: Record<string, string> = {
   readFile: 'read_file', writeFile: 'write_file', editFile: 'edit_file',
@@ -274,6 +321,11 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   private processes: BackgroundProcesses;
   private computer: ComputerHelper;
   private lastComputerImage?: string;
+  // v0.8.18: ảnh do tool media vừa trả (read_image: 1 ảnh,
+  // read_video_frames: tối đa 4 khung). Vòng lặp run() reset trước
+  // mỗi call và kèm đúng các ảnh này vào message TOOL_RESULT của
+  // chính call đó; các tool khác để rỗng nên message vẫn text thuần.
+  private lastToolImages: string[] = [];
   private lastStreamed = false;
   // Cache tài khoản mới nhất để tính trạng thái session và backfill.
   // Chỉ chứa các trường an toàn từ Account.Public() (không cookie).
@@ -1625,9 +1677,17 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   }
 
   private extractVideoFrame(filePath: string): Promise<string | undefined> {
+    return this.extractVideoFrameAt(filePath, 1);
+  }
+
+  // v0.8.18: trích 1 khung hình tại mốc giây t, dùng chung cho đính
+  // kèm tay ở giây 1 và tool read_video_frames. ffmpeg vắng hoặc lỗi
+  // thì trả undefined, caller ghi chú thành thật, tuyệt đối không bịa
+  // khung hình. File tạm luôn được dọn sau khi đọc.
+  private extractVideoFrameAt(filePath: string, t: number): Promise<string | undefined> {
     return new Promise((resolve) => {
       const tmp = path.join(os.tmpdir(), `muse-frame-${crypto.randomUUID()}.png`);
-      execFile('ffmpeg', ['-y', '-ss', '1', '-i', filePath, '-vframes', '1', '-q:v', '2', tmp], () => {
+      execFile('ffmpeg', ['-y', '-ss', String(t), '-i', filePath, '-vframes', '1', '-q:v', '2', tmp], () => {
         try {
           if (!fs.existsSync(tmp)) { resolve(undefined); return; }
           const dataUrl = dataUrlOfImageFile(tmp);
@@ -1814,20 +1874,17 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           if (signal.aborted) { break; }
           this.post('tool', { name: call.name, detail: describe(call) });
           this.lastComputerImage = undefined;
+          this.lastToolImages = [];
           const result = await this.execute(call, root, conf, signal);
-          // Giống AgentLoop: nếu tool computer vừa trả ảnh screenshot thì
-          // lượt tiếp theo gửi kèm ảnh đó dưới dạng image_url data URI.
-          if (call.name.startsWith('computer_') && this.lastComputerImage) {
-            request.push({
-              role: 'user',
-              content: [
-                { type: 'text', text: `TOOL_RESULT ${call.name}:\n${result}` },
-                { type: 'image_url', image_url: { url: this.lastComputerImage } },
-              ],
-            });
-          } else {
-            request.push({ role: 'user', content: `TOOL_RESULT ${call.name}:\n${result}` });
-          }
+          // v0.8.18, tổng quát hóa: tool nào trả về ảnh thì message
+          // TOOL_RESULT của chính call đó kèm đúng các image_url tương
+          // ứng (read_image: 1 ảnh, read_video_frames: tối đa 4 khung);
+          // tool computer_* giữ đường lastComputerImage cũ; các tool
+          // khác không có ảnh nên message vẫn text thuần như trước.
+          const resultImages = this.lastToolImages.length > 0
+            ? this.lastToolImages
+            : (call.name.startsWith('computer_') && this.lastComputerImage ? [this.lastComputerImage] : []);
+          request.push({ role: 'user', content: toolResultContent(call.name, result, resultImages) });
           this.post('toolResult', { name: call.name, detail: truncate(result, 500) });
         }
       }
@@ -2035,6 +2092,42 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           if (fs.statSync(base).isFile()) { walk(path.dirname(base)); } else { walk(base); }
           return matches.length > 0 ? matches.join('\n') : 'Không tìm thấy kết quả.';
         }
+        case 'read_image': {
+          // v0.8.18: đọc 1 ảnh trong workspace, ảnh đi kèm message
+          // TOOL_RESULT qua lastToolImages (vòng lặp run() dựng parts).
+          // Sai định dạng, rỗng, quá 20 MiB hoặc ngoài workspace đều
+          // thành lỗi text qua catch cuối execute, tuyệt đối không bịa ảnh.
+          const rel = str(call.args.path);
+          if (!rel) { return 'Lỗi: read_image cần path.'; }
+          const extError = validateImageExt(path.extname(rel));
+          if (extError) { return `Lỗi: ${extError}, không nhận '${path.extname(rel) || '(không có đuôi)'}': ${rel}`; }
+          const target = this.resolve(root, rel);
+          const dataUrl = dataUrlOfImageFile(target);
+          this.lastToolImages = [dataUrl];
+          return `Đã gửi ảnh ${rel} kèm theo message này (định dạng ${path.extname(rel).toLowerCase()}, ${fs.statSync(target).size} byte). Hãy xem ảnh đính kèm để kiểm tra, không suy đoán nội dung ảnh từ tên file.`;
+        }
+        case 'read_video_frames': {
+          // v0.8.18: trích khung hình video trong workspace bằng ffmpeg.
+          // Không có ffmpeg hoặc trích hỏng hết thì chỉ trả ghi chú text
+          // thành thật, tuyệt đối không bịa khung hình. Text kết quả ghi
+          // rõ đây chỉ là khung hình mẫu, không phải toàn bộ video.
+          const rel = str(call.args.path);
+          if (!rel) { return 'Lỗi: read_video_frames cần path.'; }
+          const parsed = parseVideoTimes(call.args.times);
+          if ('error' in parsed) { return `Lỗi: ${parsed.error}`; }
+          const target = this.resolve(root, rel);
+          const frames: string[] = [];
+          const done: number[] = [];
+          for (const t of parsed.times) {
+            const frame = await this.extractVideoFrameAt(target, t);
+            if (frame) { frames.push(frame); done.push(t); }
+          }
+          if (frames.length === 0) {
+            return `Không trích được khung hình nào từ video ${rel} (máy này có thể không có ffmpeg, hoặc video lỗi). Video gốc KHÔNG được gửi lên; hãy mô tả nội dung video hoặc đính kèm ảnh chụp khung hình thay thế.`;
+          }
+          this.lastToolImages = frames;
+          return `Đã gửi ${frames.length} khung hình mẫu trích từ video ${rel} tại các mốc giây ${done.join(', ')} kèm theo message này. Đây CHỈ là các khung hình mẫu, KHÔNG phải toàn bộ video — đừng kết luận về những đoạn không có trong khung hình.`;
+        }
         case 'write_file': {
           const rel = str(call.args.path);
           const content = str(call.args.content);
@@ -2215,6 +2308,8 @@ function describe(call: ToolCall): string {
   switch (call.name) {
     case 'list_files': return `Liệt kê ${p || '.'}`;
     case 'read_file': case 'read_files': return `Đọc ${p || String(call.args.paths || '')}`;
+    case 'read_image': return `Đọc ảnh ${p}`;
+    case 'read_video_frames': return `Trích khung hình video ${p}`;
     case 'write_file': return `Ghi ${p}`;
     case 'edit_file': return `Sửa ${p}`;
     case 'search_files': return `Tìm "${str(call.args.query)}"`;
