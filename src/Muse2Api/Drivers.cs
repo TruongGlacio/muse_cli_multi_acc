@@ -4,8 +4,11 @@ using System.Text.Json.Nodes;
 namespace Muse2Api;
 
 public sealed record InputImage(byte[] Data, string Mime = "image/png");
+// v0.8.20: file generic gửi nguyên lên web (video, pdf, zip, ...).
+// Khác ảnh ở chỗ giữ nguyên filename gốc để web hiển thị đúng tên.
+public sealed record InputFile(byte[] Data, string Filename, string Mime);
 public sealed record ChatRequest(string Prompt, string Model, List<InputImage> Images,
-    string? ConversationHint, List<(string Role, string Text)> Turns, CancellationToken Cancel, bool LocalTools = false, string? ImageBatchId = null, string? AccountId = null, bool OpenAiTools = false);
+    string? ConversationHint, List<(string Role, string Text)> Turns, CancellationToken Cancel, bool LocalTools = false, string? ImageBatchId = null, string? AccountId = null, bool OpenAiTools = false, List<InputFile>? Files = null);
 public sealed record ImageRequest(string Prompt, string Model, string? Size, int N,
     List<InputImage> References, Action<int>? OnProgress = null, CancellationToken Cancel = default);
 public sealed record VideoRequest(string Prompt, string Model, string? Size, int? Duration,

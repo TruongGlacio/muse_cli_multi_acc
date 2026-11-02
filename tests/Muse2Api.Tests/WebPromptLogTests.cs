@@ -19,8 +19,16 @@ public class WebPromptLogTests
     public void Header_HasAllFields_AndNoPromptContent()
     {
         var h = WebPromptLog.Header("acc_1", "openai-tools", "muse-chat", 123, 4, "reused", 2, "-");
-        Assert.Equal("web_prompt account=acc_1 mode=openai-tools model=muse-chat chars=123 turns=4 thread=reused images=2 file=-", h);
+        Assert.Equal("web_prompt account=acc_1 mode=openai-tools model=muse-chat chars=123 turns=4 thread=reused images=2 files=0 file=-", h);
         Assert.DoesNotContain("hello prompt", h);
+    }
+
+    // v0.8.20: header ghi thêm số file gửi nguyên đã attach.
+    [Fact]
+    public void Header_IncludesFileCount()
+    {
+        var h = WebPromptLog.Header("acc_1", "local", "muse-chat", 10, 1, "new", 1, "-", 2);
+        Assert.Contains("images=1 files=2", h);
     }
 
     [Theory]

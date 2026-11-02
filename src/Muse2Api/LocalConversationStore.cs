@@ -7,7 +7,10 @@ namespace Muse2Api;
 /// <summary>One desktop conversation owns one upstream thread across rounds and restarts.</summary>
 public sealed class LocalConversationStore(string dataDirectory)
 {
-    public sealed record Entry(string Account, string Url, bool Pending = false, string ImageHash = "");
+    // v0.8.20: FileHash dedup file gửi nguyên theo cùng cách ImageHash
+    // dedup ảnh (hash rỗng = lượt chưa gửi file nào, tương thích file
+    // cũ thiếu trường này khi deserialize).
+    public sealed record Entry(string Account, string Url, bool Pending = false, string ImageHash = "", string FileHash = "");
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
     // v0.8.2: hash tài khoản dùng để đối chiếu Entry.Account với pool
     // trong endpoint by-hint. Chỉ dùng nội bộ gateway, KHÔNG trả hash
@@ -54,7 +57,7 @@ public sealed class LocalConversationStore(string dataDirectory)
         return entry;
     }
 
-    public void Save(string accountId, string hint, string url, bool pending, string imageHash = "")
+    public void Save(string accountId, string hint, string url, bool pending, string imageHash = "", string fileHash = "")
     {
         if (string.IsNullOrWhiteSpace(hint)) throw MuseException.Invalid("Local conversations require a stable conversation ID.");
         if (url.Length > 0 && !IsThread(url)) throw MuseException.Invalid("Invalid Muse thread URL.");
@@ -62,7 +65,7 @@ public sealed class LocalConversationStore(string dataDirectory)
         var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            File.WriteAllText(temporary, JsonSerializer.Serialize(new Entry(Hash(accountId), url, pending, imageHash)));
+            File.WriteAllText(temporary, JsonSerializer.Serialize(new Entry(Hash(accountId), url, pending, imageHash, fileHash)));
             File.Move(temporary, file, overwrite: true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
@@ -89,7 +92,7 @@ public sealed class LocalConversationStore(string dataDirectory)
             var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
-                File.WriteAllText(temporary, JsonSerializer.Serialize(new Entry(newHash, entry.Url, entry.Pending, entry.ImageHash)));
+                File.WriteAllText(temporary, JsonSerializer.Serialize(new Entry(newHash, entry.Url, entry.Pending, entry.ImageHash, entry.FileHash)));
                 File.Move(temporary, file, overwrite: true);
                 rewritten++;
             }

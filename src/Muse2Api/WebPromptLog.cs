@@ -47,8 +47,11 @@ public static class WebPromptLog
     /// <paramref name="file"/> là đường dẫn file toàn văn, "-" khi
     /// prompt ngắn (không ghi file), "write_failed" khi ghi file lỗi.
     /// </summary>
-    public static string Header(string accountId, string mode, string model, int chars, int turns, string thread, int images, string file)
-        => $"web_prompt account={accountId} mode={mode} model={model} chars={chars} turns={turns} thread={thread} images={images} file={file}";
+    // v0.8.20: thêm files=<n> (số file gửi nguyên đã attach ở lượt
+    // này). Tham số mặc định 0 để các test/log cũ gọi Header không
+    // cần đổi vẫn biên dịch, và header cũ không có files vẫn đọc được.
+    public static string Header(string accountId, string mode, string model, int chars, int turns, string thread, int images, string file, int files = 0)
+        => $"web_prompt account={accountId} mode={mode} model={model} chars={chars} turns={turns} thread={thread} images={images} files={files} file={file}";
 
     /// <summary>
     /// Dòng đánh dấu preview bị cắt (đi vào cả Output lẫn ring buffer).

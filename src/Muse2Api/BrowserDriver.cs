@@ -133,6 +133,9 @@ public sealed class BrowserDriver : IMuseDriver
         public string? Hint { get; set; }
         public List<(string Role, string Text)> Turns { get; set; } = new();
         public int ImageCount { get; set; }
+        // v0.8.20: số file đã attach trên thread này (đối tác của
+        // ImageCount, dùng để follow-up chỉ attach thêm file mới).
+        public int FileCount { get; set; }
         public string ThreadUrl { get; set; } = "";
         public string QuotaNote { get; set; } = "";
         public bool Busy { get; set; }
@@ -283,7 +286,7 @@ public sealed class BrowserDriver : IMuseDriver
 
     private static void Forget(BrowserTab tab)
     {
-        tab.Hint = null; tab.Turns = new(); tab.ImageCount = 0; tab.ThreadUrl = "";
+        tab.Hint = null; tab.Turns = new(); tab.ImageCount = 0; tab.FileCount = 0; tab.ThreadUrl = "";
         tab.Local = false; tab.RateLimited = false;
     }
 
@@ -301,6 +304,8 @@ public sealed class BrowserDriver : IMuseDriver
         tab.ThreadUrl = hot["url"]?.GetValue<string>() ?? "";
         tab.ImageCount = hot["image_count"] is System.Text.Json.Nodes.JsonValue v
             && v.TryGetValue<int>(out var n) ? n : 0;
+        tab.FileCount = hot["file_count"] is System.Text.Json.Nodes.JsonValue fv
+            && fv.TryGetValue<int>(out var fn) ? fn : 0;
     }
 
     private static void SaveHot(BrowserTab tab, Account account, ChatRequest req, string url)
@@ -309,6 +314,7 @@ public sealed class BrowserDriver : IMuseDriver
         tab.Hint = req.ConversationHint;
         tab.Turns = new List<(string, string)>(req.Turns);
         tab.ImageCount = req.Images.Count;
+        tab.FileCount = req.Files?.Count ?? 0;
         account.Meta["hot_page"] = new System.Text.Json.Nodes.JsonObject
         {
             ["hint"] = req.ConversationHint ?? "",
@@ -316,6 +322,7 @@ public sealed class BrowserDriver : IMuseDriver
                 req.Turns.Select(t => (System.Text.Json.Nodes.JsonNode)new System.Text.Json.Nodes.JsonArray(t.Role, t.Text)).ToArray()),
             ["url"] = tab.ThreadUrl,
             ["image_count"] = tab.ImageCount,
+            ["file_count"] = tab.FileCount,
         };
     }
 
@@ -457,6 +464,43 @@ public sealed class BrowserDriver : IMuseDriver
         if (images.Count > 0) await Task.Delay(1000, cancel);
     }
 
+    // v0.8.20: attach file generic qua đúng Dom.AttachFile như ảnh
+    // (DataTransfer + ô file input của web), nhưng giữ filename +
+    // mime thật thay vì đổi tên thành input_N.ext — web hiển thị
+    // đúng tên file user gửi. Đường này được chọn thay vì
+    // Playwright setInputFiles vì: (a) nó là đường ảnh đã chạy,
+    // (b) user đã thử thật và xác nhận web nhận file mp4 qua ô
+    // input này, (c) không cần ghi file tạm ra đĩa. Rủi ro còn lại
+    // là file 25 MB qua chuỗi Eval base64 sẽ chậm hơn ảnh nhỏ —
+    // đó là giá của việc tái dùng đường đã kiểm chứng, và nếu
+    // thực tế upload 25 MB hay timeout thì bước tiếp theo mới là
+    // chuyển riêng file sang setInputFiles (không đụng đường ảnh).
+    private async Task AttachFiles(BrowserTab tab, List<InputFile> files, CancellationToken cancel = default)
+    {
+        foreach (var f in files)
+        {
+            var res = await Eval(tab.Page, Dom.AttachFile(
+                Convert.ToBase64String(f.Data), f.Mime, f.Filename), cancel);
+            if (!BoolNode(res, "ok"))
+                throw new UpstreamException($"failed to attach file: {Str(res, "err")}");
+        }
+        if (files.Count > 0) await Task.Delay(1000, cancel);
+    }
+
+    // v0.8.20: hash dedup cho file gửi nguyên (tên + mime + bytes),
+    // đối tác của imageHash. File rỗng danh sách thì hash rỗng.
+    private static string FileHash(List<InputFile> files)
+    {
+        if (files.Count == 0) return "";
+        var bytes = new List<byte>();
+        foreach (var f in files)
+        {
+            bytes.AddRange(System.Text.Encoding.UTF8.GetBytes(f.Filename + "\n" + f.Mime + "\n"));
+            bytes.AddRange(f.Data);
+        }
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes.ToArray()));
+    }
+
     private async Task Send(BrowserTab tab, string prompt, CancellationToken cancel = default)
     {
         cancel.ThrowIfCancellationRequested();
@@ -493,7 +537,7 @@ public sealed class BrowserDriver : IMuseDriver
     // đường dẫn đi vào cả Output lẫn ring buffer/panel; nội dung
     // prompt chỉ ra Output (phía extension tách dòng "web_prompt_body "
     // ra khỏi ring buffer). Không log reply, không log key/cookie/token.
-    private async Task LogWebPromptAsync(Account account, ChatRequest req, string submitted, string thread, int imageCount)
+    private async Task LogWebPromptAsync(Account account, ChatRequest req, string submitted, string thread, int imageCount, int fileCount = 0)
     {
         var mode = req.LocalTools ? "local" : req.OpenAiTools ? "openai-tools" : "normal";
         var file = "-";
@@ -517,7 +561,7 @@ public sealed class BrowserDriver : IMuseDriver
             }
             (head, tail) = WebPromptLog.Preview(submitted);
         }
-        Diagnostic?.Invoke(WebPromptLog.Header(account.Id, mode, req.Model, submitted.Length, req.Turns.Count, thread, imageCount, file));
+        Diagnostic?.Invoke(WebPromptLog.Header(account.Id, mode, req.Model, submitted.Length, req.Turns.Count, thread, imageCount, file, fileCount));
         Diagnostic?.Invoke("web_prompt_begin");
         var body = WebPromptLog.NeedsFile(submitted) ? head! : submitted;
         foreach (var line in WebPromptLog.SplitLines(body))
@@ -538,6 +582,7 @@ public sealed class BrowserDriver : IMuseDriver
         var tab = await Checkout(account, t => t.HasState && (t.Hint ?? "") == hint, req.Cancel);
         var prompt = req.Prompt;
         var images = req.Images;
+        var files = req.Files ?? new();
         try
         {
             if (req.LocalTools)
@@ -568,22 +613,28 @@ public sealed class BrowserDriver : IMuseDriver
                 // ID and must not upload the same attachment on every round.
                 if (req.ImageBatchId is { Length: > 0 }) imageHash = req.ImageBatchId + ":" + imageHash;
                 if (req.ImageBatchId is { Length: > 0 } && imageHash == saved?.ImageHash) images = new();
+                // v0.8.20: dedup file theo FileHash (không cần batch id
+                // như ảnh, vì file part không mang attachment_id): các
+                // vòng tool sau gửi lại cùng file thì không upload lại.
+                var fileHash = FileHash(files);
+                if (files.Count > 0 && fileHash == saved?.FileHash) files = new();
                 // Record ownership before submission, so an interrupted request
                 // never silently creates another upstream thread on the next run.
-                _localConversations.Save(account.Id, hint, IsThreadUrl(tab.Page.Url) ? tab.Page.Url : saved?.Url ?? "", true, imageHash);
+                _localConversations.Save(account.Id, hint, IsThreadUrl(tab.Page.Url) ? tab.Page.Url : saved?.Url ?? "", true, imageHash, fileHash);
                 await Attach(tab, images, req.Cancel);
+                await AttachFiles(tab, files, req.Cancel);
                 var requestId = Guid.NewGuid().ToString("N");
                 state!["submittedRequestId"] = requestId;
                 var submitted = "MUSE_LOCAL_REQUEST_ID: " + requestId + "\n(Transport metadata for the app; do not echo it in your answer.)\n\n" + prompt;
                 // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang (kèm
                 // dòng header transport) trước khi Send, để user đối
                 // chiếu với câu trả lời/từ chối của model web.
-                await LogWebPromptAsync(account, req, submitted, (saved is not null || live) ? "reused" : "new", images.Count);
+                await LogWebPromptAsync(account, req, submitted, (saved is not null || live) ? "reused" : "new", images.Count, files.Count);
                 await Send(tab, submitted, req.Cancel);
                 if (LocalConversationStore.IsThread(tab.Page.Url))
                 {
                     tab.ThreadUrl = tab.Page.Url;
-                    _localConversations.Save(account.Id, hint, tab.ThreadUrl, true, imageHash);
+                    _localConversations.Save(account.Id, hint, tab.ThreadUrl, true, imageHash, fileHash);
                 }
                 return (tab, state);
             }
@@ -602,6 +653,9 @@ public sealed class BrowserDriver : IMuseDriver
                 prompt = follow;
                 threadKind = "reused";
                 images = req.Images.Skip(tab.ImageCount).ToList();
+                // v0.8.20: follow-up chỉ attach thêm file mới vượt quá
+                // số file đã attach (FileCount), giống cơ chế ảnh.
+                files = files.Skip(tab.FileCount).ToList();
             }
             else
             {
@@ -612,9 +666,10 @@ public sealed class BrowserDriver : IMuseDriver
             }
             var baseState = await ChatState(tab);
             await Attach(tab, images, req.Cancel);
+            await AttachFiles(tab, files, req.Cancel);
             // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang trước khi
             // Send (follow thì là nối tiếp thread cũ, ngược lại là mới).
-            await LogWebPromptAsync(account, req, prompt, threadKind, images.Count);
+            await LogWebPromptAsync(account, req, prompt, threadKind, images.Count, files.Count);
             await Send(tab, prompt, req.Cancel);
             return (tab, baseState);
         }
@@ -819,7 +874,7 @@ public sealed class BrowserDriver : IMuseDriver
                 {
                     var saved = _localConversations.Load(account.Id, req.ConversationHint!);
                     var url = LocalConversationStore.IsThread(tab.Page.Url) ? tab.Page.Url : saved?.Url ?? "";
-                    _localConversations.Save(account.Id, req.ConversationHint!, url, !finished, saved?.ImageHash ?? "");
+                    _localConversations.Save(account.Id, req.ConversationHint!, url, !finished, saved?.ImageHash ?? "", saved?.FileHash ?? "");
                     tab.ThreadUrl = url; tab.Hint = req.ConversationHint; tab.Local = true; tab.Turns.Clear();
                     if (!finished) tab.Stale = true;
                 }

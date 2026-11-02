@@ -96,6 +96,42 @@ public static class JsonHelp
         foreach (var r in refs) loaded.Add(await MediaHelp.LoadImageRef(r, cancel));
         return loaded;
     }
+
+    // v0.8.20: giới hạn file gửi nguyên, theo giới hạn của web muse.ai.
+    // 25 MB là 25.000.000 byte thập phân (không phải 25 MiB).
+    public const int MaxFileBytes = 25_000_000;
+    public const int MaxFilesPerRequest = 10;
+
+    /// <summary>Giải mã các file part thành bytes để Attach lên web.
+    /// Chỉ nhận data URL base64 (đường extension gửi); không tải URL
+    /// ngoài cho file (khác ảnh) để tránh SSRF qua file đính kèm.
+    /// Filename chỉ lấy phần basename để File trên web không mang
+    /// đường dẫn thư mục của máy user.</summary>
+    public static List<InputFile> LoadFileRefs(IEnumerable<Prompt.FilePart> parts)
+    {
+        var loaded = new List<InputFile>();
+        foreach (var p in parts)
+        {
+            var r = p.DataRef.Trim();
+            if (!r.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                throw MuseException.Invalid("file part must use a data URL");
+            var comma = r.IndexOf(',');
+            if (comma < 0 || !r[..comma].EndsWith(";base64", StringComparison.OrdinalIgnoreCase))
+                throw MuseException.Invalid("file data URL must contain base64 data");
+            byte[] data;
+            try { data = Convert.FromBase64String(r[(comma + 1)..]); }
+            catch (FormatException) { throw MuseException.Invalid("file data URL is not valid base64"); }
+            if (data.Length == 0) throw MuseException.Invalid($"file '{p.Filename}' is empty");
+            if (data.Length > MaxFileBytes) throw MuseException.Invalid($"file '{p.Filename}' exceeds 25 MB (web limit)");
+            var filename = p.Filename.Replace('\\', '/');
+            filename = filename[(filename.LastIndexOf('/') + 1)..];
+            if (filename.Length == 0) throw MuseException.Invalid("file part must contain a filename");
+            var mime = string.IsNullOrWhiteSpace(p.Mime) ? r[5..comma].Split(';')[0] : p.Mime;
+            if (string.IsNullOrWhiteSpace(mime)) mime = "application/octet-stream";
+            loaded.Add(new InputFile(data, filename, mime));
+        }
+        return loaded;
+    }
 }
 
 public static class MediaHelp

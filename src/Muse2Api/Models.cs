@@ -51,7 +51,14 @@ public static class ModelRegistry
 /// web chat, ported from Python <c>core/prompt.py</c>.</summary>
 public static class Prompt
 {
-    public sealed record FlatPrompt(string Text, List<string> Images);
+    // v0.8.20: file generic gửi nguyên (video, pdf, zip, ...). DataRef
+    // là data URL base64; filename/mime giữ nguyên để web hiển thị
+    // đúng tên file. Bytes chỉ giải mã ở LoadFileRefs, không nằm
+    // trong prompt text (giống ảnh: bytes đi qua Attach, text chỉ
+    // nhắc tên file).
+    public sealed record FilePart(string Filename, string Mime, string DataRef);
+
+    public sealed record FlatPrompt(string Text, List<string> Images, List<FilePart> Files);
 
     private static readonly Dictionary<string, string> RoleLabels = new()
     {
@@ -62,7 +69,7 @@ public static class Prompt
         ["tool"] = "Tool",
     };
 
-    public static string ContentToText(JsonNode? content, List<string> images)
+    public static string ContentToText(JsonNode? content, List<string> images, List<FilePart> files)
     {
         if (content is null) return "";
         if (content is JsonValue v)
@@ -86,6 +93,30 @@ public static class Prompt
                     if (string.IsNullOrWhiteSpace(url)) throw MuseException.Invalid("image part must contain an image_url");
                     images.Add(url);
                 }
+                else if (type is "file")
+                {
+                    // v0.8.20: dạng chuẩn do extension gửi:
+                    // {type:"file", file:{filename, mime, data_url}}.
+                    // Chấp nhận thêm dạng phẳng {type:"file", filename,
+                    // mime, data_url} cho client khác. Thiếu filename
+                    // hoặc data_url thì lỗi rõ, không gửi file rỗng
+                    // hay file không tên lên web.
+                    var fileObj = obj["file"] as JsonObject;
+                    string? filename = fileObj is not null ? JsonHelp.Str(fileObj["filename"]) : null;
+                    filename ??= JsonHelp.Str(obj["filename"]);
+                    string? mime = fileObj is not null ? JsonHelp.Str(fileObj["mime"]) : null;
+                    mime ??= JsonHelp.Str(obj["mime"]) ?? "application/octet-stream";
+                    string? dataRef = null;
+                    if (fileObj is not null)
+                    {
+                        dataRef = JsonHelp.Str(fileObj["data_url"]) ?? JsonHelp.Str(fileObj["url"]);
+                        if (dataRef is null && fileObj["file_url"] is JsonObject fu) dataRef = JsonHelp.Str(fu["url"]);
+                    }
+                    dataRef ??= JsonHelp.Str(obj["data_url"]);
+                    if (string.IsNullOrWhiteSpace(filename) || string.IsNullOrWhiteSpace(dataRef))
+                        throw MuseException.Invalid("file part must contain filename and data_url");
+                    files.Add(new FilePart(filename, mime, dataRef));
+                }
             }
             return string.Join("\n", parts.Where(p => p.Length > 0));
         }
@@ -106,7 +137,7 @@ public static class Prompt
         var turns = new List<(string, string)>();
         foreach (var msg in messages)
         {
-            var text = ContentToText(msg["content"], new List<string>()).Trim();
+            var text = ContentToText(msg["content"], new List<string>(), new List<FilePart>()).Trim();
             if (text.Length > 0)
                 turns.Add((Role(msg), text));
         }
@@ -116,6 +147,7 @@ public static class Prompt
     public static FlatPrompt Flatten(IEnumerable<JsonObject> messages)
     {
         var images = new List<string>();
+        var files = new List<FilePart>();
         var turns = new List<(string Role, string Text)>();
         // v0.8.15 (OpenAI tools mode): remember which tool each tool_call_id
         // belongs to, so a later role=tool message can be rendered with the
@@ -126,7 +158,7 @@ public static class Prompt
         foreach (var msg in messages)
         {
             var role = Role(msg);
-            var text = ContentToText(msg["content"], images).Trim();
+            var text = ContentToText(msg["content"], images, files).Trim();
             if (role == "assistant" && msg["tool_calls"] is JsonArray assistantCalls && assistantCalls.Count > 0)
             {
                 var lines = new List<string>();
@@ -159,15 +191,15 @@ public static class Prompt
             }
             if (text.Length > 0) turns.Add((role, text));
         }
-        if (turns.Count == 0) return new FlatPrompt("", images);
+        if (turns.Count == 0) return new FlatPrompt("", images, files);
         if (turns.Count == 1 && turns[0].Role == "user")
-            return new FlatPrompt(turns[0].Text, images);
+            return new FlatPrompt(turns[0].Text, images, files);
         var blocks = turns.Select(t =>
             $"[{(RoleLabels.TryGetValue(t.Role, out var l) ? l : char.ToUpper(t.Role[0]) + t.Role[1..])}]\n{t.Text}")
             .ToList();
         blocks.Add("[Instruction]\nContinue the conversation above and reply as the Assistant to the last "
             + "User message. Output only the reply.");
-        return new FlatPrompt(string.Join("\n\n", blocks), images);
+        return new FlatPrompt(string.Join("\n\n", blocks), images, files);
     }
 
     public static string ForLocalExecutor(IEnumerable<JsonObject> messages)
@@ -176,7 +208,8 @@ public static class Prompt
         foreach (var message in messages)
         {
             var images = new List<string>();
-            var text = ContentToText(message["content"], images);
+            var files = new List<FilePart>();
+            var text = ContentToText(message["content"], images, files);
             var role = Role(message);
             if (role == "assistant" && (text.StartsWith("[Unverified reply:", StringComparison.Ordinal)
                 || text.StartsWith("[Invalid plan:", StringComparison.Ordinal))) continue;
@@ -198,7 +231,10 @@ public static class Prompt
             inputs.Add(new JsonObject
             {
                 ["kind"] = kind,
+                // v0.8.20: file gửi nguyên chỉ ghi tên (không nhét bytes
+                // vào prompt text, giống ảnh); bytes đi qua Attach.
                 ["text"] = text, ["attached_images"] = images.Count,
+                ["attached_files"] = new JsonArray(files.Select(f => (JsonNode?)f.Filename).ToArray()),
             });
         }
         return """

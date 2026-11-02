@@ -44,13 +44,66 @@ import { SessionStore, ChatSession, ChatMsg, StoreChange } from './sessions';
 
 interface ToolCall { name: string; args: Record<string, unknown>; }
 type ChatContent = string | Array<Record<string, unknown>>;
-interface PendingAttachment { name: string; size: number; kind: 'image' | 'text' | 'video' | 'file'; kindLabel: string; dataUrl?: string; text?: string; note?: string; }
+interface PendingAttachment { name: string; size: number; kind: 'image' | 'text' | 'video' | 'file'; kindLabel: string; dataUrl?: string; text?: string; note?: string; mime?: string; }
+// File đính kèm gửi nguyên qua gateway (tool send_file / đính kèm
+// tay / kéo thả): filename + mime + data URL, đúng dạng gateway
+// parse ở Prompt.ContentToText (type "file").
+interface ToolFilePart { filename: string; mime: string; dataUrl: string; }
 
 // Danh sách đuôi dùng chung cho mọi đường đính kèm (v0.8.12): hộp chọn
 // file, kéo thả theo đường dẫn và kéo thả theo nội dung trong bộ nhớ đều
 // phân loại bằng đúng ba danh sách này, để không lệch nhau theo đường đi.
 const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
 const VIDEO_EXTS = ['.mp4', '.mov', '.webm', '.avi', '.mkv'];
+// v0.8.20: giới hạn file gửi nguyên, theo giới hạn của web muse.ai.
+// 25 MB là 25.000.000 byte thập phân (không phải 25 MiB), tối đa
+// 10 file mỗi lượt gửi. Vượt thì báo lỗi rõ, không bịa nội dung.
+export const MAX_FILE_BYTES = 25_000_000;
+export const MAX_FILES_PER_TURN = 10;
+
+// Mime theo đuôi file cho file gửi nguyên (gateway nhận mime thật
+// để web hiển thị đúng loại; đuôi lạ thì octet-stream, web tự xử).
+// Hàm thuần để test trực tiếp từ out/extension.js.
+export function mimeForFile(name: string): string {
+  const ext = path.extname(name).toLowerCase();
+  switch (ext) {
+    case '.mp4': return 'video/mp4';
+    case '.mov': return 'video/quicktime';
+    case '.webm': return 'video/webm';
+    case '.avi': return 'video/x-msvideo';
+    case '.mkv': return 'video/x-matroska';
+    case '.mp3': return 'audio/mpeg';
+    case '.wav': return 'audio/wav';
+    case '.ogg': return 'audio/ogg';
+    case '.m4a': return 'audio/mp4';
+    case '.pdf': return 'application/pdf';
+    case '.zip': return 'application/zip';
+    case '.doc': return 'application/msword';
+    case '.docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    case '.xls': return 'application/vnd.ms-excel';
+    case '.xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    case '.ppt': return 'application/vnd.ms-powerpoint';
+    case '.pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    case '.txt': return 'text/plain';
+    case '.json': return 'application/json';
+    case '.png': return 'image/png';
+    case '.jpg': case '.jpeg': return 'image/jpeg';
+    case '.webp': return 'image/webp';
+    case '.gif': return 'image/gif';
+    default: return 'application/octet-stream';
+  }
+}
+
+// Kiểm tra giới hạn file gửi nguyên trước khi đọc bytes: trả null
+// nếu được gửi, ngược lại trả thông báo lỗi tiếng Việt để caller
+// báo đúng câu đó (không bịa, không gửi lén file đã cắt).
+// Hàm thuần để test trực tiếp từ out/extension.js.
+export function checkFileAttachmentLimit(size: number, currentFileCount: number): string | null {
+  if (size <= 0) { return 'Tệp rỗng, không gửi được.'; }
+  if (size > MAX_FILE_BYTES) { return `Tệp vượt quá tối đa 25 MB (giới hạn của web).`; }
+  if (currentFileCount >= MAX_FILES_PER_TURN) { return `Đã đủ tối đa 10 file mỗi lượt gửi.`; }
+  return null;
+}
 const TEXT_EXTS = ['.txt', '.md', '.markdown', '.json', '.jsonc', '.csv', '.xml', '.html', '.htm', '.css', '.js', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.cs', '.java', '.c', '.h', '.cpp', '.go', '.rs', '.rb', '.php', '.sql', '.log', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.sh', '.ps1', '.bat'];
 
 // Ước lượng số byte giải mã của một data URL base64 (v0.8.12, hàm thuần
@@ -74,7 +127,7 @@ export function decodeDataUrlBytes(dataUrl: string): number {
 // Hàm thuần đứng sau decodeDataUrlBytes, được addDroppedFileAttachment
 // gọi (xem comment ở đó). Trả PendingAttachment; ném lỗi chỉ cho ảnh
 // rỗng/quá lớn.
-export function buildDroppedAttachment(file: { name?: unknown; size?: unknown; dataUrl?: unknown; text?: unknown }): PendingAttachment {
+export function buildDroppedAttachment(file: { name?: unknown; size?: unknown; dataUrl?: unknown; text?: unknown; type?: unknown; tooLarge?: unknown }): PendingAttachment {
   const name = typeof file.name === 'string' && file.name ? file.name : 'tệp';
   const size = typeof file.size === 'number' && file.size >= 0 ? file.size : 0;
   const ext = path.extname(name).toLowerCase();
@@ -86,15 +139,34 @@ export function buildDroppedAttachment(file: { name?: unknown; size?: unknown; d
     }
     return { name, size, kind: 'image', kindLabel: 'Ảnh', dataUrl };
   }
-  if (VIDEO_EXTS.includes(ext)) {
-    return { name, size, kind: 'file', kindLabel: 'Video', note: `Video ${name} (${Math.round(size / 1024)} KiB) chưa gửi được dưới dạng video vì gateway chat chỉ nhận ảnh và text, và video kéo thả từ ngoài hệ điều hành không trích được khung hình bằng ffmpeg. Hãy mô tả nội dung video hoặc đính kèm ảnh chụp khung hình thay thế.` };
+  // v0.8.20: webview báo tooLarge khi file vượt 25 MB (không đọc
+  // bytes vào bộ nhớ nữa) — thành lỗi rõ, không tạo note giả vờ.
+  if (file.tooLarge === true) {
+    throw new Error(`Tệp ${name} vượt quá tối đa 25 MB (giới hạn của web).`);
+  }
+  // v0.8.20: video và file generic kéo thả từ hệ điều hành giờ
+  // gửi nguyên qua file part (webview đọc đủ bytes dạng dataUrl),
+  // không còn note thay thế như trước. Mime ưu tiên type trình
+  // duyệt báo, thiếu thì suy từ đuôi file.
+  if (typeof file.dataUrl === 'string' && file.dataUrl.startsWith('data:')) {
+    const decodedBytes = decodeDataUrlBytes(file.dataUrl);
+    if (decodedBytes === 0) {
+      throw new Error(`Không đọc được nội dung tệp ${name}.`);
+    }
+    if (decodedBytes > MAX_FILE_BYTES) {
+      throw new Error(`Tệp ${name} vượt quá tối đa 25 MB (giới hạn của web).`);
+    }
+    const mime = typeof file.type === 'string' && file.type ? file.type : mimeForFile(name);
+    return { name, size, kind: 'file', kindLabel: VIDEO_EXTS.includes(ext) ? 'Video' : 'Tệp', dataUrl: file.dataUrl, mime };
   }
   if (typeof file.text === 'string') {
     const limit = 500 * 1024;
     const text = file.text.length > limit ? file.text.slice(0, limit) + `\n[Đã cắt nội dung ở 500 KiB, tệp gốc ${Math.round(size / 1024)} KiB.]` : file.text;
     return { name, size, kind: 'text', kindLabel: 'Văn bản', text };
   }
-  return { name, size, kind: 'file', kindLabel: 'Tệp', note: `Tệp ${name} (${Math.round(size / 1024)} KiB) là tệp nhị phân nên gateway chat không đọc được nội dung; chỉ gửi kèm tên và dung lượng để bạn mô tả thêm.` };
+  // Không dataUrl cũng không text nghĩa là webview đọc hỏng — báo
+  // lỗi rõ thay vì tạo note chỉ có tên/dung lượng như trước.
+  throw new Error(`Không đọc được nội dung tệp ${name}.`);
 }
 
 // v0.8.18: hàm thuần cho 2 tool media mới, để test đơn vị trực tiếp
@@ -124,15 +196,18 @@ export function parseVideoTimes(raw: unknown): { times: number[] } | { error: st
 }
 
 // toolResultContent: dựng nội dung message TOOL_RESULT cho một call.
-// Có ảnh thì trả parts [text, ...image_url], không ảnh thì trả text
-// thuần — đúng dạng gateway đã gom image_url từ mọi message (xem
-// Prompt.Flatten), tái dùng cho cả read_image, read_video_frames và
-// ảnh screenshot computer_*.
-export function toolResultContent(callName: string, result: string, images: string[]): ChatContent {
-  if (images.length === 0) { return `TOOL_RESULT ${callName}:\n${result}`; }
+// Có ảnh thì trả parts [text, ...image_url], có file thì thêm
+// ...file part {type:"file", file:{filename, mime, data_url}} —
+// đúng dạng gateway parse ở Prompt.ContentToText (xem
+// Prompt.Flatten); không ảnh/file thì trả text thuần. Tái dùng
+// cho cả read_image, read_video_frames, send_file và ảnh
+// screenshot computer_*.
+export function toolResultContent(callName: string, result: string, images: string[], files: ToolFilePart[] = []): ChatContent {
+  if (images.length === 0 && files.length === 0) { return `TOOL_RESULT ${callName}:\n${result}`; }
   return [
     { type: 'text', text: `TOOL_RESULT ${callName}:\n${result}` },
     ...images.map((url) => ({ type: 'image_url', image_url: { url } })),
+    ...files.map((f) => ({ type: 'file', file: { filename: f.filename, mime: f.mime, data_url: f.dataUrl } })),
   ];
 }
 
@@ -168,10 +243,12 @@ const SYSTEM_PROMPT = [
   'tìm). Với câu chào hỏi, câu hỏi chung, trò chuyện thông thường thì trả',
   "lời trực tiếp, KHÔNG quét workspace trước, KHÔNG gọi tool để 'tìm hiểu",
   'ngữ cảnh khi user chưa yêu cầu. Không tự nhận đã làm gì khi chưa có kết',
-  'quả công cụ trả về, không bịa nội dung tệp. Với ảnh/video cũng vậy:',
-  'chỉ gọi read_image/read_video_frames khi user yêu cầu kiểm tra media',
-  'trong workspace, không tự quét media toàn workspace khi chưa được yêu',
-  'cầu; khung hình video chỉ là mẫu, không bao giờ nhận đó là toàn bộ video.',
+  'quả công cụ trả về, không bịa nội dung tệp. Với ảnh/video/file cũng vậy:',
+  'chỉ gọi read_image/read_video_frames/send_file khi user yêu cầu kiểm tra',
+  'media/file trong workspace, không tự quét media toàn workspace khi chưa',
+  'được yêu cầu; khung hình video chỉ là mẫu, không bao giờ nhận đó là',
+  'toàn bộ video; web nhận được file không đồng nghĩa bạn xử lý được nội',
+  'dung video bên trong — không xem được thì nói rõ, đừng bịa.',
   '',
   'CÔNG CỤ (gửi đúng một khối JSON trong một code fence ```json):',
   '```json',
@@ -186,7 +263,11 @@ const SYSTEM_PROMPT = [
   'tối đa 20 MiB/ảnh, ảnh gửi kèm kết quả), read_video_frames {path,',
   'times?} (video trong workspace, trích tối đa 4 khung hình tại các mốc',
   'giây trong times, mặc định [1], cần ffmpeg; chỉ gửi khung hình mẫu,',
-  'không gửi video gốc),',
+  'không gửi video gốc), send_file {path} (gửi NGUYÊN file trong workspace',
+  'lên web kèm kết quả: video nguyên file, pdf, zip, audio, file generic;',
+  'mỗi file tối đa 25 MB (giới hạn của web), tối đa 10 file mỗi lượt gửi;',
+  'dùng send_file khi user muốn gửi nguyên file, dùng read_video_frames',
+  'khi chỉ cần xem nhanh vài khung hình mẫu),',
   'write_file {path, content}, edit_file {path, old_text, new_text} hoặc',
   'edit_file {path, edits:[{old_text, new_text}]}, run_command {command,',
   'workdir, shell, timeout_seconds} hoặc run_command {command, background:true,',
@@ -230,7 +311,7 @@ const SYSTEM_PROMPT_CHAT_ONLY = [
   '"Muse: Bật/Tắt tool cục bộ" rồi mới làm được việc đó.',
 ].join('\n');
 
-const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'read_files', 'search_files', 'git_status', 'git_diff', 'read_image', 'read_video_frames']);
+const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'read_files', 'search_files', 'git_status', 'git_diff', 'read_image', 'read_video_frames', 'send_file']);
 const SKIP_DIRS = new Set(['bin', 'obj', 'node_modules', '.git', '.vs', 'dist']);
 const ALIASES: Record<string, string> = {
   readFile: 'read_file', writeFile: 'write_file', editFile: 'edit_file',
@@ -351,6 +432,12 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // mỗi call và kèm đúng các ảnh này vào message TOOL_RESULT của
   // chính call đó; các tool khác để rỗng nên message vẫn text thuần.
   private lastToolImages: string[] = [];
+  // v0.8.20: file do tool send_file vừa trả (1 file/call) và ngân
+  // sách file của lượt chat hiện tại (file đính kèm tay + file tool
+  // cộng lại, tối đa 10 file/lượt). Vòng lặp run() reset cả hai
+  // trước mỗi call / mỗi lượt như lastToolImages.
+  private lastToolFiles: ToolFilePart[] = [];
+  private turnFileCount = 0;
   private lastStreamed = false;
   // Cache tài khoản mới nhất để tính trạng thái session và backfill.
   // Chỉ chứa các trường an toàn từ Account.Public() (không cookie).
@@ -1533,7 +1620,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     else if (m.type === 'dropUris') {
       // Kéo thả từ Explorer của VS Code: webview gửi danh sách URI
       // dạng text/uri-list; extension xử lý từng file bằng đúng hàm
-      // theo đường dẫn (kể cả trích khung hình video bằng ffmpeg),
+      // theo đường dẫn (video/file generic gửi nguyên từ 0.8.20),
       // file nào lỗi thì hàm đó báo riêng và vẫn tiếp tục file khác.
       const uris = Array.isArray(m.uris) ? m.uris.filter((u): u is string => typeof u === 'string' && u.length > 0) : [];
       void (async () => {
@@ -1652,21 +1739,32 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // text cắt ở 500 KiB kèm ghi chú, nhị phân chỉ gửi note tên +
   // dung lượng. Lỗi của file này chỉ báo riêng file đó, không chặn
   // file khác; thành công thì gửi message 'attached' để hiện chip riêng.
+  // v0.8.20: dựng attachment file gửi nguyên từ đĩa (video và
+  // nhị phân generic). Kiểm tra giới hạn 25 MB/rỗng trước khi đọc
+  // bytes; giới hạn 10 file/lượt do pushAttachment chặn sau đó.
+  private buildFileAttachmentFromDisk(filePath: string, name: string, size: number, kindLabel: string): PendingAttachment {
+    const currentFiles = this.pendingAttachments.filter((a) => a.kind === 'file' && a.dataUrl).length;
+    const limitError = checkFileAttachmentLimit(size, currentFiles);
+    if (limitError) { throw new Error(limitError); }
+    const buf = fs.readFileSync(filePath);
+    const mime = mimeForFile(name);
+    return { name, size, kind: 'file', kindLabel, dataUrl: `data:${mime};base64,${buf.toString('base64')}`, mime };
+  }
+
   private async processAttachmentFile(filePath: string): Promise<void> {
     const name = path.basename(filePath);
     try {
       const size = fs.statSync(filePath).size;
+      if (size <= 0) { throw new Error('Tệp rỗng, không gửi được.'); }
       const ext = path.extname(filePath).toLowerCase();
       if (IMAGE_EXTS.includes(ext)) {
         const dataUrl = dataUrlOfImageFile(filePath);
-        this.pendingAttachments.push({ name, size, kind: 'image', kindLabel: 'Ảnh', dataUrl });
+        this.pushAttachment({ name, size, kind: 'image', kindLabel: 'Ảnh', dataUrl });
       } else if (VIDEO_EXTS.includes(ext)) {
-        const frame = await this.extractVideoFrame(filePath);
-        if (frame) {
-          this.pendingAttachments.push({ name, size, kind: 'video', kindLabel: 'Video (khung hình)', dataUrl: frame, note: `Đây là khung hình ở giây thứ 1 trích từ video ${name}. Gateway chat chỉ nhận ảnh và text nên video gốc không được gửi dưới dạng video.` });
-        } else {
-          this.pendingAttachments.push({ name, size, kind: 'file', kindLabel: 'Video', note: `Video ${name} (${Math.round(size / 1024)} KiB) chưa gửi được dưới dạng video vì gateway chat chỉ nhận ảnh và text, và máy này không có ffmpeg để trích khung hình. Hãy mô tả nội dung video hoặc đính kèm ảnh chụp khung hình thay thế.` });
-        }
+        // v0.8.20: video đính kèm tay gửi nguyên file, không còn
+        // trích khung ffmpeg như trước (khung mẫu vẫn còn ở tool
+        // read_video_frames cho model cần xem nhanh).
+        this.pushAttachment(this.buildFileAttachmentFromDisk(filePath, name, size, 'Video'));
       } else {
         const buf = fs.readFileSync(filePath);
         const looksText = TEXT_EXTS.includes(ext) || (buf.length > 0 && !buf.includes(0));
@@ -1674,13 +1772,13 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           const full = buf.toString('utf8');
           const limit = 500 * 1024;
           const text = full.length > limit ? full.slice(0, limit) + `\n[Đã cắt nội dung ở 500 KiB, tệp gốc ${Math.round(size / 1024)} KiB.]` : full;
-          this.pendingAttachments.push({ name, size, kind: 'text', kindLabel: 'Văn bản', text });
+          this.pushAttachment({ name, size, kind: 'text', kindLabel: 'Văn bản', text });
         } else {
-          this.pendingAttachments.push({ name, size, kind: 'file', kindLabel: 'Tệp', note: `Tệp ${name} (${Math.round(size / 1024)} KiB) là tệp nhị phân nên gateway chat không đọc được nội dung; chỉ gửi kèm tên và dung lượng để bạn mô tả thêm.` });
+          // v0.8.20: nhị phân generic gửi nguyên, không còn note
+          // chỉ tên/dung lượng như trước.
+          this.pushAttachment(this.buildFileAttachmentFromDisk(filePath, name, size, 'Tệp'));
         }
       }
-      const last = this.pendingAttachments[this.pendingAttachments.length - 1];
-      this.post('attached', { name, size, kindLabel: last.kindLabel });
     } catch (e) {
       this.post('error', { text: `Không đính kèm được tệp ${name}: ${e instanceof Error ? e.message : String(e)}` });
     }
@@ -1688,32 +1786,46 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
 
   // Xây MỘT attachment từ file kéo thả trong bộ nhớ (v0.8.12, hàm thuần
   // để test đơn vị trực tiếp từ out/extension.js): webview đã đọc sẵn
-  // dataUrl cho ảnh hoặc text cho tệp văn bản; hàm này áp cùng giới hạn
-  // cũ — ảnh kiểm tra dung lượng giải mã tối đa 20 MiB (MAX_IMAGE_BYTES,
-  // giống dataUrlOfImageFile) và khác rỗng, text cắt ở 500 KiB kèm ghi
-  // chú giống đường theo đường dẫn, video và nhị phân qua đường này
-  // KHÔNG trích được khung hình bằng ffmpeg nên chỉ tạo note như đường
-  // video không có ffmpeg hiện tại, tuyệt đối không bịa khung hình.
-  // Ném lỗi cho ảnh rỗng/quá lớn để caller báo riêng file đó.
-  private addDroppedFileAttachment(file: { name?: unknown; size?: unknown; dataUrl?: unknown; text?: unknown }): void {
+  // dataUrl cho ảnh/file hoặc text cho tệp văn bản; hàm này áp giới
+  // hạn — ảnh kiểm tra dung lượng giải mã tối đa 20 MiB
+  // (MAX_IMAGE_BYTES, giống dataUrlOfImageFile) và khác rỗng, file
+  // generic tối đa 25 MB (giới hạn của web), text cắt ở 500 KiB kèm
+  // ghi chú giống đường theo đường dẫn. v0.8.20: video và nhị phân
+  // qua đường này gửi nguyên dạng file part, không còn note thay
+  // thế; đọc hỏng hoặc vượt giới hạn thì ném lỗi để caller báo
+  // riêng file đó, tuyệt đối không bịa nội dung.
+  // v0.8.20: đẩy attachment vào hàng chờ, chặn file thứ 11 trở đi
+  // trong cùng một lượt (tối đa 10 file/lượt) bằng lỗi rõ thay vì
+  // nhận rồi lặng lẽ bỏ. Ảnh/văn bản không tính vào giới hạn này.
+  private pushAttachment(att: PendingAttachment): boolean {
+    if (att.kind === 'file' && att.dataUrl) {
+      const currentFiles = this.pendingAttachments.filter((a) => a.kind === 'file' && a.dataUrl).length;
+      if (currentFiles >= MAX_FILES_PER_TURN) {
+        this.post('error', { text: `Không đính kèm được tệp ${att.name}: đã đủ tối đa 10 file mỗi lượt gửi.` });
+        return false;
+      }
+    }
+    this.pendingAttachments.push(att);
+    this.post('attached', { name: att.name, size: att.size, kindLabel: att.kindLabel });
+    return true;
+  }
+
+  private addDroppedFileAttachment(file: { name?: unknown; size?: unknown; dataUrl?: unknown; text?: unknown; type?: unknown; tooLarge?: unknown }): void {
     try {
       const att = buildDroppedAttachment(file);
-      this.pendingAttachments.push(att);
-      this.post('attached', { name: att.name, size: att.size, kindLabel: att.kindLabel });
+      this.pushAttachment(att);
     } catch (e) {
       const name = typeof file.name === 'string' && file.name ? file.name : 'tệp';
       this.post('error', { text: `Không đính kèm được tệp ${name}: ${e instanceof Error ? e.message : String(e)}` });
     }
   }
 
-  private extractVideoFrame(filePath: string): Promise<string | undefined> {
-    return this.extractVideoFrameAt(filePath, 1);
-  }
-
-  // v0.8.18: trích 1 khung hình tại mốc giây t, dùng chung cho đính
-  // kèm tay ở giây 1 và tool read_video_frames. ffmpeg vắng hoặc lỗi
-  // thì trả undefined, caller ghi chú thành thật, tuyệt đối không bịa
-  // khung hình. File tạm luôn được dọn sau khi đọc.
+  // v0.8.18: trích 1 khung hình tại mốc giây t, dùng cho tool
+  // read_video_frames (đường đính kèm tay từ 0.8.20 gửi nguyên
+  // file nên không dùng wrapper giây 1 này nữa, đã xóa).
+  // ffmpeg vắng hoặc lỗi thì trả undefined, caller ghi chú thành
+  // thật, tuyệt đối không bịa khung hình. File tạm luôn được dọn
+  // sau khi đọc.
   private extractVideoFrameAt(filePath: string, t: number): Promise<string | undefined> {
     return new Promise((resolve) => {
       const tmp = path.join(os.tmpdir(), `muse-frame-${crypto.randomUUID()}.png`);
@@ -1835,12 +1947,20 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       this.post('message', { role: 'user', text: attachments.length > 0 ? `${userText}\n[Đã đính kèm: ${attachments.map((a) => `${a.name} (${a.kindLabel})`).join(', ')}]` : userText });
       const textBlocks = [userText,
         ...attachments.filter((a) => a.kind === 'text').map((a) => `[Nội dung tệp đính kèm: ${a.name}]\n${a.text}`),
-        ...attachments.filter((a) => a.note).map((a) => a.note as string)];
+        ...attachments.filter((a) => a.note).map((a) => a.note as string),
+        // v0.8.20: file gửi nguyên có part riêng; text vẫn nhắc tên
+        // + dung lượng để model biết có file kèm theo message này.
+        ...attachments.filter((a) => a.kind === 'file' && a.dataUrl).map((a) => `[Tệp đính kèm: ${a.name} (${a.size} byte)]`)];
       const combinedText = textBlocks.filter((t) => t.length > 0).join('\n\n');
-      const imageParts = attachments.filter((a) => a.dataUrl).map((a) => ({ type: 'image_url', image_url: { url: a.dataUrl as string } }));
-      const userContent: ChatContent = imageParts.length > 0
-        ? [{ type: 'text', text: combinedText }, ...imageParts]
+      const imageParts = attachments.filter((a) => a.kind === 'image' && a.dataUrl).map((a) => ({ type: 'image_url', image_url: { url: a.dataUrl as string } }));
+      const fileParts = attachments.filter((a) => a.kind === 'file' && a.dataUrl).map((a) => ({ type: 'file', file: { filename: a.name, mime: a.mime || mimeForFile(a.name), data_url: a.dataUrl as string } }));
+      const userContent: ChatContent = (imageParts.length > 0 || fileParts.length > 0)
+        ? [{ type: 'text', text: combinedText }, ...imageParts, ...fileParts]
         : combinedText;
+      // v0.8.20: ngân sách file của lượt này bắt đầu từ số file
+      // đính kèm tay (ảnh/văn bản không tính), tool send_file
+      // cộng thêm và bị chặn khi đủ 10.
+      this.turnFileCount = attachments.filter((a) => a.kind === 'file' && a.dataUrl).length;
       const request: ChatMsg[] = [{ role: 'system', content: conf.localTools ? SYSTEM_PROMPT : SYSTEM_PROMPT_CHAT_ONLY }, ...this.history, { role: 'user', content: userContent }];
       let malformed = 0;
       for (let step = 0; step < conf.maxSteps; step++) {
@@ -1905,16 +2025,19 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           this.post('tool', { name: call.name, detail: describe(call) });
           this.lastComputerImage = undefined;
           this.lastToolImages = [];
+          this.lastToolFiles = [];
           const result = await this.execute(call, root, conf, signal);
           // v0.8.18, tổng quát hóa: tool nào trả về ảnh thì message
           // TOOL_RESULT của chính call đó kèm đúng các image_url tương
           // ứng (read_image: 1 ảnh, read_video_frames: tối đa 4 khung);
           // tool computer_* giữ đường lastComputerImage cũ; các tool
           // khác không có ảnh nên message vẫn text thuần như trước.
+          // v0.8.20: tương tự cho file (send_file: 1 file/call) qua
+          // file part, không phải image_url hay text.
           const resultImages = this.lastToolImages.length > 0
             ? this.lastToolImages
             : (call.name.startsWith('computer_') && this.lastComputerImage ? [this.lastComputerImage] : []);
-          request.push({ role: 'user', content: toolResultContent(call.name, result, resultImages) });
+          request.push({ role: 'user', content: toolResultContent(call.name, result, resultImages, this.lastToolFiles) });
           this.post('toolResult', { name: call.name, detail: truncate(result, 500) });
         }
       }
@@ -2158,6 +2281,30 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           this.lastToolImages = frames;
           return `Đã gửi ${frames.length} khung hình mẫu trích từ video ${rel} tại các mốc giây ${done.join(', ')} kèm theo message này. Đây CHỈ là các khung hình mẫu, KHÔNG phải toàn bộ video — đừng kết luận về những đoạn không có trong khung hình.`;
         }
+        case 'send_file': {
+          // v0.8.20: gửi nguyên file trong workspace lên web qua
+          // file part (vòng lặp run() dựng parts từ lastToolFiles).
+          // Ngoài workspace thì resolve() ném lỗi qua catch cuối
+          // execute thành lỗi text; rỗng/quá 25 MB/đủ 10 file thì
+          // lỗi text rõ, tuyệt đối không cắt file hay giả vờ đã gửi.
+          const rel = str(call.args.path);
+          if (!rel) { return 'Lỗi: send_file cần path.'; }
+          const target = this.resolve(root, rel);
+          if (!fs.existsSync(target)) { return `Lỗi: tệp không tồn tại: ${rel}`; }
+          const st = fs.statSync(target);
+          if (!st.isFile()) { return `Lỗi: send_file chỉ gửi được tệp, không phải thư mục: ${rel}`; }
+          const limitError = checkFileAttachmentLimit(st.size, this.turnFileCount);
+          if (limitError) { return `Lỗi: ${limitError}`; }
+          const buf = fs.readFileSync(target);
+          const mime = mimeForFile(rel);
+          const filename = path.basename(target);
+          this.lastToolFiles = [{ filename, mime, dataUrl: `data:${mime};base64,${buf.toString('base64')}` }];
+          this.turnFileCount++;
+          const videoNote = VIDEO_EXTS.includes(path.extname(rel).toLowerCase())
+            ? ' Lưu ý: web đã nhận file không đồng nghĩa bạn xem được nội dung video — nếu bạn không truy cập được video thì hãy nói rõ và đề nghị dùng khung hình mẫu thay thế.'
+            : '';
+          return `Đã gửi nguyên file ${rel} kèm theo message này (tên ${filename}, ${st.size} byte, ${mime}). Hãy dùng nội dung file đính kèm để kiểm tra, không suy đoán nội dung file từ tên file.${videoNote}`;
+        }
         case 'write_file': {
           const rel = str(call.args.path);
           const content = str(call.args.content);
@@ -2340,6 +2487,7 @@ function describe(call: ToolCall): string {
     case 'read_file': case 'read_files': return `Đọc ${p || String(call.args.paths || '')}`;
     case 'read_image': return `Đọc ảnh ${p}`;
     case 'read_video_frames': return `Trích khung hình video ${p}`;
+    case 'send_file': return `Gửi nguyên file ${p}`;
     case 'write_file': return `Ghi ${p}`;
     case 'edit_file': return `Sửa ${p}`;
     case 'search_files': return `Tìm "${str(call.args.query)}"`;

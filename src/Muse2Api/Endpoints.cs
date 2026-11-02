@@ -7,7 +7,7 @@ namespace Muse2Api;
 
 public static class Endpoints
 {
-    public const string Version = "0.8.19";
+    public const string Version = "0.8.20";
 
     public static void Map(WebApplication app, AppState s)
     {
@@ -163,9 +163,14 @@ public static class Endpoints
         if (msgObjs.Count != messages.Count)
             throw MuseException.Invalid("messages must be objects");
         var flat = Prompt.Flatten(msgObjs);
-        if (string.IsNullOrEmpty(flat.Text) && flat.Images.Count == 0)
-            throw MuseException.Invalid("messages contain no text or images");
+        if (string.IsNullOrEmpty(flat.Text) && flat.Images.Count == 0 && flat.Files.Count == 0)
+            throw MuseException.Invalid("messages contain no text, images or files");
         var images = await JsonHelp.LoadImageRefs(flat.Images, ctx.RequestAborted);
+        // v0.8.20: file gửi nguyên (video, pdf, ...) qua cùng đường
+        // Attach như ảnh; giới hạn số file/lượt kiểm tra ở đây để
+        // lỗi trả về trước khi chạm tới browser.
+        var files = JsonHelp.LoadFileRefs(flat.Files);
+        if (files.Count > JsonHelp.MaxFilesPerRequest) throw MuseException.Invalid("at most 10 files per request");
         var localTools = JsonHelp.Bool(body["_muse_local_tools"]);
         // v0.8.15 (OpenAI tools mode, e.g. Kilo Code): only when the request
         // declares tools AND the extension's own local-tools flow is off.
@@ -185,6 +190,7 @@ public static class Endpoints
             // Gateway cũ bỏ qua trường lạ này; gateway mới ép đúng tài
             // khoản đó (xem Gateway.ChatStream + AcquirePinnedAsync).
             AccountId: JsonHelp.Str(body["account_id"]),
+            Files: files,
             // v0.8.16: để BrowserDriver ghi log web_prompt đúng chế độ
             // (normal | local | openai-tools) thay vì phải suy từ prompt.
             OpenAiTools: toolsMode);
@@ -428,12 +434,17 @@ public static class Endpoints
         ctx.Items["model"] = modelName ?? spec.Id;
         var messages = ResponsesToMessages(body);
         var flat = Prompt.Flatten(messages);
-        if (string.IsNullOrEmpty(flat.Text) && flat.Images.Count == 0)
-            throw MuseException.Invalid("input contains no text or images");
+        if (string.IsNullOrEmpty(flat.Text) && flat.Images.Count == 0 && flat.Files.Count == 0)
+            throw MuseException.Invalid("input contains no text, images or files");
         var images = await JsonHelp.LoadImageRefs(flat.Images, ctx.RequestAborted);
+        // v0.8.20: Responses giữ nguyên content parts (DeepClone) nên
+        // file part cũng về được đây; chở giống Chat để không rơi mất.
+        var files = JsonHelp.LoadFileRefs(flat.Files);
+        if (files.Count > JsonHelp.MaxFilesPerRequest) throw MuseException.Invalid("at most 10 files per request");
         var req = new ChatRequest(flat.Text, spec.Id, images,
             JsonHelp.Str(body["user"]), Prompt.MessageTurns(messages), ctx.RequestAborted,
-            AccountId: JsonHelp.Str(body["account_id"]));
+            AccountId: JsonHelp.Str(body["account_id"]),
+            Files: files);
         var respId = "resp_" + Guid.NewGuid().ToString("N")[..24];
         var msgId = "msg_" + Guid.NewGuid().ToString("N")[..24];
         var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();

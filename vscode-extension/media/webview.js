@@ -296,41 +296,62 @@
     setButtonLoading(attachBtnEl, true, 'attach');
     vscode.postMessage({ type: 'attach' });
   });
-  // Kéo thả file vào ô soạn thảo (v0.8.12): vùng nhận là khung soạn
-  // thảo (.composer: ô nhập + hàng nút) và danh sách chip đính kèm
-  // (#attachments). preventDefault ở dragover/drop là bắt buộc, nếu
-  // không trình duyệt sẽ mở file thay vì giao cho extension. Khi đang
-  // kéo qua thì thêm class drag-over (viền focusBorder, nền nhẹ) và gỡ
-  // khi rời/thả; bộ đếm dragenter/dragleave tránh nhấp nháy khi rê qua
-  // các phần tử con bên trong vùng. Thứ tự ưu tiên khi thả: (a) nếu
-  // kéo từ Explorer của VS Code mà đọc được danh sách URI dạng
-  // text/uri-list thì gửi URI về extension để xử lý theo đường dẫn
-  // (giữ được trích khung hình video bằng ffmpeg); (b) nếu không thì
-  // đọc File qua File API trong webview rồi gửi nội dung về extension
-  // (ảnh dạng dataUrl, văn bản dạng text, video/nhị phân không gửi
-  // nội dung để extension chỉ tạo note). Lưu ý chưa kiểm chứng được
-  // trên VS Code thật: webview có thể chặn hoàn toàn drop từ hệ điều
-  // hành, khi đó chỉ còn kéo từ Explorer + hộp chọn nhiều file là
-  // đường gửi nhiều file hoạt động được (xem README).
+  // Kéo thả file vào ô soạn thảo (v0.8.12, mở rộng v0.8.20): vùng
+  // nhận là khung soạn thảo (.composer: ô nhập + hàng nút) và danh
+  // sách chip đính kèm (#attachments). preventDefault ở dragover/drop
+  // là bắt buộc, nếu không trình duyệt sẽ mở file thay vì giao cho
+  // extension. Khi đang kéo qua thì thêm class drag-over (viền
+  // focusBorder, nền nhẹ) và gỡ khi rời/thả; bộ đếm dragenter/
+  // dragleave tránh nhấp nháy khi rê qua các phần tử con bên trong
+  // vùng. Thứ tự ưu tiên khi thả: (a) nếu kéo từ Explorer của VS Code
+  // mà đọc được danh sách URI dạng text/uri-list thì gửi URI về
+  // extension để xử lý theo đường dẫn; (b) nếu không thì đọc File
+  // qua File API trong webview rồi gửi nội dung về extension: ảnh
+  // dạng dataUrl, văn bản dạng text (cắt 500 KiB phía host), còn
+  // video và mọi file khác đều đọc đủ bytes dạng dataUrl để host
+  // gửi nguyên file (từ 0.8.20, không còn note thay thế). File
+  // vượt 25 MB thì không đọc bytes nữa mà gửi cờ tooLarge để host
+  // báo lỗi rõ. Lưu ý chưa kiểm chứng được trên VS Code thật:
+  // webview có thể chặn hoàn toàn drop từ hệ điều hành ở một số
+  // trường hợp, khi đó chỉ còn kéo từ Explorer + hộp chọn nhiều
+  // file là đường gửi nhiều file hoạt động được (xem README).
   function readDroppedFile(file) {
     return new Promise(function (resolve) {
       var lower = (file.name || '').toLowerCase();
-      var isImage = (file.type || '').indexOf('image/') === 0
+      var type = file.type || '';
+      // v0.8.20: giới hạn 25 MB áp cho mọi file kéo thả (kể cả text,
+      // để khỏi đọc file khổng lồ vào bộ nhớ rồi mới cắt).
+      if (file.size > 25000000) {
+        resolve({ name: file.name, size: file.size, tooLarge: true });
+        return;
+      }
+      var isImage = type.indexOf('image/') === 0
         || /\.png$|\.jpg$|\.jpeg$|\.webp$|\.gif$/.test(lower);
-      var isVideo = (file.type || '').indexOf('video/') === 0
-        || /\.mp4$|\.mov$|\.webm$|\.avi$|\.mkv$/.test(lower);
       if (isImage) {
         var rd = new FileReader();
-        rd.onload = function () { resolve({ name: file.name, size: file.size, dataUrl: rd.result }); };
-        rd.onerror = function () { resolve({ name: file.name, size: file.size }); };
+        rd.onload = function () { resolve({ name: file.name, size: file.size, type: type, dataUrl: rd.result }); };
+        rd.onerror = function () { resolve({ name: file.name, size: file.size, type: type }); };
         rd.readAsDataURL(file);
         return;
       }
-      if (isVideo) { resolve({ name: file.name, size: file.size }); return; }
-      var rt = new FileReader();
-      rt.onload = function () { resolve({ name: file.name, size: file.size, text: rt.result }); };
-      rt.onerror = function () { resolve({ name: file.name, size: file.size }); };
-      rt.readAsText(file);
+      var textExts = ['.txt', '.md', '.markdown', '.json', '.jsonc', '.csv', '.xml', '.html', '.htm', '.css', '.js', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.cs', '.java', '.c', '.h', '.cpp', '.go', '.rs', '.rb', '.php', '.sql', '.log', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.sh', '.ps1', '.bat'];
+      var isText = type.indexOf('text/') === 0
+        || type === 'application/json' || type === 'application/xml'
+        || textExts.some(function (ext) { return lower.slice(-ext.length) === ext; });
+      if (isText) {
+        var rt = new FileReader();
+        rt.onload = function () { resolve({ name: file.name, size: file.size, type: type, text: rt.result }); };
+        rt.onerror = function () { resolve({ name: file.name, size: file.size, type: type }); };
+        rt.readAsText(file);
+        return;
+      }
+      // v0.8.20: video, audio, pdf, zip và mọi loại còn lại đều
+      // đọc đủ bytes để host gửi nguyên file, không còn trả về
+      // chỉ tên/dung lượng như trước.
+      var rf = new FileReader();
+      rf.onload = function () { resolve({ name: file.name, size: file.size, type: type, dataUrl: rf.result }); };
+      rf.onerror = function () { resolve({ name: file.name, size: file.size, type: type }); };
+      rf.readAsDataURL(file);
     });
   }
   function enableDropZone(el) {
