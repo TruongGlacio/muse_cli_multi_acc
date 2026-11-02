@@ -1,4 +1,12 @@
-# Muse cho VS Code (v0.8.21)
+# Muse cho VS Code (v0.8.22)
+
+## Mới trong v0.8.22: kéo thả file vào bất kỳ chỗ nào trong khung chat + hết im lặng khi webview không giao được file
+
+**Vấn đề cũ.** Từ 0.8.20, vùng nhận thả chỉ gắn cho 2 phần tử hẹp là khung soạn thảo (`.composer`) và danh sách chip đính kèm (`#attachments`), nên thả file vào vùng tin nhắn hay cột danh sách hội thoại đều không có handler và không xảy ra gì. Ngoài ra, khi thả mà webview không giao được gì (cả `text/uri-list` lẫn `dataTransfer.files` đều rỗng), handler cũ `return` im lặng nên user chỉ thấy "thả mà không thấy gì xảy ra", không biết là lỗi hay chưa thả trúng chỗ.
+
+**Cách sửa.** (1) Vùng nhận thả nay là toàn bộ panel: chỉ một handler duy nhất gắn ở `#layout` (phần tử bao toàn bộ nội dung webview), nên thả file vào bất kỳ chỗ nào trong khung chat cũng đi vào đúng đường xử lý cũ (ưu tiên `dropUris` từ Explorer của VS Code, sau đó `dropFiles` từ hệ điều hành qua File API). Handler cũ ở `.composer`/`#attachments` đã gỡ hẳn để tránh nhân đôi: sự kiện `drop` nổi bọt từ phần tử con lên `#layout`, giữ cả hai tầng sẽ gửi trùng 2 message cho một lần thả. Kéo qua thì vẫn có phản hồi nhìn thấy được (class `drag-over` ở cấp `#layout`, viền focusBorder + nền nhẹ). Tay kéo đổi chiều rộng cột (`#sidebarResizer`) dùng pointer, không phải HTML5 drag, nên không bị ảnh hưởng; click/chọn hội thoại cũng không bị chặn vì handler chỉ `preventDefault` ở `dragover`/`drop`. (2) Hết im lặng: thả mà cả uri-list lẫn files đều rỗng thì webview gửi message mới `dropNoFile`, host hiện bong bóng lỗi đỏ nhìn thấy được trong khung chat với nội dung: VS Code không giao được file từ thao tác thả này, hãy dùng nút Đính kèm để chọn file hoặc kéo file từ Explorer của VS Code thay thế. Không retry, không bịa thêm nguyên nhân khác.
+
+**Nói thẳng giới hạn còn lại.** Nếu trên máy thật mà webview vẫn không giao được file (trường hợp đã ghi từ 0.8.20), bản này chỉ giúp user thấy thông báo rõ thay vì im lặng, chứ không ép được webview giao file. Khi đó 2 đường gửi file vẫn hoạt động được ngay là: nút Đính kèm (hộp chọn nhiều file) và kéo file từ Explorer của VS Code vào khung chat. Giới hạn 25 MB/file và 10 file/lượt, đường `readDroppedFile`, `dropUris`, nút Đính kèm và thứ tự sắp xếp danh sách (0.8.21) đều giữ nguyên 100%.
 
 ## Mới trong v0.8.21: danh sách chọn nhanh cũng xếp hội thoại mới nhất lên đầu
 

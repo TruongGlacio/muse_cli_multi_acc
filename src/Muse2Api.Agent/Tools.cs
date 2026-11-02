@@ -83,6 +83,7 @@ public sealed partial class ToolExecutor
                 "read_files" => await ReadFilesAsync(call.Args, cancel),
                 "write_file" or "edit_file" => await ApplyPreparedAsync(prepared, cancel),
                 "search_files" => await SearchFilesAsync(call.Args, cancel),
+                "send_file" => await SendFileAsync(Str(call.Args, "path"), cancel),
                 "git_status" => await GitAsync(new[] { "status", "--short", "--branch" }, cancel),
                 "git_diff" => await GitAsync(new[] { "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "." }, cancel),
                 "run_command" when Bool(call.Args, "background") => await StartProcessAsync(call.Args, cancel),

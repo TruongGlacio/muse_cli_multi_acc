@@ -277,6 +277,7 @@ public static class Prompt
             ui_click: snapshot_id, x, y (pixel của ảnh vừa cung cấp);
             ui_toggle: element_id, state (on/off); ui_expand: element_id, expanded;
             ui_select: element_id;
+            send_file: path (gửi nguyên file trong workspace lên cuộc hội thoại web, tối đa 25 MB; khác inspect_text chỉ đọc nội dung text và khác ui_image chỉ chụp màn hình);
             ui_assert: element_id, property (name/value/toggle/enabled/selected), expected, match (equals/contains).
             UI chỉ áp dụng cho cửa sổ trong computer_scope; ui_tree sẽ xin quyền nếu chưa chọn.
             Bấm/nhập xong cần ui_assert để kiểm tra trạng thái sau thao tác.

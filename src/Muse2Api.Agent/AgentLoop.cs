@@ -179,9 +179,21 @@ public sealed class AgentLoop
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex) { result = "error: " + ex.Message; }
                     var receipt = $"Tool result for {call.Name}:\n{result}";
-                    messages.Add(new() { ["role"] = "user", ["content"] = call.Name.StartsWith("computer_") && _tools.LastComputerImage is { } image
+                    // v0.8.22: a successful send_file rides to the gateway as
+                    // a file part on this tool-result user message, exactly
+                    // the path the extension's send_file uses (gateway Chat
+                    // gathers file parts from ALL messages via Flatten, so
+                    // no gateway change is needed). The part is attached
+                    // once, here: History strips it (WithoutImage) so later
+                    // turns do not re-attach, and re-sends inside this turn
+                    // are deduped by the gateway's FileHash.
+                    JsonNode resultContent = call.Name.StartsWith("computer_") && _tools.LastComputerImage is { } image
                         ? new JsonArray(new JsonObject { ["type"] = "text", ["text"] = receipt }, new JsonObject { ["type"] = "image_url", ["attachment_id"] = Guid.NewGuid().ToString("N"), ["image_url"] = new JsonObject { ["url"] = image } })
-                        : JsonValue.Create(receipt) });
+                        : call.Name == "send_file" && _tools.LastSentFile is { } sent
+                        ? new JsonArray(new JsonObject { ["type"] = "text", ["text"] = receipt },
+                            new JsonObject { ["type"] = "file", ["file"] = new JsonObject { ["filename"] = sent.Filename, ["mime"] = sent.Mime, ["data_url"] = sent.DataUrl } })
+                        : JsonValue.Create(receipt);
+                    messages.Add(new() { ["role"] = "user", ["content"] = resultContent });
                     _observe(new("tool_result", result, call.Name, path));
                     // Stop a repeated observation loop, not productive long tasks
                     // or a running command that legitimately has no new output.

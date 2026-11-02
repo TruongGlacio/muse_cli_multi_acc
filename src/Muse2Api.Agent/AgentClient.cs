@@ -79,6 +79,15 @@ public sealed class AgentClient : IDisposable
         ```tool
         {"name": "git_diff"}
         ```
+        ```tool
+        {"name": "send_file", "path": "data/episodes/001/clips/part1/shot_0031.mp4"}
+        ```
+        send_file sends the original local file (video, pdf, zip, ...) to the
+        web conversation. Unlike read_file, which only returns text content,
+        and unlike ui_image, which is only a screenshot, send_file uploads
+        the real file bytes. Maximum 25 MB per file; paths are confined to
+        the workspace like every other file tool. send_file is read-only
+        like read_file, so it needs no approval modal.
         Rules:
         - Existing files must be read locally before editing; stale versions
           are rejected. To replace a whole file with write_file, read ALL pages

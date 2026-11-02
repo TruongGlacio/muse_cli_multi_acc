@@ -296,25 +296,39 @@
     setButtonLoading(attachBtnEl, true, 'attach');
     vscode.postMessage({ type: 'attach' });
   });
-  // Kéo thả file vào ô soạn thảo (v0.8.12, mở rộng v0.8.20): vùng
-  // nhận là khung soạn thảo (.composer: ô nhập + hàng nút) và danh
-  // sách chip đính kèm (#attachments). preventDefault ở dragover/drop
-  // là bắt buộc, nếu không trình duyệt sẽ mở file thay vì giao cho
-  // extension. Khi đang kéo qua thì thêm class drag-over (viền
-  // focusBorder, nền nhẹ) và gỡ khi rời/thả; bộ đếm dragenter/
-  // dragleave tránh nhấp nháy khi rê qua các phần tử con bên trong
-  // vùng. Thứ tự ưu tiên khi thả: (a) nếu kéo từ Explorer của VS Code
-  // mà đọc được danh sách URI dạng text/uri-list thì gửi URI về
-  // extension để xử lý theo đường dẫn; (b) nếu không thì đọc File
-  // qua File API trong webview rồi gửi nội dung về extension: ảnh
-  // dạng dataUrl, văn bản dạng text (cắt 500 KiB phía host), còn
-  // video và mọi file khác đều đọc đủ bytes dạng dataUrl để host
-  // gửi nguyên file (từ 0.8.20, không còn note thay thế). File
-  // vượt 25 MB thì không đọc bytes nữa mà gửi cờ tooLarge để host
-  // báo lỗi rõ. Lưu ý chưa kiểm chứng được trên VS Code thật:
-  // webview có thể chặn hoàn toàn drop từ hệ điều hành ở một số
-  // trường hợp, khi đó chỉ còn kéo từ Explorer + hộp chọn nhiều
-  // file là đường gửi nhiều file hoạt động được (xem README).
+  // Kéo thả file vào khung chat (v0.8.12, mở rộng v0.8.20, vùng
+  // nhận mở rộng toàn panel ở v0.8.22): CHỈ MỘT handler duy nhất
+  // gắn ở #layout (phần tử bao toàn bộ nội dung webview), nên thả
+  // file vào bất kỳ chỗ nào trong panel — vùng tin nhắn, cột danh
+  // sách hội thoại, ô nhập, hàng nút, chip đính kèm — cũng đi vào
+  // cùng đường xử lý. Cố ý KHÔNG giữ handler cũ ở .composer hay
+  // #attachments nữa: sự kiện drop nổi bọt từ phần tử con lên
+  // #layout, giữ cả hai tầng sẽ gửi trùng 2 message cho một lần thả.
+  // preventDefault ở dragover/drop là bắt buộc, nếu không trình
+  // duyệt sẽ mở file thay vì giao cho extension. Khi đang kéo qua
+  // thì thêm class drag-over ở cấp #layout (viền focusBorder, nền
+  // nhẹ) và gỡ khi rời/thả; bộ đếm dragenter/dragleave tránh nhấp
+  // nháy khi rê qua các phần tử con bên trong panel. Thứ tự ưu tiên
+  // khi thả: (a) nếu kéo từ Explorer của VS Code mà đọc được danh
+  // sách URI dạng text/uri-list thì gửi URI về extension để xử lý
+  // theo đường dẫn; (b) nếu không thì đọc File qua File API trong
+  // webview rồi gửi nội dung về extension: ảnh dạng dataUrl, văn
+  // bản dạng text (cắt 500 KiB phía host), còn video và mọi file
+  // khác đều đọc đủ bytes dạng dataUrl để host gửi nguyên file (từ
+  // 0.8.20, không còn note thay thế). File vượt 25 MB thì không đọc
+  // bytes nữa mà gửi cờ tooLarge để host báo lỗi rõ. (c) v0.8.22:
+  // nếu cả uri-list lẫn File API đều rỗng (webview không giao được
+  // gì từ lần thả này) thì KHÔNG im lặng nữa mà gửi message
+  // dropNoFile để host hiện lỗi nhìn thấy được trong khung chat.
+  // Lưu ý chưa kiểm chứng được trên VS Code thật: webview có thể
+  // chặn hoàn toàn drop từ hệ điều hành ở một số trường hợp — bản
+  // này chỉ giúp user thấy thông báo rõ thay vì im lặng, không ép
+  // được webview giao file; khi đó chỉ còn kéo từ Explorer + hộp
+  // chọn nhiều file là đường gửi nhiều file hoạt động được (xem
+  // README). Tay kéo đổi chiều rộng cột (#sidebarResizer) dùng
+  // pointer, không phải HTML5 drag, nên không bị handler này ảnh
+  // hưởng; click/chọn hội thoại cũng không bị chặn vì handler chỉ
+  // preventDefault ở dragover/drop.
   function readDroppedFile(file) {
     return new Promise(function (resolve) {
       var lower = (file.name || '').toLowerCase();
@@ -376,7 +390,9 @@
       depth = 0;
       el.classList.remove('drag-over');
       var dt = e.dataTransfer;
-      if (!dt) { return; }
+      // v0.8.22: không còn return im lặng khi webview không giao
+      // được gì — host sẽ hiện lỗi nhìn thấy được trong khung chat.
+      if (!dt) { vscode.postMessage({ type: 'dropNoFile' }); return; }
       var uriList = '';
       try { uriList = dt.getData('text/uri-list') || ''; } catch (err) { uriList = ''; }
       var uris = uriList.split(/\r?\n/).map(function (s) { return s.trim(); })
@@ -387,15 +403,16 @@
         return;
       }
       var files = dt.files ? Array.prototype.slice.call(dt.files) : [];
-      if (files.length === 0) { return; }
+      if (files.length === 0) { vscode.postMessage({ type: 'dropNoFile' }); return; }
       setButtonLoading(attachBtnEl, true, 'attach');
       Promise.all(files.map(readDroppedFile)).then(function (items) {
         vscode.postMessage({ type: 'dropFiles', files: items });
       });
     });
   }
-  enableDropZone(document.querySelector('.composer'));
-  enableDropZone(attachmentsEl);
+  // v0.8.22: một handler duy nhất ở #layout (xem ghi chú ở đầu
+  // khối kéo thả). layoutEl đã khai báo ở đầu script.
+  enableDropZone(layoutEl);
   document.getElementById('clearHistoryBtn').addEventListener('click', function () {
     vscode.postMessage({ type: 'clearHistory' });
   });

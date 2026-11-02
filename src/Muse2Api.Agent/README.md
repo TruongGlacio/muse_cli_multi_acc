@@ -28,12 +28,22 @@ Mặc định: base URL `http://127.0.0.1:18610/v1`, model `muse-chat`.
 |---|---|
 | `list_files` | Liệt kê file/thư mục trong workspace |
 | `read_file` | Đọc file |
+| `send_file` | Gửi nguyên file lên cuộc hội thoại web (video, pdf, zip, ...) — khác `ui_image` chỉ chụp màn hình |
 | `write_file` | Ghi đè / tạo file mới |
 | `edit_file` | Thay đúng 1 đoạn text khớp chính xác (đọc file trước) |
 | `run_command` | Chạy lệnh trong workspace: PowerShell mặc định trên Windows (`--shell cmd` để dùng cmd.exe), bash trên Linux/macOS |
 
 Lệnh trong REPL: `/help`, `/exit`, `/clear`, `/workspace <đường dẫn>`,
 `/yes` (bật/tắt tự xác nhận), `/model` (xem model hiện tại).
+
+`send_file` nhận `{"path": "đường-dẫn-tương-đối-trong-workspace"}`:
+file phải tồn tại, là tệp (không phải thư mục), không rỗng, tối đa
+25 MB (giới hạn của web), và phải nằm trong workspace như mọi tool file
+khác (đường dẫn ngoài workspace, `..` và symlink đều bị chặn). Model gọi
+`send_file` khi user muốn gửi thẳng một file thật lên cuộc hội thoại web
+— ví dụ một clip mp4 để user chấm — thay vì đi qua `ui_image` (chỉ là
+ảnh chụp màn hình, không phải file gốc). `send_file` chỉ đọc file nên
+không cần xác nhận như `write_file` hay `run_command`.
 
 ## Cách agent gọi tool
 

@@ -1653,6 +1653,15 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         this.post('attachDone', {});
       }
     }
+    else if (m.type === 'dropNoFile') {
+      // v0.8.22: thả mà webview không giao được file nào (cả uri-list
+      // lẫn File API đều rỗng) thì không im lặng nữa: 'error' hiện
+      // bong bóng đỏ nhìn thấy được trong khung chat, kèm 2 đường
+      // thay thế còn hoạt động (nút Đính kèm, kéo từ Explorer của
+      // VS Code). Không retry, vì webview đã chặn lần thả này rồi;
+      // không bịa thêm nguyên nhân khác.
+      this.post('error', { text: 'VS Code không giao được file từ thao tác thả này. Hãy dùng nút Đính kèm để chọn file, hoặc kéo file từ Explorer của VS Code vào khung chat thay thế.' });
+    }
     else if (m.type === 'clearHistory') { this.clearHistory(); }
     else if (m.type === 'newSession') { void this.newSession(); }
     else if (m.type === 'switchSession' && m.id) { void this.switchSession(m.id); }

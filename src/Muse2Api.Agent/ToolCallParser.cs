@@ -18,7 +18,7 @@ public static class ToolCallParser
     };
     private static readonly HashSet<string> Names = new(StringComparer.Ordinal)
         { "read_file", "read_files", "list_files", "search_files", "write_file", "edit_file", "run_command", "process_status", "process_input", "process_stop", "git_status", "git_diff",
-          "computer_list_windows", "computer_inspect", "computer_screenshot", "computer_click", "computer_type", "computer_key", "computer_scroll", "computer_invoke", "computer_set_value", "computer_focus", "computer_assert", "computer_toggle", "computer_select", "computer_expand" };
+          "computer_list_windows", "computer_inspect", "computer_screenshot", "computer_click", "computer_type", "computer_key", "computer_scroll", "computer_invoke", "computer_set_value", "computer_focus", "computer_assert", "computer_toggle", "computer_select", "computer_expand", "send_file" };
 
     public static ToolCall Normalize(ToolCall call)
     {
@@ -124,7 +124,7 @@ public static class ToolCallParser
                     "send_process_input" => "process_input", "stop_process" => "process_stop", "ui_tree" => "computer_inspect", "ui_image" => "computer_screenshot",
                     "ui_press" => "computer_invoke", "ui_fill" => "computer_set_value", "ui_type" => "computer_type", "ui_key" => "computer_key",
                     "ui_click" => "computer_click", "ui_scroll" => "computer_scroll", "ui_assert" => "computer_assert", "ui_toggle" => "computer_toggle",
-                    "ui_select" => "computer_select", "ui_expand" => "computer_expand", _ => "__unknown_action__",
+                    "ui_select" => "computer_select", "ui_expand" => "computer_expand", "send_file" => "send_file", _ => "__unknown_action__",
                 };
                 if (actionTool == "__unknown_action__") { calls.Add(ParseError("Unknown application action: " + operation)); continue; }
                 var actionArgs = (JsonObject)step.DeepClone(); actionArgs.Remove("action");
