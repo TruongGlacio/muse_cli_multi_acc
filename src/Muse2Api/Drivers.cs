@@ -5,7 +5,7 @@ namespace Muse2Api;
 
 public sealed record InputImage(byte[] Data, string Mime = "image/png");
 public sealed record ChatRequest(string Prompt, string Model, List<InputImage> Images,
-    string? ConversationHint, List<(string Role, string Text)> Turns, CancellationToken Cancel, bool LocalTools = false, string? ImageBatchId = null, string? AccountId = null);
+    string? ConversationHint, List<(string Role, string Text)> Turns, CancellationToken Cancel, bool LocalTools = false, string? ImageBatchId = null, string? AccountId = null, bool OpenAiTools = false);
 public sealed record ImageRequest(string Prompt, string Model, string? Size, int N,
     List<InputImage> References, Action<int>? OnProgress = null, CancellationToken Cancel = default);
 public sealed record VideoRequest(string Prompt, string Model, string? Size, int? Duration,

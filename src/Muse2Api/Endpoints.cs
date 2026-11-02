@@ -7,7 +7,7 @@ namespace Muse2Api;
 
 public static class Endpoints
 {
-    public const string Version = "0.8.15";
+    public const string Version = "0.8.16";
 
     public static void Map(WebApplication app, AppState s)
     {
@@ -184,7 +184,10 @@ public static class Endpoints
             // v0.8.2: extension gửi account_id của session đã chọn.
             // Gateway cũ bỏ qua trường lạ này; gateway mới ép đúng tài
             // khoản đó (xem Gateway.ChatStream + AcquirePinnedAsync).
-            AccountId: JsonHelp.Str(body["account_id"]));
+            AccountId: JsonHelp.Str(body["account_id"]),
+            // v0.8.16: để BrowserDriver ghi log web_prompt đúng chế độ
+            // (normal | local | openai-tools) thay vì phải suy từ prompt.
+            OpenAiTools: toolsMode);
         var stream = JsonHelp.Bool(body["stream"]);
         ctx.Items["stream"] = stream;
         var completionId = "chatcmpl-" + Guid.NewGuid().ToString("N")[..24];

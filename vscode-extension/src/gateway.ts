@@ -447,7 +447,21 @@ export class GatewayManager {
     const child = spawn(bin, [], { env, cwd: path.dirname(bin), windowsHide: true });
     this.child = child;
     this.childPid = child.pid;
-    child.stdout?.on('data', (d: Buffer) => { for (const line of String(d).split('\n')) { this.log(line); } });
+    // v0.8.16: dòng nội dung prompt chẩn đoán (gateway phát dạng
+    // "[local] web_prompt_body <dòng>") CHỈ ra Output, KHÔNG vào ring
+    // buffer 1000 dòng và panel Nhật ký — nếu không prompt dài sẽ
+    // tràn buffer một cách vô ích. Header web_prompt và dòng đường
+    // dẫn file vẫn đi qua log() bình thường nên vẫn vào buffer/panel.
+    // Dòng trống trong prompt vẫn in ra dòng trống (không qua trimEnd
+    // của log()) để không lệch cấu trúc preview. Mẫu key-like trong
+    // nội dung vẫn bị redactLogLine che như mọi dòng log khác.
+    child.stdout?.on('data', (d: Buffer) => { for (const line of String(d).split('\n')) {
+      if (line.startsWith('[local] web_prompt_body ')) {
+        this.output.appendLine(redactLogLine(line.slice('[local] web_prompt_body '.length).replace(/\r$/, '')));
+      } else if (line === '[local] web_prompt_body') {
+        this.output.appendLine('');
+      } else { this.log(line); }
+    } });
     child.stderr?.on('data', (d: Buffer) => { for (const line of String(d).split('\n')) { this.log(line); } });
     child.on('exit', (code) => {
       const wasBundled = this.child === child;

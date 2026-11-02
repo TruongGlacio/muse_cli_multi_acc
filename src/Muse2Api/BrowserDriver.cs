@@ -487,6 +487,50 @@ public sealed class BrowserDriver : IMuseDriver
                 Console.WriteLine($"denied muse.ai {item?.GetValue<string>()?.ToLowerInvariant()}");
     }
 
+    // ---------- log web_prompt (v0.8.16) ----------
+    // Ghi đúng chuỗi cuối cùng đưa lên trang, ngay trước Send, để user
+    // đối chiếu với câu trả lời/từ chối của model web. Header + dòng
+    // đường dẫn đi vào cả Output lẫn ring buffer/panel; nội dung
+    // prompt chỉ ra Output (phía extension tách dòng "web_prompt_body "
+    // ra khỏi ring buffer). Không log reply, không log key/cookie/token.
+    private async Task LogWebPromptAsync(Account account, ChatRequest req, string submitted, string thread, int imageCount)
+    {
+        var mode = req.LocalTools ? "local" : req.OpenAiTools ? "openai-tools" : "normal";
+        var file = "-";
+        string? head = null;
+        string? tail = null;
+        if (WebPromptLog.NeedsFile(submitted))
+        {
+            try
+            {
+                var dir = Path.Combine(_settings.DataDir, "prompts");
+                Directory.CreateDirectory(dir);
+                var path = Path.Combine(dir, WebPromptLog.FileName(DateTime.Now, Guid.NewGuid().ToString("N")[..8]));
+                await File.WriteAllTextAsync(path, submitted);
+                file = path;
+            }
+            catch
+            {
+                // Chẩn đoán không được làm hỏng lượt chat: ghi file lỗi
+                // thì vẫn in preview, header ghi rõ write_failed.
+                file = "write_failed";
+            }
+            (head, tail) = WebPromptLog.Preview(submitted);
+        }
+        Diagnostic?.Invoke(WebPromptLog.Header(account.Id, mode, req.Model, submitted.Length, req.Turns.Count, thread, imageCount, file));
+        Diagnostic?.Invoke("web_prompt_begin");
+        var body = WebPromptLog.NeedsFile(submitted) ? head! : submitted;
+        foreach (var line in WebPromptLog.SplitLines(body))
+            Diagnostic?.Invoke(WebPromptLog.BodyPrefix + line);
+        if (WebPromptLog.NeedsFile(submitted))
+        {
+            Diagnostic?.Invoke(WebPromptLog.TruncatedLine(submitted.Length, head!.Length + tail!.Length, file));
+            foreach (var line in WebPromptLog.SplitLines(tail!))
+                Diagnostic?.Invoke(WebPromptLog.BodyPrefix + line);
+        }
+        Diagnostic?.Invoke("web_prompt_end");
+    }
+
     private async Task<(BrowserTab Tab, System.Text.Json.Nodes.JsonNode? Base)> BeginChat(
         Account account, ChatRequest req)
     {
@@ -530,7 +574,12 @@ public sealed class BrowserDriver : IMuseDriver
                 await Attach(tab, images, req.Cancel);
                 var requestId = Guid.NewGuid().ToString("N");
                 state!["submittedRequestId"] = requestId;
-                await Send(tab, "MUSE_LOCAL_REQUEST_ID: " + requestId + "\n(Transport metadata for the app; do not echo it in your answer.)\n\n" + prompt, req.Cancel);
+                var submitted = "MUSE_LOCAL_REQUEST_ID: " + requestId + "\n(Transport metadata for the app; do not echo it in your answer.)\n\n" + prompt;
+                // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang (kèm
+                // dòng header transport) trước khi Send, để user đối
+                // chiếu với câu trả lời/từ chối của model web.
+                await LogWebPromptAsync(account, req, submitted, (saved is not null || live) ? "reused" : "new", images.Count);
+                await Send(tab, submitted, req.Cancel);
                 if (LocalConversationStore.IsThread(tab.Page.Url))
                 {
                     tab.ThreadUrl = tab.Page.Url;
@@ -544,12 +593,14 @@ public sealed class BrowserDriver : IMuseDriver
             var sameOwner = (tab.Hint ?? "") == hint;
             var follow = !req.LocalTools && tab.Turns.Count > 0 && sameOwner
                 ? Prompt.FollowupText(tab.Turns, req.Turns) : null;
+            var threadKind = "new";
             if (follow is not null && req.Images.Count >= tab.ImageCount
                 && (tab.ThreadUrl.Length > 0 || await LiveContinuation(tab)))
             {
                 if (await OnThread(tab) || await LiveContinuation(tab)) { }
                 else if (tab.ThreadUrl.Length > 0) await OpenSaved(tab);
                 prompt = follow;
+                threadKind = "reused";
                 images = req.Images.Skip(tab.ImageCount).ToList();
             }
             else
@@ -561,6 +612,9 @@ public sealed class BrowserDriver : IMuseDriver
             }
             var baseState = await ChatState(tab);
             await Attach(tab, images, req.Cancel);
+            // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang trước khi
+            // Send (follow thì là nối tiếp thread cũ, ngược lại là mới).
+            await LogWebPromptAsync(account, req, prompt, threadKind, images.Count);
             await Send(tab, prompt, req.Cancel);
             return (tab, baseState);
         }
