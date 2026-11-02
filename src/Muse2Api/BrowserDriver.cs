@@ -484,7 +484,52 @@ public sealed class BrowserDriver : IMuseDriver
             if (!BoolNode(res, "ok"))
                 throw new UpstreamException($"failed to attach file: {Str(res, "err")}");
         }
-        if (files.Count > 0) await Task.Delay(1000, cancel);
+        // v0.8.24: KHÔNG delay cố định ở đây nữa; điểm chờ theo tín
+        // hiệu thật nằm ở WaitForAttachmentsReady, gọi ngay sau
+        // AttachFiles trong BeginChat (chỉ khi có file).
+    }
+
+    // v0.8.24: chờ web xử lý xong file đính kèm mới Send. Lỗi 0.8.23
+    // đã xác nhận bằng phép thử phân biệt: đính kèm trực tiếp cùng
+    // file trên web thì model chấm được, còn qua gateway thì model
+    // thấy bản ghi file nhưng chưa có nội dung video đã xử lý — vì
+    // gateway gửi prompt ngay sau sự kiện change, không chờ bước xử
+    // lý media bất đồng bộ của web. Chờ theo TÍN HIỆU THẬT trên DOM
+    // (Dom.AttachmentReady): chip preview chứa đúng tên file đã hiện
+    // trong vùng composer và không còn chỉ báo đang tải lên; yêu cầu
+    // tín hiệu ổn định qua 2 poll liên tiếp (poll 250ms, trần 60s).
+    // Timeout thì VẪN GỬI TIẾP kèm log (không chặn lượt gửi vì tín
+    // hiệu có thể sai trên giao diện mới). Không chờ vô hạn trong
+    // mọi trường hợp. Chỉ gọi khi files.Count > 0; luồng không file
+    // không gọi hàm này nên giữ nguyên 100% hành vi cũ.
+    private async Task WaitForAttachmentsReady(BrowserTab tab, List<InputFile> files, CancellationToken cancel = default)
+    {
+        if (files.Count == 0) return;
+        var names = files.Select(f => f.Filename).ToArray();
+        var started = DateTime.UtcNow;
+        var stable = 0;
+        while (DateTime.UtcNow - started < TimeSpan.FromSeconds(60))
+        {
+            cancel.ThrowIfCancellationRequested();
+            // Eval đã nuốt lỗi không phải hủy và trả null: lỗi tín
+            // hiệu thì coi như chưa sẵn sàng, chờ tiếp tới trần.
+            var ready = BoolNode(await Eval(tab.Page, Dom.AttachmentReady(names), cancel), "ready");
+            if (ready)
+            {
+                if (++stable >= 2)
+                {
+                    Diagnostic?.Invoke($"attachments_ready {(DateTime.UtcNow - started).TotalMilliseconds:F0}ms files={files.Count}");
+                    return;
+                }
+            }
+            else stable = 0;
+            await Task.Delay(250, cancel);
+        }
+        var missing = "";
+        var last = await Eval(tab.Page, Dom.AttachmentReady(names), cancel);
+        if (last is System.Text.Json.Nodes.JsonObject o && o["missing"] is System.Text.Json.Nodes.JsonArray arr)
+            missing = string.Join(",", arr.Select(n => n?.GetValue<string>() ?? ""));
+        Diagnostic?.Invoke($"attachments_ready_timeout 60000ms files={files.Count} missing={missing}");
     }
 
     // v0.8.20: hash dedup cho file gửi nguyên (tên + mime + bytes),
@@ -623,6 +668,7 @@ public sealed class BrowserDriver : IMuseDriver
                 _localConversations.Save(account.Id, hint, IsThreadUrl(tab.Page.Url) ? tab.Page.Url : saved?.Url ?? "", true, imageHash, fileHash);
                 await Attach(tab, images, req.Cancel);
                 await AttachFiles(tab, files, req.Cancel);
+                await WaitForAttachmentsReady(tab, files, req.Cancel);
                 var requestId = Guid.NewGuid().ToString("N");
                 state!["submittedRequestId"] = requestId;
                 var submitted = "MUSE_LOCAL_REQUEST_ID: " + requestId + "\n(Transport metadata for the app; do not echo it in your answer.)\n\n" + prompt;
@@ -667,6 +713,7 @@ public sealed class BrowserDriver : IMuseDriver
             var baseState = await ChatState(tab);
             await Attach(tab, images, req.Cancel);
             await AttachFiles(tab, files, req.Cancel);
+            await WaitForAttachmentsReady(tab, files, req.Cancel);
             // v0.8.16: log đúng chuỗi cuối cùng đưa lên trang trước khi
             // Send (follow thì là nối tiếp thread cũ, ngược lại là mới).
             await LogWebPromptAsync(account, req, prompt, threadKind, images.Count, files.Count);

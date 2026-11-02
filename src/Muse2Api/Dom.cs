@@ -232,6 +232,56 @@ public static class Dom
 
     public static readonly string InputEmpty = $"!(document.querySelector({Q(Input)}) || {{value: ''}}).value";
 
+    // v0.8.24: tín hiệu "web đã xử lý xong file đính kèm" để gateway chờ
+    // trước khi Send (sửa lỗi 0.8.23: gửi prompt ngay sau sự kiện
+    // change nên model web thấy bản ghi file nhưng chưa có nội dung
+    // video đã xử lý gắn vào lượt đó). Tín hiệu gồm 2 chân, đều đọc
+    // từ DOM thật, không sleep đoán:
+    //  (a) chip preview chứa đúng tên file đã hiện trong VÙNG COMPOSER
+    //      — vùng này được xác định bằng cách leo từ textarea lên
+    //      trong khi tổ tiên chưa chứa bubble/group tin nhắn nào;
+    //      tổ tiên đầu tiên chứa tin nhắn là root chung nên dừng
+    //      trước nó, vì vậy tên file của tin nhắn cũ trong cùng
+    //      thread không thể gây dương tính giả;
+    //  (b) không còn chỉ báo đang tải lên trong vùng composer
+    //      (chữ uploading/processing/đang tải lên/đang xử lý, thanh
+    //      progressbar, hoặc aria-busy).
+    // Trả { ready, found, missing, uploading, inputFileCount,
+    // inputNames, err? }. input.files chỉ mang tính chẩn đoán (một
+    // số giao diện đọc xong là xóa input) nên KHÔNG nằm trong điều
+    // kiện ready; nút gửi không nằm trong điều kiện vì lúc chờ thì
+    // FillInput chưa chạy nên nút có thể disabled do ô nhập trống,
+    // không phải do media chưa xong.
+    public static string AttachmentReady(string[] filenames) => $$"""
+        (() => {
+          const visible = e => e.getClientRects().length > 0
+            && !e.closest('[hidden],[aria-hidden="true"],[inert]')
+            && getComputedStyle(e).visibility !== 'hidden';
+          const ta = document.querySelector({{Q(Input)}});
+          const names = {{JsonSerializer.Serialize(filenames)}};
+          if (!ta) return { ready: false, err: 'no-input', found: [], missing: names, uploading: false, inputFileCount: 0, inputNames: [] };
+          const hasMsg = el => !!(el.querySelector({{Q(AgentBubble)}}) || el.querySelector('[class~="group/msg"]'));
+          let scope = ta.parentElement || document.body;
+          let p = ta.parentElement;
+          while (p) {
+            if (hasMsg(p)) break;
+            scope = p;
+            p = p.parentElement;
+          }
+          const input = document.querySelector({{Q(FileInput)}});
+          const inputNames = input && input.files ? [...input.files].map(f => f.name) : [];
+          const inScope = [...scope.querySelectorAll('*')].filter(visible);
+          const previewFound = name => inScope.some(e => (e.textContent || '').includes(name));
+          const uploading = inScope.some(e => /uploading|đang tải lên|processing|đang xử lý/i.test(e.textContent || ''))
+            || inScope.some(e => e.getAttribute && e.getAttribute('role') === 'progressbar')
+            || !!scope.querySelector('[aria-busy="true"]');
+          const found = names.filter(previewFound);
+          const missing = names.filter(n => !found.includes(n));
+          return { ready: missing.length === 0 && !uploading, found, missing, uploading,
+                   inputFileCount: inputNames.length, inputNames };
+        })()
+        """;
+
     public static string AttachFile(string b64, string mime, string filename) => $$"""
         (() => {
           try {
