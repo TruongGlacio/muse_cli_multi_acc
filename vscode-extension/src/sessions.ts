@@ -22,6 +22,7 @@
 
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
+import { QueuedItem, parseQueueItems } from './runManager';
 
 export interface ChatMsg { role: string; content: string | Array<Record<string, unknown>>; }
 
@@ -45,6 +46,14 @@ export interface ChatSession {
   // trong khi trạng thái 'running' sống (RunManager) thì mất theo
   // restart và về 'stopped' một cách trung thực.
   lastRunOutcome?: 'done' | 'error';
+  // Hàng đợi tin nhắn của session (xem runManager.ts): bản mirror bền
+  // của hàng runtime. Provider đồng bộ vào đây sau mỗi lần đổi hàng
+  // rồi persist, nên chuyển session khác rồi quay lại, hay tải lại
+  // webview, hay restart extension host, hàng vẫn còn. Chỉ lưu khi
+  // hàng không rỗng (hàng rỗng thì bỏ trường để globalState gọn).
+  // Sau restart hàng KHÔNG tự chạy lại — user gửi tin mới sẽ resume
+  // drain từ đầu hàng (xem provider run()).
+  pendingQueue?: QueuedItem[];
 }
 
 export interface StoreChange {
@@ -73,7 +82,8 @@ export class SessionStore {
           .filter((m) => typeof m.role === 'string' && typeof m.content === 'string')
           .map((m) => ({ role: m.role as string, content: m.content as string }))
           .slice(-40);
-        out.push({ id: s.id, title: typeof s.title === 'string' && s.title ? s.title : 'Hội thoại', conversationId: s.conversationId, messages, createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(), updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : Date.now(), workspacePath: typeof s.workspacePath === 'string' ? s.workspacePath : undefined, accountId: typeof s.accountId === 'string' && s.accountId ? s.accountId : undefined, accountLabel: typeof s.accountLabel === 'string' && s.accountLabel ? s.accountLabel : undefined, accountStatusAtSave: typeof s.accountStatusAtSave === 'string' ? s.accountStatusAtSave : undefined, threadUrl: typeof s.threadUrl === 'string' && s.threadUrl ? s.threadUrl : undefined, importedFromWeb: s.importedFromWeb === true, titleEditedManually: s.titleEditedManually === true, lastRunOutcome: s.lastRunOutcome === 'done' || s.lastRunOutcome === 'error' ? s.lastRunOutcome : undefined });
+        const pendingQueue = parseQueueItems(s.pendingQueue);
+        out.push({ id: s.id, title: typeof s.title === 'string' && s.title ? s.title : 'Hội thoại', conversationId: s.conversationId, messages, createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(), updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : Date.now(), workspacePath: typeof s.workspacePath === 'string' ? s.workspacePath : undefined, accountId: typeof s.accountId === 'string' && s.accountId ? s.accountId : undefined, accountLabel: typeof s.accountLabel === 'string' && s.accountLabel ? s.accountLabel : undefined, accountStatusAtSave: typeof s.accountStatusAtSave === 'string' ? s.accountStatusAtSave : undefined, threadUrl: typeof s.threadUrl === 'string' && s.threadUrl ? s.threadUrl : undefined, importedFromWeb: s.importedFromWeb === true, titleEditedManually: s.titleEditedManually === true, lastRunOutcome: s.lastRunOutcome === 'done' || s.lastRunOutcome === 'error' ? s.lastRunOutcome : undefined, pendingQueue: pendingQueue.length > 0 ? pendingQueue : undefined });
       }
       return out;
     };

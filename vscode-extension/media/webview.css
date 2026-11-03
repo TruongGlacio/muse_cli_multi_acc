@@ -77,6 +77,14 @@ button.loading::after, .open-tab-btn.loading::after, .delete-session-btn.loading
 .bubble details summary { cursor: pointer; color: var(--vscode-textLink-foreground); }
 .bubble details pre { white-space: pre-wrap; word-break: break-all; }
 .bubble code { font-family: var(--vscode-editor-font-family); }
+/* Bubble chờ của hàng đợi (nhắn thêm trong lúc lượt trước đang
+   chạy): mờ hơn + viền đứt để phân biệt với tin đã gửi thật, nhãn
+   "Đang chờ gửi…" và nút ✕ xóa tin khỏi hàng (nút là button thật
+   trong bubble, không phải span, vì nó gửi message riêng). Khi lượt
+   bắt đầu chạy, webview gỡ class/nhãn/nút này để thành bubble thường. */
+.bubble.queued { opacity: 0.75; border: 1px dashed var(--vscode-panel-border); }
+.queued-label { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 4px; }
+.queued-remove { display: inline-block; margin-top: 4px; padding: 1px 7px; border-radius: 10px; font-size: 11px; cursor: pointer; background: rgba(255, 80, 80, 0.25); color: inherit; border: none; }
 #attachments { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .chip { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 4px; padding: 4px 8px; font-size: 12px; }
 #status { color: var(--vscode-descriptionForeground); margin-bottom: 8px; min-height: 16px; }

@@ -243,6 +243,32 @@
   // __BUTTON_LOADING_FN_END__
   var streamBubble = null;
   var streamRaw = '';
+  // Vùng live-status riêng (sửa lỗi mất tiến trình khi switch về
+  // session đang chạy): status của lượt đang chạy (live:true) giữ
+  // riêng, status thường chỉ ghi khi không có live. Nhờ vậy thông
+  // báo "Đã chuyển sang hội thoại: ..." hay thông báo sao chép log
+  // không đè mất dòng "Đang suy nghĩ…" đang chạy. 'done' của đúng
+  // session đang mở mới xóa live; 'done' của session khác chỉ clear
+  // loading, không chạm status. historyCleared reset cờ live (khung
+  // chat đã xóa) nhưng không xóa chữ status để tránh nhấp nháy — post
+  // tiếp theo (thông báo hoặc replay live) sẽ ghi đè ngay.
+  var currentSessionId = null;
+  var liveStatusActive = false;
+  var liveStatusText = '';
+  var lastOrdinaryStatus = '';
+  function setLiveStatus(text) {
+    liveStatusActive = true;
+    liveStatusText = text || '';
+    statusEl.textContent = liveStatusText;
+  }
+  function setOrdinaryStatus(text) {
+    lastOrdinaryStatus = text || '';
+    if (!liveStatusActive) { statusEl.textContent = lastOrdinaryStatus; }
+  }
+  function clearLiveStatus() {
+    liveStatusActive = false;
+    liveStatusText = '';
+  }
   // Panel Nhật ký (v0.6.0): dòng log runtime, mỗi dòng có giờ nhận do
   // extension thêm (dòng gateway gốc không có timestamp). Dòng hiển thị
   // dùng textContent nên nội dung log không thể chèn HTML.
@@ -323,6 +349,39 @@
     messagesEl.appendChild(div);
     scrollMessagesToBottom();
     return div;
+  }
+  // Bubble chờ của hàng đợi: tìm theo data-queued-id; lật qua lại
+  // giữa trạng thái chờ (class queued + nhãn + nút ✕) và bubble
+  // thường (khi lượt bắt đầu chạy, hoặc khi lỗi đưa lại vào hàng thì
+  // lật ngược lại thành chờ). Nội dung user đã qua render() escape
+  // HTML nên querySelector class trong bubble không nhầm với nội
+  // dung user.
+  function findQueuedBubble(id) {
+    return messagesEl.querySelector('[data-queued-id="' + id + '"]');
+  }
+  function markBubbleQueued(div, id) {
+    div.classList.add('queued');
+    if (!div.querySelector('.queued-label')) {
+      var label = document.createElement('div');
+      label.className = 'queued-label';
+      label.textContent = 'Đang chờ gửi…';
+      div.appendChild(label);
+    }
+    if (!div.querySelector('.queued-remove')) {
+      var btn = document.createElement('button');
+      btn.className = 'queued-remove';
+      btn.textContent = '✕ Xóa tin chờ';
+      btn.title = 'Xóa tin này khỏi hàng đợi';
+      btn.addEventListener('click', function () { vscode.postMessage({ type: 'deleteQueued', id: id }); });
+      div.appendChild(btn);
+    }
+  }
+  function unmarkBubbleQueued(div) {
+    div.classList.remove('queued');
+    var label = div.querySelector('.queued-label');
+    if (label) { label.remove(); }
+    var btn = div.querySelector('.queued-remove');
+    if (btn) { btn.remove(); }
   }
   function addLoginBubble(text, isWarning) {
     var div = document.createElement('div');
@@ -517,12 +576,12 @@
     var text = visibleLogLines().map(function (l) { return (l.time ? l.time + ' ' : '') + (l.text || ''); }).join('\n');
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () {
-        statusEl.textContent = 'Đã sao chép log đang hiển thị vào clipboard.';
+        setOrdinaryStatus('Đã sao chép log đang hiển thị vào clipboard.');
       }, function () {
-        statusEl.textContent = 'Không sao chép được log vào clipboard.';
+        setOrdinaryStatus('Không sao chép được log vào clipboard.');
       });
     } else {
-      statusEl.textContent = 'Trình duyệt webview này không hỗ trợ sao chép vào clipboard.';
+      setOrdinaryStatus('Trình duyệt webview này không hỗ trợ sao chép vào clipboard.');
     }
   });
   document.getElementById('clearLogsBtn').addEventListener('click', function () {
@@ -556,10 +615,24 @@
   });
   window.addEventListener('message', function (event) {
     var m = event.data || {};
-    if (m.type === 'message') { addBubble(m.role === 'user' ? 'user' : 'assistant', m.text || '', m.details || ''); }
+    if (m.type === 'message') {
+      // Lượt trong hàng bắt đầu chạy: lật bubble chờ thành bubble
+      // thường (nếu bề mặt này đã có bubble chờ đó); bề mặt mở giữa
+      // chừng (chưa có bubble chờ — replay live đã vẽ bubble user
+      // thường) thì render bubble thường như cũ. Không có queueId thì
+      // render thường như cũ.
+      if (m.role === 'user' && m.queueId) {
+        var qb = findQueuedBubble(m.queueId);
+        if (qb) { unmarkBubbleQueued(qb); scrollMessagesToBottom(); }
+        else { addBubble('user', m.text || '', m.details || ''); }
+      } else { addBubble(m.role === 'user' ? 'user' : 'assistant', m.text || '', m.details || ''); }
+    }
     else if (m.type === 'tool') { addBubble('tool', 'Công cụ: ' + (m.name || '') + ' — ' + (m.detail || '')); }
     else if (m.type === 'toolResult') { addBubble('tool', 'Kết quả ' + (m.name || '') + ': ' + (m.detail || '')); }
-    else if (m.type === 'status') { statusEl.textContent = m.text || ''; }
+    else if (m.type === 'status') {
+      if (m.live) { setLiveStatus(m.text); }
+      else { setOrdinaryStatus(m.text); }
+    }
     else if (m.type === 'error') {
       // v0.8.13: lỗi là tín hiệu kết thúc cho mọi nút đang loading
       // (kể cả nút Gửi khi run() thoát sớm) — clear tất cả để không
@@ -567,7 +640,10 @@
       // lại nhóm 'send' nên không ảnh hưởng các nhóm khác.
       clearAllButtonLoading();
       var errBubble = addBubble('error', m.text || 'Đã xảy ra lỗi.');
-      statusEl.textContent = 'Có lỗi, xem khung đỏ ở trên.';
+      // Không xóa live: lỗi này có thể chỉ là lỗi phụ (vd thả file
+      // lỗi) trong lúc run đang chạy; 'done' của lượt sẽ xóa live.
+      // Khi không live thì hiện chữ lỗi như cũ.
+      setOrdinaryStatus('Có lỗi, xem khung đỏ ở trên.');
       // Fix 502 (v0.6.0): chỉ khi thông điệp chứa 502 hoặc
       // upstream_response_unavailable mới thêm nút này. Bấm nút CHỈ
       // điền sẵn câu ngắn vào ô soạn thảo trong cùng hội thoại, user tự
@@ -585,9 +661,9 @@
         errBubble.appendChild(row);
       }
     }
-    else if (m.type === 'accountError') { addAccountErrorBubble(m.text || ''); statusEl.textContent = 'Chưa có tài khoản Muse khả dụng.'; }
-    else if (m.type === 'loginRequired') { addLoginBubble(m.text || 'Hội thoại này cần đăng nhập lại.'); statusEl.textContent = 'Cần đăng nhập lại.'; }
-    else if (m.type === 'loginWarning') { addLoginBubble(m.text || ''); statusEl.textContent = 'Tài khoản của hội thoại này đã hết hạn hoặc đã đăng xuất.'; }
+    else if (m.type === 'accountError') { addAccountErrorBubble(m.text || ''); setOrdinaryStatus('Chưa có tài khoản Muse khả dụng.'); }
+    else if (m.type === 'loginRequired') { addLoginBubble(m.text || 'Hội thoại này cần đăng nhập lại.'); setOrdinaryStatus('Cần đăng nhập lại.'); }
+    else if (m.type === 'loginWarning') { addLoginBubble(m.text || ''); setOrdinaryStatus('Tài khoản của hội thoại này đã hết hạn hoặc đã đăng xuất.'); }
     else if (m.type === 'importedBanner') {
       // Banner nhập khẩu (v0.6.0, mức 1): banner riêng trên khung chat,
       // KHÔNG nằm trong messages nên không gửi lên model. Session đồng
@@ -636,6 +712,29 @@
     else if (m.type === 'attachmentsCleared') { attachmentsEl.innerHTML = ''; }
     else if (m.type === 'attachDone') { clearLoadingGroup('attach'); }
     else if (m.type === 'syncDone') { clearLoadingGroup('sync'); }
+    else if (m.type === 'queued') {
+      // Upsert: đã có bubble chờ cùng id (vd lượt lỗi đưa lại vào
+      // hàng) thì lật lại thành chờ; chưa có thì tạo bubble chờ mới.
+      var existing = m.id ? findQueuedBubble(m.id) : null;
+      if (existing) { markBubbleQueued(existing, m.id); }
+      else {
+        var qdiv = addBubble('user', m.text || '');
+        if (m.id) { qdiv.setAttribute('data-queued-id', m.id); markBubbleQueued(qdiv, m.id); }
+      }
+      clearLoadingGroup('send');
+    }
+    else if (m.type === 'queuedAck') { clearLoadingGroup('send'); }
+    else if (m.type === 'queueRemoved') {
+      var gone = m.id ? findQueuedBubble(m.id) : null;
+      if (gone) { gone.remove(); }
+    }
+    else if (m.type === 'sendRejected') {
+      // Tin bị từ chối (đính kèm/khác): khôi phục text vào ô nhập,
+      // hiện lý do rõ ràng, không mất tin, không kẹt loading.
+      inputEl.value = m.text || '';
+      addBubble('error', m.reason || 'Tin nhắn chưa được gửi.');
+      clearLoadingGroup('send');
+    }
     else if (m.type === 'sessions') {
       // v0.8.13: 'sessions' là tín hiệu hoàn tất của nhóm thao tác
       // session (tạo mới/đổi tên/xóa/mở tab mới/xóa item) — clear
@@ -643,6 +742,7 @@
       // thái loading của chúng mất theo DOM mới, clear nhóm là để
       // dọn các nút sidebar còn tồn tại.
       clearLoadingGroup('session');
+      currentSessionId = m.currentId || null;
       renderAccountFilter(m.accountFilterOptions, m.accountFilter);
       // Khôi phục chiều rộng cột đã lưu (v0.8.10); đang kéo thì không
       // áp để khỏi giật lại chiều rộng giữa chừng.
@@ -796,7 +896,7 @@
       // lẫn mỗi lần chuyển hội thoại.
       scrollMessagesToBottomSettled();
     }
-    else if (m.type === 'historyCleared') { messagesEl.innerHTML = ''; attachmentsEl.innerHTML = ''; streamBubble = null; streamRaw = ''; }
+    else if (m.type === 'historyCleared') { messagesEl.innerHTML = ''; attachmentsEl.innerHTML = ''; streamBubble = null; streamRaw = ''; clearLiveStatus(); lastOrdinaryStatus = ''; }
     else if (m.type === 'logLine') { addLogLine(m.time || '', m.text || ''); }
     else if (m.type === 'logs') {
       var t = m.time || '';
@@ -804,6 +904,18 @@
       renderLogs();
     }
     else if (m.type === 'preset') { inputEl.value = m.text || ''; send(); }
-    else if (m.type === 'done') { clearLoadingGroup('send'); statusEl.textContent = 'Sẵn sàng.'; }
+    else if (m.type === 'done') {
+      clearLoadingGroup('send');
+      // 'done' chỉ xóa live-status khi đúng session đang mở (host gửi
+      // kèm sessionId); 'done' của session khác (origin đã chuyển đi)
+      // chỉ clear loading, không được đặt "Sẵn sàng." đè status live
+      // của session đang mở. 'done' không kèm sessionId (đường thoát
+      // sớm cũ) thì giữ hành vi cũ.
+      if (!m.sessionId || m.sessionId === currentSessionId) {
+        clearLiveStatus();
+        lastOrdinaryStatus = 'Sẵn sàng.';
+        statusEl.textContent = 'Sẵn sàng.';
+      }
+    }
   });
 })();
