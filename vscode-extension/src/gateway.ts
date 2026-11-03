@@ -11,9 +11,19 @@ import * as crypto from 'crypto';
 //      hoặc một cửa sổ VS Code khác đã khởi động trước) thì DÙNG LUÔN, không
 //      khởi động thêm một tiến trình nữa trên cùng cổng.
 //   2. Nếu chưa có gateway nào, khởi động binary kèm theo trong
-//      bin/<nền tảng>/ (hiện chỉ đóng gói win-x64; nền tảng khác báo rõ).
+//      bin/<nền tảng>/ (win-x64, osx-arm64; nền tảng khác báo rõ).
 //   3. Nếu muse.gatewayMode = "external" thì không bao giờ tự khởi động,
 //      chỉ kiểm tra gateway ngoài.
+//
+// v0.8.28: binary kèm theo là bản framework-dependent (không còn runtime
+// .NET đóng gói kèm — máy user phải cài .NET 10 Runtime + ASP.NET Core
+// Runtime, và WindowsDesktop Runtime trên Windows; thiếu runtime thì
+// gateway thoát ngay và extension map output "framework not found" thành
+// thông báo tiếng Việt kèm link tải Microsoft). Node của Playwright cũng
+// không còn đóng gói trong vsix: extension tự phân giải node lúc chạy
+// (PLAYWRIGHT_NODEJS_PATH → node hệ thống >= 20 → tải bản ghim v24.22.1
+// về thư mục dữ liệu gateway sau khi user đồng ý) và đặt biến đó cho
+// tiến trình gateway.
 //
 // Key: nếu muse.apiKey trong Settings có giá trị thì dùng nó (cả cho gateway
 // kèm theo lẫn gateway ngoài). Nếu để trống, key cho gateway kèm theo được
@@ -80,6 +90,85 @@ async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Pro
   } finally {
     clearTimeout(t);
   }
+}
+
+// ---------------- Node cho Playwright + runtime thiếu (v0.8.28) ----------------
+// Từ 0.8.28, vsix KHÔNG còn đóng gói runtime .NET (gateway + helper đều
+// framework-dependent) và KHÔNG còn đóng gói node của Playwright.
+// Extension tự phân giải node lúc chạy theo thứ tự: PLAYWRIGHT_NODEJS_PATH
+// (user đặt sẵn) → node hệ thống → tải bản ghim về thư mục dữ liệu gateway
+// (chỉ sau khi user đồng ý, theo đúng quy tắc "không tải ngầm" của luồng
+// cài Chromium). Bản ghim = đúng bản node mà Playwright 1.64.1 đóng gói
+// sẵn (v24.22.1, đọc từ chuỗi version trong node.exe của gói cũ), thỏa yêu
+// cầu engines "node >= 20" trong playwright-core 1.64.1. Playwright .NET
+// 1.64.1 tôn trọng biến PLAYWRIGHT_NODEJS_PATH (chuỗi này có trong
+// Microsoft.Playwright.dll và đã kiểm chứng thực nghiệm bằng driver thật:
+// driver spawn đúng node được chỉ qua biến này, xem README 0.8.28).
+export const PLAYWRIGHT_NODE_MIN_MAJOR = 20;
+export const PINNED_NODE_VERSION = '24.22.1';
+export const DOTNET_DOWNLOAD_URL = 'https://dotnet.microsoft.com/download/dotnet/10.0';
+
+export interface NodeVersion { major: number; minor: number; patch: number; }
+
+export function parseNodeVersion(output: string): NodeVersion | null {
+  const m = /v?(\d+)\.(\d+)\.(\d+)/.exec(output || '');
+  if (!m) { return null; }
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
+}
+
+export function isNodeCompatible(v: NodeVersion | null): boolean {
+  return !!v && v.major >= PLAYWRIGHT_NODE_MIN_MAJOR;
+}
+
+export interface NodeDownloadSpec { url: string; archiveName: string; exeRelPath: string; }
+
+export function nodeDownloadSpec(platform: NodeJS.Platform, arch: string): NodeDownloadSpec | null {
+  const v = PINNED_NODE_VERSION;
+  if (platform === 'win32' && arch === 'x64') {
+    return { url: `https://nodejs.org/dist/v${v}/node-v${v}-win-x64.zip`, archiveName: `node-v${v}-win-x64.zip`, exeRelPath: `node-v${v}-win-x64/node.exe` };
+  }
+  if (platform === 'darwin' && arch === 'arm64') {
+    return { url: `https://nodejs.org/dist/v${v}/node-v${v}-darwin-arm64.tar.gz`, archiveName: `node-v${v}-darwin-arm64.tar.gz`, exeRelPath: `node-v${v}-darwin-arm64/bin/node` };
+  }
+  if (platform === 'darwin' && arch === 'x64') {
+    return { url: `https://nodejs.org/dist/v${v}/node-v${v}-darwin-x64.tar.gz`, archiveName: `node-v${v}-darwin-x64.tar.gz`, exeRelPath: `node-v${v}-darwin-x64/bin/node` };
+  }
+  if (platform === 'linux' && arch === 'x64') {
+    return { url: `https://nodejs.org/dist/v${v}/node-v${v}-linux-x64.tar.xz`, archiveName: `node-v${v}-linux-x64.tar.xz`, exeRelPath: `node-v${v}-linux-x64/bin/node` };
+  }
+  return null;
+}
+
+// Map output lỗi thiếu runtime của dotnet apphost thành thông báo tiếng
+// Việt nêu rõ runtime nào thiếu + link tải chính thức + lệnh khởi động
+// lại. Hai dạng output thật của apphost: (1) hoàn toàn không tìm thấy
+// .NET ("You must install .NET to run this application" / ".NET location:
+// Not found") — trường hợp phổ biến nhất với máy chưa cài .NET, lúc đó
+// cần cả .NET Runtime + ASP.NET Core Runtime (+ WindowsDesktop trên
+// Windows cho helper); (2) có runtime nhưng thiếu đúng framework/version
+// ("The framework 'Microsoft.X.App', version ... was not found") — chỉ
+// khớp khi output vừa nhắc tên framework vừa báo không tìm thấy, tránh
+// dương tính giả với log nhắc tên framework khác.
+export interface RuntimeMissingInfo { runtimes: string[]; message: string; }
+
+export function mapRuntimeMissingError(output: string): RuntimeMissingInfo | null {
+  if (!output) { return null; }
+  let runtimes: string[] = [];
+  if (/You must install \.NET to run this application/i.test(output) || /\.NET location:\s*Not found/i.test(output)) {
+    runtimes = ['.NET 10 Runtime', 'ASP.NET Core Runtime 10', 'WindowsDesktop Runtime 10 (chỉ Windows)'];
+  } else {
+    const notFound = /was not found|not possible to find any compatible framework/i.test(output);
+    if (!notFound) { return null; }
+    if (/Microsoft\.NETCore\.App/i.test(output)) { runtimes.push('.NET 10 Runtime'); }
+    if (/Microsoft\.AspNetCore\.App/i.test(output)) { runtimes.push('ASP.NET Core Runtime 10'); }
+    if (/Microsoft\.WindowsDesktop\.App/i.test(output)) { runtimes.push('WindowsDesktop Runtime 10 (chỉ Windows)'); }
+    if (runtimes.length === 0) { return null; }
+  }
+  const list = runtimes.join(', ');
+  return {
+    runtimes,
+    message: `Gateway kèm theo không chạy được vì máy này thiếu runtime: ${list}. Hãy tải và cài runtime .NET 10 chính thức của Microsoft tại ${DOTNET_DOWNLOAD_URL} (trang này có đủ .NET Runtime, ASP.NET Core Runtime và WindowsDesktop Runtime cho Windows/macOS/Linux), cài xong thì dùng lệnh "Muse: Khởi động lại gateway" rồi gửi lại.`,
+  };
 }
 
 export class GatewayManager {
@@ -425,6 +514,16 @@ export class GatewayManager {
     const key = await this.managedApiKey();
     const dataDir = this.dataDir();
     const chromium = this.findChromium();
+    // v0.8.28: vsix không còn đóng gói node nên phải phân giải xong node
+    // mới khởi động gateway kèm theo; không có node thì báo rõ ngay thay
+    // vì để gateway chạy rồi driver mới vỡ giữa chừng.
+    const nodeRes = await this.resolvePlaywrightNode();
+    if (!nodeRes.ok) {
+      const msg = `Gateway kèm theo cần Node để chạy driver Playwright nhưng ${nodeRes.message}. Hãy cài Node 20 trở lên rồi dùng lệnh "Muse: Khởi động lại gateway".`;
+      this.setStatus('error', msg);
+      throw new Error(msg);
+    }
+    this.log(`[Muse] Node cho Playwright: ${nodeRes.source} (${nodeRes.path})`);
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       MUSE2API_HOST: '127.0.0.1',
@@ -433,6 +532,7 @@ export class GatewayManager {
       MUSE2API_DATA_DIR: dataDir,
       MUSE2API_API_KEY: key,
       MUSE2API_HEADLESS: 'true',
+      PLAYWRIGHT_NODEJS_PATH: nodeRes.path,
       DOTNET_CLI_TELEMETRY_OPTOUT: '1',
       DOTNET_NOLOGO: '1',
     };
@@ -474,6 +574,13 @@ export class GatewayManager {
     while (Date.now() < deadline) {
       if (child.exitCode !== null) {
         const tail = this.lastLogTail();
+        // v0.8.28: gateway framework-dependent thoát ngay vì thiếu runtime
+        // thì báo rõ runtime nào + link tải, thay vì lỗi chung chung.
+        const missing = mapRuntimeMissingError(tail);
+        if (missing) {
+          this.setStatus('error', missing.message);
+          throw new Error(missing.message);
+        }
         const browserMissing = tail.includes('Playwright Chromium') || tail.includes('playwright.ps1');
         if (browserMissing) {
           // Hỏi lại khi gateway thất bại thật vì thiếu trình duyệt
@@ -591,5 +698,121 @@ export class GatewayManager {
     const result = await this.installBrowserDetailed(onProgress);
     if (result.ok) { return 'Đã cài Chromium cho gateway. Hãy dùng lệnh "Muse: Khởi động lại gateway" rồi gửi yêu cầu.'; }
     return result.message.includes('Hãy cài') ? result.message : `${result.message} Hãy cài Edge hoặc Chrome rồi khởi động lại gateway.`;
+  }
+
+  // ---------------- Node cho Playwright (v0.8.28) ----------------
+  // Vsix không còn đóng gói node nên gateway kèm theo chỉ chạy được khi
+  // extension phân giải xong node và đặt PLAYWRIGHT_NODEJS_PATH cho tiến
+  // trình gateway. Thứ tự: env → node hệ thống (>= 20) → node đã tải về
+  // → hỏi user rồi tải bản ghim. Gateway ngoài tự lo node ở máy chạy nó
+  // nên luồng này chỉ chạy cho gateway kèm theo.
+  private nodeDownloadPromptDone = false;
+
+  private execFileText(cmd: string, args: string[], timeoutMs = 10000): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      execFile(cmd, args, { timeout: timeoutMs, windowsHide: true }, (err, stdout) => {
+        if (err) { reject(err); return; }
+        resolve(String(stdout));
+      });
+    });
+  }
+
+  private async nodeVersionAt(nodePath: string): Promise<NodeVersion | null> {
+    try {
+      const out = await this.execFileText(nodePath, ['--version'], 10000);
+      return parseNodeVersion(out);
+    } catch { return null; }
+  }
+
+  private async findSystemNode(): Promise<string | undefined> {
+    const locator = process.platform === 'win32' ? 'where' : 'which';
+    try {
+      const out = await this.execFileText(locator, ['node'], 10000);
+      const first = out.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
+      if (!first) { return undefined; }
+      const v = await this.nodeVersionAt(first);
+      return isNodeCompatible(v) ? first : undefined;
+    } catch { return undefined; }
+  }
+
+  private downloadedNodeDir(): string {
+    return path.join(this.dataDir(), 'node', PINNED_NODE_VERSION);
+  }
+
+  private async downloadedNodePath(): Promise<string | undefined> {
+    const spec = nodeDownloadSpec(process.platform, process.arch);
+    if (!spec) { return undefined; }
+    const exe = path.join(this.downloadedNodeDir(), spec.exeRelPath);
+    if (!fs.existsSync(exe)) { return undefined; }
+    const v = await this.nodeVersionAt(exe);
+    if (!v || `${v.major}.${v.minor}.${v.patch}` !== PINNED_NODE_VERSION) { return undefined; }
+    return exe;
+  }
+
+  private spawnPromise(cmd: string, args: string[], opts: { cwd?: string; windowsHide?: boolean } = {}): Promise<{ code: number | null; error?: Error }> {
+    return new Promise((resolve) => {
+      const child = spawn(cmd, args, { ...opts });
+      child.on('exit', (code) => resolve({ code }));
+      child.on('error', (e) => resolve({ code: null, error: e }));
+    });
+  }
+
+  private async downloadNode(): Promise<string> {
+    const spec = nodeDownloadSpec(process.platform, process.arch);
+    if (!spec) { throw new Error('Nền tảng này không có bản Node ghim sẵn.'); }
+    const dir = this.downloadedNodeDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const archive = path.join(dir, spec.archiveName);
+    this.output.appendLine(`[Muse] Đang tải Node ${PINNED_NODE_VERSION} cho Playwright từ nodejs.org…`);
+    const res = await fetch(spec.url);
+    if (!res.ok) { throw new Error(`Tải Node thất bại (HTTP ${res.status}).`); }
+    fs.writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
+    if (process.platform === 'win32') {
+      const ps = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'powershell.exe';
+      const r = await this.spawnPromise(ps, ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -LiteralPath '${archive}' -DestinationPath '${dir}' -Force`], { windowsHide: true });
+      if (r.code !== 0) { throw new Error(`Giải nén Node thất bại (mã ${r.code}).`); }
+    } else if (process.platform === 'darwin') {
+      const r = await this.spawnPromise('tar', ['-xzf', archive, '-C', dir]);
+      if (r.code !== 0) { throw new Error(`Giải nén Node thất bại (mã ${r.code}).`); }
+    } else {
+      const r = await this.spawnPromise('tar', ['-xJf', archive, '-C', dir]);
+      if (r.code !== 0) { throw new Error(`Giải nén Node thất bại (mã ${r.code}).`); }
+    }
+    const exe = path.join(dir, spec.exeRelPath);
+    if (!fs.existsSync(exe)) { throw new Error('Giải nén Node xong nhưng không thấy file chạy node.'); }
+    if (process.platform !== 'win32') { try { fs.chmodSync(exe, 0o755); } catch { /* không chmod được vẫn thử chạy */ } }
+    const v = await this.nodeVersionAt(exe);
+    if (!v || `${v.major}.${v.minor}.${v.patch}` !== PINNED_NODE_VERSION) { throw new Error(`Node tải về không đúng bản ${PINNED_NODE_VERSION}.`); }
+    try { fs.unlinkSync(archive); } catch { /* giữ archive cũng không sao */ }
+    return exe;
+  }
+
+  async resolvePlaywrightNode(): Promise<{ ok: true; path: string; source: 'env' | 'system' | 'downloaded' } | { ok: false; message: string }> {
+    const envPath = process.env.PLAYWRIGHT_NODEJS_PATH;
+    if (envPath && fs.existsSync(envPath)) { return { ok: true, path: envPath, source: 'env' }; }
+    const system = await this.findSystemNode();
+    if (system) { return { ok: true, path: system, source: 'system' }; }
+    const downloaded = await this.downloadedNodePath();
+    if (downloaded) { return { ok: true, path: downloaded, source: 'downloaded' }; }
+    if (this.nodeDownloadPromptDone) {
+      return { ok: false, message: 'chưa có Node tương thích và bạn đã chọn không tải Node lúc này' };
+    }
+    this.nodeDownloadPromptDone = true;
+    if (!nodeDownloadSpec(process.platform, process.arch)) {
+      return { ok: false, message: 'nền tảng này không có bản Node ghim sẵn để tải' };
+    }
+    const answer = await vscode.window.showWarningMessage(
+      `Gateway cần Node để chạy driver Playwright nhưng máy này chưa có Node tương thích (cần Node 20 trở lên). Bạn có muốn extension tải Node ${PINNED_NODE_VERSION} về thư mục dữ liệu gateway ngay không? (Tải một lần, khoảng 25–35 MB, từ nodejs.org; hoặc bạn có thể tự cài Node 20+ rồi khởi động lại gateway.)`,
+      { modal: true }, 'Tải ngay', 'Để sau');
+    if (answer !== 'Tải ngay') {
+      return { ok: false, message: 'chưa có Node tương thích và bạn đã chọn không tải Node lúc này' };
+    }
+    this.output.show(true);
+    try {
+      const p = await this.downloadNode();
+      return { ok: true, path: p, source: 'downloaded' };
+    } catch (e) {
+      return { ok: false, message: `tải Node thất bại (${e instanceof Error ? e.message : String(e)})` };
+    }
   }
 }
