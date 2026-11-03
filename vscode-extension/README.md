@@ -1,4 +1,23 @@
-# Muse cho VS Code (v0.8.28)
+# Muse cho VS Code (v0.8.29)
+
+## Mới trong v0.8.29: tool media chat tự lưu output vào đúng đường dẫn user chỉ định trong tin nhắn
+
+Trong khung chat, user gửi prompt KÈM đường dẫn đích trong cùng một tin nhắn thì model gọi ngay tool media và extension lưu output thẳng vào đường dẫn đó, không mở hộp thoại chọn thư mục, không bắt user đính kèm hay lưu thủ công. Ví dụ tin nhắn mẫu: "Tạo video mèo đuổi bướm, lưu vào D:\videos\meo.mp4" → gọi ngay `generate_video` với path đó, lưu xong câu trả lời cuối nêu rõ đường dẫn cuối cùng đã lưu.
+
+**4 tool mới trong khung chat** (trong `execute()` của `src/extension.ts`, tái sử dụng hàm sẵn có trong `src/media.ts`; gateway không đổi, dùng đúng endpoint `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/media/{name}` đã có):
+
+- `generate_image {prompt, path, n?, size?}`: n 1–4 (mặc định 1); n = 1 thì lưu đúng path; n > 1 thì chèn `_1.._n` trước đuôi file; path không có đuôi thì thêm `.png`.
+- `edit_image {prompt, path, images}`: images là 1–4 đường dẫn ảnh gốc TRONG workspace (đầu vào nên dùng `resolve()` thường, ngoài workspace thì lỗi như tool khác).
+- `generate_video {prompt, path, duration?, first_frame?}`: duration 1–60 giây; poll tối đa 15 phút như lệnh palette nhưng báo tiến trình định kỳ qua sink status (không để UI đứng im) và hủy được bằng AbortController của run hiện tại (mẫu 0.8.27) khi user bấm Dừng; path không có đuôi thì thêm `.mp4`.
+- `save_media {url, path}`: tải URL bất kỳ về đúng path (dùng chung logic `downloadMedia`).
+
+**Quy tắc đường dẫn (bắt buộc, vì đây là tool ghi file tự động).** Tương đối → resolve dưới workspace root như các tool khác. Tuyệt đối trong workspace → cho phép. Tuyệt đối ngoài workspace → CHỈ cho phép khi chuỗi path đã chuẩn hóa (thống nhất dấu `/` và `\`) xuất hiện đúng trong tin nhắn user của lượt chat đó — tin nhắn user chính là sự cho phép cho đúng đường dẫn đó; không khớp thì TỪ CHỐI với thông báo nêu rõ path bị từ chối và lý do, tuyệt đối không ghi theo path model bịa ra. Không bao giờ mở hộp thoại lưu trong các tool chat này. File đích đã tồn tại thì ghi đè (vì đó là "đường dẫn cuối cùng" user chỉ định) và kết quả tool ghi rõ đã ghi đè file nào. User yêu cầu tạo media mà không nêu đường dẫn thì tool báo rõ là thiếu đường dẫn, model hỏi lại user, không tự chọn đường dẫn mặc định. Cả hai envelope `tool_calls` và `actions` đều gọi được 4 tool mới (bảng map actions bổ sung như `send_file` ở 0.8.23).
+
+**Lựa chọn duyệt ghi (ghi rõ để khỏi hiểu lầm).** 4 tool mới KHÔNG thuộc `READ_ONLY_TOOLS`. Khi quy tắc đường dẫn thỏa thì extension BỎ QUA modal duyệt ghi — vì tin nhắn user đã là sự cho phép cho đúng đường dẫn đó, hỏi lại modal nữa thì đúng yêu cầu "tự lưu, không hỏi" của user sẽ vỡ. Ngoại lệ duy nhất giữ nguyên luật đứng: đường dẫn nhạy cảm (`.env`/`.key`/`.pem`/`.git`/`secrets`...) vẫn hỏi modal riêng kể cả khi quy tắc thỏa. Trường hợp đường dẫn không thỏa thì từ chối thẳng chứ không đi qua modal. Ba lệnh palette "Muse: Tạo ảnh / Sửa ảnh / Tạo video" GIỮ NGUYÊN hộp thoại chọn thư mục sau khi tạo — chỉ tool chat mới lưu thẳng.
+
+**Không đổi.** RunManager đa hội thoại, composer resizer, send_file, luồng gửi video 0.8.24–0.8.26, gateway framework-dependent và phân giải node của 0.8.28 giữ nguyên.
+
+**Kiểm chứng 0.8.29.** `tsc` PASS; `dotnet build` gateway PASS 0 warning (gateway không sửa logic, chỉ bump version). Harness qua code thật đã biên dịch: 37/37 PASS — resolve đường dẫn tương đối/tuyệt đối cả posix lẫn win32 (tương đối thoát root thì escape, tuyệt đối ngoài workspace khớp tin nhắn sau chuẩn hóa dấu `/\` thì cho phép, không khớp thì từ chối, thiếu path thì missing), đặt tên file n > 1 và thêm đuôi mặc định, quyết định skip/ask/refuse của `decideMediaWrite`, cả hai envelope `tool_calls` và `actions` đều gọi được 4 tool mới, `sleepAbortable` và vòng poll `createVideo` hủy ngay khi abort (không chờ hết 15 phút). Kiểm chứng từ chính vsix đã đóng gói (ghi ở dưới sau khi build). Chưa kiểm chứng đầu cuối trên máy thật: luồng chat thật tạo video rồi lưu đúng đường dẫn tuyệt đối ngoài workspace, và hủy giữa chừng khi tạo video — thuộc về user thử.
 
 ## Mới trong v0.8.28: tối ưu triệt để — gateway framework-dependent + node tự phân giải (vsix chỉ còn vài MB)
 

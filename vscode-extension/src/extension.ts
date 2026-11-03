@@ -7,7 +7,7 @@ import { execFile } from 'child_process';
 import { GatewayManager, GatewayConfig, GatewayState } from './gateway';
 import { fetchGatewayStatus, fetchGatewayAccounts, resetGatewayAccount, renewGatewayAccount, patchGatewayAccount, deleteGatewayAccount, formatAccountLine, fetchWebThreads, registerConversation, deleteGatewayConversation, fetchConversationOwner, fetchThreadMessages, resolveWebTitleUpdated, sessionMatchesAccountFilter, isGenericWebTitle, titleFromFirstUserMessage, fallbackWebTitle, isFallbackWebTitle } from './admin';
 import { BackgroundProcesses } from './processes';
-import { generateImages, editImage, createVideo, downloadMedia, dataUrlOfImageFile, MAX_IMAGE_BYTES } from './media';
+import { generateImages, editImage, createVideo, downloadMedia, downloadMediaToFile, writeMediaBuffer, dataUrlOfImageFile, MAX_IMAGE_BYTES } from './media';
 import { ComputerHelper, COMPUTER_TOOLS, approveComputerAction, describeComputerCall } from './computer';
 import { MuseSettingsPanel } from './settings';
 import { SessionStore, ChatSession, ChatMsg, StoreChange } from './sessions';
@@ -64,6 +64,15 @@ interface RunCtx {
   lastToolFiles: ToolFilePart[];
   lastComputerImage?: string;
   turnFileCount: number;
+  // v0.8.29: tool media chat cần 3 thứ của riêng lượt này — tin nhắn
+  // user gốc (để kiểm tra đường dẫn tuyệt đối ngoài workspace có nằm
+  // trong tin nhắn không), gateway đã ensure (baseUrl/apiKey thật, vì
+  // execute() chỉ nhận conf settings chứ không có key quản lý), và
+  // callback báo tiến trình tạo video qua sink (execute() không cầm
+  // sink trực tiếp). Đặt ở run(), sau ensureStarted mới đủ cả ba.
+  turnUserText: string;
+  gateway?: { baseUrl: string; apiKey: string };
+  onStatus?: (text: string) => void;
 }
 
 // Sink hiển thị của một run (v0.8.27): thay cho this.post() trong vòng
@@ -292,6 +301,87 @@ export function findSendFileCandidates(root: string, arg: string): string[] {
   return out;
 }
 
+// v0.8.29: quy tắc đường dẫn đích cho tool media chat (generate_image,
+// edit_image, generate_video, save_media). Đây là tool GHI FILE TỰ ĐỘNG
+// theo đường dẫn model đưa ra nên phải chặn model bịa đường dẫn ra
+// ngoài workspace — khác với resolve() của tool thường (ném lỗi cho
+// MỌI đường dẫn ngoài workspace, kể cả đường dẫn user đã chỉ định):
+// - Tương đối → resolve dưới workspace root, thoát root bằng '..' thì
+//   từ chối (escape).
+// - Tuyệt đối trong workspace → cho phép.
+// - Tuyệt đối ngoài workspace → CHỈ cho phép khi chuỗi path đã chuẩn
+//   hóa (thống nhất dấu / và \) xuất hiện đúng trong tin nhắn user của
+//   lượt chat đó — tin nhắn user chính là sự cho phép cho đúng đường
+//   dẫn đó. Không khớp thì từ chối, tuyệt đối không ghi theo path
+//   model bịa ra, và KHÔNG mở hộp thoại lưu (tool chat không hỏi lại).
+// pm là module path của nền tảng đích (mặc định là path của máy chạy);
+// harness truyền path.win32/path.posix để test cả đường dẫn Windows
+// kiểu D:\... ngay trên Linux. Hàm thuần để test trực tiếp.
+export function normalizePathForMatch(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+export type MediaDestResult =
+  | { ok: true; abs: string }
+  | { ok: false; reason: 'missing' | 'escape' | 'outside_unmatched'; raw: string };
+
+export function resolveMediaDest(
+  root: string, rawPath: string, userText: string, pm: typeof path = path,
+): MediaDestResult {
+  const raw = rawPath.trim();
+  if (!raw) { return { ok: false, reason: 'missing', raw: rawPath }; }
+  if (pm.isAbsolute(raw)) {
+    const abs = pm.resolve(raw);
+    const rel = pm.relative(root, abs);
+    const inside = rel !== '' && rel !== '..' && !rel.startsWith('..' + pm.sep) && !pm.isAbsolute(rel);
+    if (inside || abs === root) { return { ok: true, abs }; }
+    const normAbs = normalizePathForMatch(abs);
+    const normUser = normalizePathForMatch(userText);
+    if (normUser.includes(normAbs)) { return { ok: true, abs }; }
+    return { ok: false, reason: 'outside_unmatched', raw: rawPath };
+  }
+  const abs = pm.resolve(root, raw.replace(/\\/g, '/'));
+  const rel = pm.relative(root, abs);
+  if (rel === '..' || rel.startsWith('..' + pm.sep) || pm.isAbsolute(rel)) {
+    return { ok: false, reason: 'escape', raw: rawPath };
+  }
+  return { ok: true, abs };
+}
+
+// Đặt tên file đích cho tool media (hàm thuần để test trực tiếp):
+// - Chưa có đuôi thì thêm đuôi mặc định (.png cho ảnh, .mp4 cho video).
+// - generate_image với n > 1 thì chèn _1.._n TRƯỚC đuôi file
+//   (out/a.png → out/a_1.png, out/a_2.png), n = 1 giữ nguyên path.
+export function mediaDestWithDefaultExt(absPath: string, defaultExt: string, pm: typeof path = path): string {
+  return pm.extname(absPath) === '' ? absPath + defaultExt : absPath;
+}
+
+export function numberedMediaDest(absPath: string, index: number, pm: typeof path = path): string {
+  const ext = pm.extname(absPath);
+  return absPath.slice(0, absPath.length - ext.length) + '_' + index + ext;
+}
+
+// Quyết định duyệt ghi cho tool media chat (hàm thuần để test trực
+// tiếp): refuse khi đường dẫn không thỏa quy tắc (thiếu/escape/
+// ngoài workspace mà không khớp tin nhắn user); ask khi đường dẫn thỏa
+// nhưng là đường dẫn nhạy cảm (luật đứng: nhạy cảm luôn hỏi riêng kể
+// cả khi autoApprove bật); skip khi thỏa và không nhạy cảm — tin nhắn
+// user đã là sự cho phép cho đúng đường dẫn đó nên không mở modal
+// duyệt ghi (README 0.8.29 ghi rõ lựa chọn này).
+export type MediaWriteDecision =
+  | { decision: 'skip'; abs: string }
+  | { decision: 'ask'; abs: string }
+  | { decision: 'refuse'; reason: 'missing' | 'escape' | 'outside_unmatched'; raw: string };
+
+export function decideMediaWrite(
+  root: string, rawPath: string, userText: string, sensitive: boolean, pm: typeof path = path,
+): MediaWriteDecision {
+  const resolved = resolveMediaDest(root, rawPath, userText, pm);
+  if (!resolved.ok) { return { decision: 'refuse', reason: resolved.reason, raw: resolved.raw }; }
+  if (sensitive) { return { decision: 'ask', abs: resolved.abs }; }
+  return { decision: 'skip', abs: resolved.abs };
+}
+
 // v0.8.19: thứ tự hiển thị danh sách hội thoại, mới nhất lên đầu.
 // Chỉ đổi thứ tự hiển thị: không đổi thứ tự lưu trong store (sort trên
 // bản sao), tie-break createdAt desc rồi giữ thứ tự gốc nhờ sort ổn định.
@@ -359,6 +449,25 @@ const SYSTEM_PROMPT = [
   'workdir, shell, timeout_seconds} hoặc run_command {command, background:true,',
   'timeout_seconds} để chạy nền rồi dùng process_status/process_input/',
   'process_stop với process_id trả về, git_status {}, git_diff {}.',
+  'CÔNG CỤ TẠO MEDIA VÀ LƯU THẲNG VÀO ĐƯỜNG DẪN (v0.8.29): khi tin',
+  'nhắn user vừa có prompt tạo media vừa có đường dẫn đích thì gọi ngay',
+  'tool dưới đây với đúng đường dẫn đó, KHÔNG hỏi lại, KHÔNG mở hộp',
+  'thoại lưu (khác 3 lệnh palette "Muse: Tạo ảnh / Sửa ảnh / Tạo video"',
+  'vẫn hỏi thư mục sau khi tạo). Sau khi lưu xong, câu trả lời cuối',
+  'PHẢI nêu rõ đường dẫn cuối cùng đã lưu.',
+  'generate_image {prompt, path, n?, size?} (n 1–4, mặc định 1; n = 1',
+  'thì lưu đúng path; n > 1 thì chèn _1.._n trước đuôi file; path',
+  'không có đuôi thì thêm .png), edit_image {prompt, path, images}',
+  '(images là 1–4 đường dẫn ảnh gốc trong workspace), generate_video',
+  '{prompt, path, duration?, first_frame?} (duration 1–60 giây; tạo',
+  'video có thể chờ tới 15 phút, user bấm Dừng thì dừng được),',
+  'save_media {url, path} (tải URL bất kỳ về đúng path). Ví dụ user',
+  'viết "Tạo video mèo đuổi bướm, lưu vào D:\\videos\\meo.mp4" thì gọi',
+  'ngay generate_video với path đó, không hỏi lại. Nếu user yêu cầu tạo',
+  'media mà KHÔNG nêu đường dẫn thì báo rõ là thiếu đường dẫn và hỏi',
+  'lại user, tuyệt đối không tự chọn đường dẫn mặc định, không tự đoán.',
+  'File đích đã tồn tại thì ghi đè (vì đó là "đường dẫn cuối cùng"',
+  'user chỉ định) và kết quả tool sẽ ghi rõ đã ghi đè file nào.',
   'Công cụ điều khiển màn hình (chỉ thử nghiệm, chỉ Windows, chỉ khi người',
   'dùng đã bật và chọn cửa sổ đích): computer_list_windows {},',
   'computer_inspect {element_id?}, computer_screenshot {}, computer_click',
@@ -377,7 +486,11 @@ const SYSTEM_PROMPT = [
   'Quy tắc: tệp đã có phải đọc trước khi sửa; edit_file yêu cầu old_text khớp',
   'đúng một lần; ưu tiên sửa nhỏ thay vì ghi đè toàn bộ; bỏ qua thư mục',
   'bin, obj, node_modules, .git khi duyệt/tìm; đường dẫn chỉ trong workspace,',
-  'không dùng đường dẫn tuyệt đối ngoài workspace; lệnh không chờ nhập liệu,',
+  'không dùng đường dẫn tuyệt đối ngoài workspace — NGOẠI LỆ DUY NHẤT:',
+  '4 tool media v0.8.29 được ghi ra đường dẫn tuyệt đối ngoài workspace',
+  'KHI VÀ CHỈ KHI chuỗi đường dẫn đó (thống nhất dấu / và \\) xuất hiện',
+  'đúng trong tin nhắn user của lượt đó; ngoài trường hợp đó thì tool',
+  'media cũng từ chối đường dẫn ngoài workspace như mọi tool khác; lệnh không chờ nhập liệu,',
   'không chạy lệnh tương tác; một lệnh chỉ được coi là thành công khi',
   'exit_code = 0. Thao tác ghi tệp và chạy lệnh sẽ được extension hỏi người',
   'dùng duyệt trước khi thực thi; nếu bị từ chối thì tôn trọng, không thử',
@@ -2152,7 +2265,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     const sink = this.createRunSink(targetId);
     // Trạng thái của riêng lượt này (thay cho các trường provider cũ
     // đã gây race khi cùng surface gửi 2 session — xem RunCtx).
-    const ctx: RunCtx = { lastStreamed: false, lastToolImages: [], lastToolFiles: [], lastComputerImage: undefined, turnFileCount: 0 };
+    const ctx: RunCtx = { lastStreamed: false, lastToolImages: [], lastToolFiles: [], lastComputerImage: undefined, turnFileCount: 0, turnUserText: userText };
     // Lịch sử của session đích (tham chiếu sống tới session.messages
     // trong store): vòng lặp đọc/ghi trực tiếp lên nó, không qua
     // this.history của bề mặt (bề mặt có thể đã chuyển đi nơi khác).
@@ -2185,6 +2298,10 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       sink.post('status', { text: 'Đang kiểm tra gateway…' });
       const gw = await this.gateway.ensureStarted();
       gwConf = { ...conf, baseUrl: gw.baseUrl, apiKey: gw.apiKey };
+      // v0.8.29: tool media chat cần gateway đã ensure + callback báo
+      // tiến trình tạo video qua sink (execute() không cầm sink).
+      ctx.gateway = { baseUrl: gw.baseUrl, apiKey: gw.apiKey };
+      ctx.onStatus = (text: string) => sink.post('status', { text });
       sink.post('status', { text: gw.mode === 'bundled' ? 'Gateway kèm theo đã sẵn sàng.' : 'Đã kết nối gateway sẵn có.' });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -2698,6 +2815,109 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         }
         case 'git_status': return await runShell('git status --short', root, 'auto', 30);
         case 'git_diff': return await runShell('git diff --stat && git diff', root, 'auto', 30);
+        case 'generate_image': case 'edit_image': case 'generate_video': case 'save_media': {
+          // v0.8.29: tool media chat — tạo/sửa/tải media rồi lưu THẲNG
+          // vào đường dẫn đích user chỉ định trong tin nhắn, KHÔNG mở
+          // hộp thoại chọn thư mục (khác 3 lệnh palette vẫn dùng hộp
+          // thoại). Đường dẫn đi qua decideMediaWrite: thỏa quy tắc
+          // (trong workspace, hoặc tuyệt đối ngoài workspace nhưng khớp
+          // đúng tin nhắn user) và không nhạy cảm thì BỎ QUA modal
+          // duyệt ghi — tin nhắn user đã là sự cho phép cho đúng đường
+          // dẫn đó; nhạy cảm thì vẫn hỏi modal như luật đứng; không
+          // thỏa thì TỪ CHỐI thẳng, không ghi, không hỏi modal.
+          const gw = ctx.gateway;
+          if (!gw) { return 'Lỗi: gateway chưa sẵn sàng, hãy gửi lại yêu cầu.'; }
+          const rawPath = str(call.args.path);
+          const tool = call.name;
+          if (!rawPath) {
+            return `Lỗi: ${tool} cần tham số path là đường dẫn lưu file cuối cùng. Bạn chưa có đường dẫn này — hãy hỏi lại người dùng đường dẫn đích rồi gọi lại tool, không tự chọn đường dẫn mặc định, không mở hộp thoại lưu.`;
+          }
+          const sensitive = (abs: string): boolean => isSensitivePath(path.relative(root, abs));
+          // Cần abs trước để kiểm tra nhạy cảm: resolve thử (không ghi
+          // gì ở bước này), chỉ dùng abs để tính sensitive.
+          const probe = resolveMediaDest(root, rawPath, ctx.turnUserText);
+          if (!probe.ok) {
+            if (probe.reason === 'escape') { return `Lỗi: đường dẫn ${rawPath} thoát khỏi workspace nên bị từ chối. Hãy dùng đường dẫn trong workspace, hoặc yêu cầu người dùng nêu đúng đường dẫn tuyệt đối trong tin nhắn rồi gọi lại tool.`; }
+            return `Lỗi: đường dẫn tuyệt đối ngoài workspace ${rawPath} không xuất hiện trong tin nhắn của người dùng nên extension từ chối ghi ra ngoài workspace (không ghi theo đường dẫn model tự đưa ra). Hãy yêu cầu người dùng nêu đúng đường dẫn đó trong tin nhắn rồi gọi lại tool.`;
+          }
+          const decision = decideMediaWrite(root, rawPath, ctx.turnUserText, sensitive(probe.abs));
+          if (decision.decision === 'refuse') {
+            return `Lỗi: không ghi được vào ${rawPath} (quy tắc đường dẫn không thỏa).`;
+          }
+          if (decision.decision === 'ask') {
+            const ok = await this.approve(call, root, conf, `Lưu media vào ${decision.abs}`, undefined, decision.abs);
+            if (!ok) { return 'Người dùng đã từ chối lưu media. Không thử lại thao tác này.'; }
+          }
+          const abs = decision.abs;
+          const fmtSaved = (saved: Array<{ path: string; size: number; overwritten: boolean }>): string =>
+            saved.map((s) => `- ${s.path} (${s.size} byte)${s.overwritten ? ' [đã ghi đè file cũ]' : ''}`).join('\n');
+          if (tool === 'save_media') {
+            const url = str(call.args.url);
+            if (!url) { return 'Lỗi: save_media cần url và path.'; }
+            const saved = await downloadMediaToFile(url, abs);
+            return `Đã tải và lưu media vào:\n${fmtSaved([saved])}`;
+          }
+          if (tool === 'generate_video') {
+            const prompt = str(call.args.prompt);
+            if (!prompt) { return 'Lỗi: generate_video cần prompt và path.'; }
+            const duration = call.args.duration === undefined ? undefined : num(call.args.duration, 0);
+            if (duration !== undefined && (!Number.isInteger(duration) || duration < 1 || duration > 60)) {
+              return 'Lỗi: generate_video cần duration là số nguyên từ 1 đến 60 giây.';
+            }
+            let firstFrame: string | undefined;
+            if (str(call.args.first_frame)) {
+              firstFrame = dataUrlOfImageFile(this.resolve(root, str(call.args.first_frame)));
+            }
+            let video;
+            try {
+              video = await createVideo(gw.baseUrl, gw.apiKey, { prompt, duration, firstFrameDataUrl: firstFrame, signal }, (status, pct) => {
+                ctx.onStatus?.(`Đang tạo video… trạng thái: ${status}${pct ? `, tiến trình ${pct}%` : ''}`);
+              });
+            } catch (e) {
+              if (signal.aborted) { return 'Đã dừng tạo video theo yêu cầu.'; }
+              throw e;
+            }
+            if (signal.aborted) { return 'Đã dừng tạo video theo yêu cầu.'; }
+            const dest = mediaDestWithDefaultExt(abs, '.mp4');
+            const saved = await downloadMediaToFile(video.url, dest);
+            return `Đã tạo và lưu video vào:\n${fmtSaved([saved])}`;
+          }
+          // generate_image / edit_image: ảnh, đuôi mặc định .png.
+          const prompt = str(call.args.prompt);
+          if (!prompt) { return `Lỗi: ${tool} cần prompt và path.`; }
+          const base = mediaDestWithDefaultExt(abs, '.png');
+          if (tool === 'generate_image') {
+            const n = call.args.n === undefined ? 1 : num(call.args.n, 1);
+            if (!Number.isInteger(n) || n < 1 || n > 4) { return 'Lỗi: generate_image cần n là số nguyên từ 1 đến 4 (mặc định 1).'; }
+            const size = str(call.args.size) || undefined;
+            const images = await generateImages(gw.baseUrl, gw.apiKey, { prompt, n, size });
+            const dests = n === 1 ? [base] : Array.from({ length: n }, (_, i) => numberedMediaDest(base, i + 1));
+            const saved: Array<{ path: string; size: number; overwritten: boolean }> = [];
+            for (let i = 0; i < Math.min(images.length, dests.length); i++) {
+              const img = images[i];
+              if (img.url) { saved.push(await downloadMediaToFile(img.url, dests[i])); }
+              else if (img.b64) { saved.push(writeMediaBuffer(Buffer.from(img.b64, 'base64'), dests[i])); }
+            }
+            if (saved.length === 0) { return 'Lỗi: gateway không trả về ảnh nào để lưu.'; }
+            const short = saved.length < n ? ` (gateway chỉ trả về ${saved.length}/${n} ảnh)` : '';
+            return `Đã tạo và lưu ${saved.length} ảnh vào:${short}\n${fmtSaved(saved)}`;
+          }
+          // edit_image: images là 1–4 ảnh gốc TRONG workspace (resolve
+          // thường — ngoài workspace thì lỗi như tool khác, không áp
+          // quy tắc khớp tin nhắn vì đây là đầu vào, không phải đích ghi).
+          const sources = call.args.images;
+          if (!Array.isArray(sources) || sources.length < 1 || sources.length > 4) {
+            return 'Lỗi: edit_image cần images là mảng 1–4 đường dẫn ảnh gốc trong workspace.';
+          }
+          const resolvedSources = sources.map((s) => this.resolve(root, String(s)));
+          const images = await editImage(gw.baseUrl, gw.apiKey, { prompt, imagePaths: resolvedSources, n: 1 });
+          if (images.length === 0 || (!images[0].url && !images[0].b64)) { return 'Lỗi: gateway không trả về ảnh nào để lưu.'; }
+          const first = images[0];
+          const saved = first.url
+            ? await downloadMediaToFile(first.url, base)
+            : writeMediaBuffer(Buffer.from(first.b64 as string, 'base64'), base);
+          return `Đã sửa và lưu ảnh vào:\n${fmtSaved([saved])}`;
+        }
         default:
           return `Lỗi: công cụ không hỗ trợ trong extension VS Code: ${call.name}`;
       }
@@ -2809,6 +3029,10 @@ function describe(call: ToolCall): string {
     case 'read_image': return `Đọc ảnh ${p}`;
     case 'read_video_frames': return `Trích khung hình video ${p}`;
     case 'send_file': return `Gửi nguyên file ${p}`;
+    case 'generate_image': return `Tạo ảnh, lưu vào ${p}`;
+    case 'edit_image': return `Sửa ảnh, lưu vào ${p}`;
+    case 'generate_video': return `Tạo video, lưu vào ${p}`;
+    case 'save_media': return `Tải media, lưu vào ${p}`;
     case 'write_file': return `Ghi ${p}`;
     case 'edit_file': return `Sửa ${p}`;
     case 'search_files': return `Tìm "${str(call.args.query)}"`;
@@ -2878,7 +3102,7 @@ function extractToolJson(node: unknown, calls: ToolCall[]): void {
   const obj = node as Record<string, unknown>;
   if (Array.isArray(obj.tool_calls)) { for (const item of obj.tool_calls) { extractToolJson(item, calls); } return; }
   if (Array.isArray(obj.actions)) {
-    const map: Record<string, string> = { scan: 'list_files', inspect_text: 'read_file', inspect_texts: 'read_files', find_text: 'search_files', replace_text: 'edit_file', save_text: 'write_file', terminal: 'run_command', git_status: 'git_status', git_diff: 'git_diff', send_file: 'send_file' };
+    const map: Record<string, string> = { scan: 'list_files', inspect_text: 'read_file', inspect_texts: 'read_files', find_text: 'search_files', replace_text: 'edit_file', save_text: 'write_file', terminal: 'run_command', git_status: 'git_status', git_diff: 'git_diff', send_file: 'send_file', generate_image: 'generate_image', edit_image: 'edit_image', generate_video: 'generate_video', save_media: 'save_media' };
     for (const item of obj.actions) {
       const step = item as Record<string, unknown>;
       const tool = map[str(step.action)] || '';

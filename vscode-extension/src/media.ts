@@ -104,9 +104,22 @@ export async function editImage(
   });
 }
 
+// v0.8.29: sleep hủy được bằng AbortSignal — vòng poll video trong
+// chat phải dừng ngay khi user bấm Dừng, không chờ hết 5 giây rồi mới
+// nhận ra. Hàm thuần để harness test trực tiếp từ out/media.js.
+export function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) { return Promise.reject(new Error('Đã dừng tạo video theo yêu cầu.')); }
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); resolve(); }, ms);
+    const onAbort = (): void => { cleanup(); reject(new Error('Đã dừng tạo video theo yêu cầu.')); };
+    const cleanup = (): void => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export async function createVideo(
   baseUrl: string, apiKey: string,
-  opts: { prompt: string; model?: string; size?: string; duration?: number; firstFrameDataUrl?: string },
+  opts: { prompt: string; model?: string; size?: string; duration?: number; firstFrameDataUrl?: string; signal?: AbortSignal },
   onProgress: (status: string, progress: number) => void,
 ): Promise<GeneratedVideo> {
   if (!opts.prompt.trim()) { throw new Error('Cần nhập mô tả (prompt) để tạo video.'); }
@@ -121,6 +134,7 @@ export async function createVideo(
   if (!taskId) { throw new Error('Gateway không trả về id của video task.'); }
   const deadline = Date.now() + 15 * 60 * 1000;
   for (;;) {
+    if (opts.signal?.aborted) { throw new Error('Đã dừng tạo video theo yêu cầu.'); }
     const task = (await getJson(baseUrl, apiKey, `/videos/${encodeURIComponent(taskId)}`)) as Record<string, unknown>;
     const status = String(task.status || '');
     onProgress(status, typeof task.progress === 'number' ? task.progress : 0);
@@ -134,7 +148,7 @@ export async function createVideo(
       throw new Error(`Tạo video thất bại (task ${taskId}, trạng thái ${status}): ${JSON.stringify(task.error || '').slice(0, 500)}`);
     }
     if (Date.now() > deadline) { throw new Error(`Hết 15 phút chờ video task ${taskId} mà chưa xong. Task vẫn chạy trên gateway; bạn có thể kiểm tra lại bằng dashboard.`); }
-    await new Promise((r) => setTimeout(r, 5000));
+    await sleepAbortable(5000, opts.signal);
   }
 }
 
@@ -152,6 +166,25 @@ export async function downloadMedia(url: string, destDir: string, fallbackName: 
   const buf = Buffer.from(await resp.arrayBuffer());
   fs.writeFileSync(dest, buf);
   return dest;
+}
+
+// v0.8.29: ghi media về ĐÚNG đường dẫn đích cho tool chat (khác
+// downloadMedia của palette: palette chọn thư mục rồi tự đặt tên file
+// theo URL, còn tool chat ghi thẳng vào path user chỉ định, tạo thư mục
+// cha nếu chưa có, ghi đè file đã tồn tại và báo rõ có ghi đè hay
+// không — vì đó chính là "đường dẫn cuối cùng" user đã chốt).
+export function writeMediaBuffer(buf: Buffer, destPath: string): { path: string; size: number; overwritten: boolean } {
+  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  const overwritten = fs.existsSync(destPath);
+  fs.writeFileSync(destPath, buf);
+  return { path: destPath, size: buf.length, overwritten };
+}
+
+export async function downloadMediaToFile(url: string, destPath: string): Promise<{ path: string; size: number; overwritten: boolean }> {
+  const resp = await fetch(url);
+  if (!resp.ok) { throw new Error(`Không tải được media (HTTP ${resp.status}): ${url}`); }
+  const buf = Buffer.from(await resp.arrayBuffer());
+  return writeMediaBuffer(buf, destPath);
 }
 
 export function dataUrlOfImageFile(filePath: string): string {
