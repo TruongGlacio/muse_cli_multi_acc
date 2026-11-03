@@ -25,6 +25,14 @@ import * as crypto from 'crypto';
 // về thư mục dữ liệu gateway sau khi user đồng ý) và đặt biến đó cho
 // tiến trình gateway.
 //
+// v0.8.30: RÚT LẠI 0.8.28 — binary kèm theo trở lại self-contained như
+// 0.8.27 (vsix đóng gói kèm runtime .NET, máy user khỏi cài runtime) và
+// node của Playwright lại đóng gói trong vsix. Thứ tự phân giải node đổi
+// thành: PLAYWRIGHT_NODEJS_PATH → node đóng gói sẵn trong vsix → node hệ
+// thống >= 20 → node đã tải về → hỏi user rồi tải bản ghim. Luồng tải
+// node chỉ chạy khi thật sự chưa có node nào (không còn chuyện vsix có
+// node sẵn mà extension vẫn đi tải trùng).
+//
 // Key: nếu muse.apiKey trong Settings có giá trị thì dùng nó (cả cho gateway
 // kèm theo lẫn gateway ngoài). Nếu để trống, key cho gateway kèm theo được
 // tự sinh dạng m2a-... và lưu trong SecretStorage của VS Code, không ghi
@@ -92,7 +100,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Pro
   }
 }
 
-// ---------------- Node cho Playwright + runtime thiếu (v0.8.28) ----------------
+// ---------------- Node cho Playwright + runtime thiếu (v0.8.28, sửa ở v0.8.30) ----------------
 // Từ 0.8.28, vsix KHÔNG còn đóng gói runtime .NET (gateway + helper đều
 // framework-dependent) và KHÔNG còn đóng gói node của Playwright.
 // Extension tự phân giải node lúc chạy theo thứ tự: PLAYWRIGHT_NODEJS_PATH
@@ -104,6 +112,11 @@ async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Pro
 // 1.64.1 tôn trọng biến PLAYWRIGHT_NODEJS_PATH (chuỗi này có trong
 // Microsoft.Playwright.dll và đã kiểm chứng thực nghiệm bằng driver thật:
 // driver spawn đúng node được chỉ qua biến này, xem README 0.8.28).
+// Từ 0.8.30, vsix lại đóng gói node của Playwright như 0.8.27 nên thứ tự
+// phân giải thêm một nấc "bundled" ngay sau env, trước node hệ thống:
+// env → bundled → hệ thống → đã tải → hỏi rồi tải. Nấc bundled chỉ nhận
+// node đóng gói sẵn khi file tồn tại VÀ chạy ra version tương thích
+// (>= 20); hỏng thì rơi xuống các nấc sau như cũ, không fail cứng.
 export const PLAYWRIGHT_NODE_MIN_MAJOR = 20;
 export const PINNED_NODE_VERSION = '24.22.1';
 export const DOTNET_DOWNLOAD_URL = 'https://dotnet.microsoft.com/download/dotnet/10.0';
@@ -514,9 +527,11 @@ export class GatewayManager {
     const key = await this.managedApiKey();
     const dataDir = this.dataDir();
     const chromium = this.findChromium();
-    // v0.8.28: vsix không còn đóng gói node nên phải phân giải xong node
-    // mới khởi động gateway kèm theo; không có node thì báo rõ ngay thay
-    // vì để gateway chạy rồi driver mới vỡ giữa chừng.
+    // v0.8.28 (giữ ở 0.8.30): phải phân giải xong node mới khởi động
+    // gateway kèm theo; không có node thì báo rõ ngay thay vì để gateway
+    // chạy rồi driver mới vỡ giữa chừng. Từ 0.8.30 node đóng gói sẵn
+    // trong vsix được ưu tiên nên máy cài vsix mới thường dừng ở nấc
+    // bundled, không cần node hệ thống hay tải về.
     const nodeRes = await this.resolvePlaywrightNode();
     if (!nodeRes.ok) {
       const msg = `Gateway kèm theo cần Node để chạy driver Playwright nhưng ${nodeRes.message}. Hãy cài Node 20 trở lên rồi dùng lệnh "Muse: Khởi động lại gateway".`;
@@ -700,13 +715,36 @@ export class GatewayManager {
     return result.message.includes('Hãy cài') ? result.message : `${result.message} Hãy cài Edge hoặc Chrome rồi khởi động lại gateway.`;
   }
 
-  // ---------------- Node cho Playwright (v0.8.28) ----------------
-  // Vsix không còn đóng gói node nên gateway kèm theo chỉ chạy được khi
-  // extension phân giải xong node và đặt PLAYWRIGHT_NODEJS_PATH cho tiến
-  // trình gateway. Thứ tự: env → node hệ thống (>= 20) → node đã tải về
-  // → hỏi user rồi tải bản ghim. Gateway ngoài tự lo node ở máy chạy nó
-  // nên luồng này chỉ chạy cho gateway kèm theo.
+  // ---------------- Node cho Playwright (v0.8.28, sửa ở v0.8.30) ----------------
+  // Gateway kèm theo chỉ chạy được khi extension phân giải xong node và
+  // đặt PLAYWRIGHT_NODEJS_PATH cho tiến trình gateway. Thứ tự từ 0.8.30:
+  // env → node đóng gói sẵn trong vsix → node hệ thống (>= 20) → node đã
+  // tải về → hỏi user rồi tải bản ghim. Gateway ngoài tự lo node ở máy
+  // chạy nó nên luồng này chỉ chạy cho gateway kèm theo.
   private nodeDownloadPromptDone = false;
+
+  // Node đóng gói sẵn trong vsix (v0.8.30, như 0.8.27): nằm cùng thư mục
+  // gateway, bin/<nền tảng>/.playwright/node/<thư mục nền tảng>/node(.exe).
+  // Thư mục nền tảng của Playwright khác với RID của .NET (win32_x64 thay
+  // vì win-x64, darwin-arm64 thay vì osx-arm64). Chỉ nhận khi file tồn
+  // tại VÀ chạy ra version tương thích; hỏng thì trả undefined để các
+  // nấc sau lo, không fail cứng.
+  private async bundledNodePath(): Promise<string | undefined> {
+    const binDir = this.bundledBinaryDir();
+    if (!binDir) { return undefined; }
+    let sub: string | undefined;
+    let exe = 'node';
+    if (process.platform === 'win32') { sub = 'win32_x64'; exe = 'node.exe'; }
+    else if (process.platform === 'darwin' && process.arch === 'arm64') { sub = 'darwin-arm64'; }
+    else if (process.platform === 'darwin' && process.arch === 'x64') { sub = 'darwin-x64'; }
+    else if (process.platform === 'linux' && process.arch === 'x64') { sub = 'linux-x64'; }
+    else if (process.platform === 'linux' && process.arch === 'arm64') { sub = 'linux-arm64'; }
+    if (!sub) { return undefined; }
+    const p = path.join(binDir, '.playwright', 'node', sub, exe);
+    if (!fs.existsSync(p)) { return undefined; }
+    const v = await this.nodeVersionAt(p);
+    return isNodeCompatible(v) ? p : undefined;
+  }
 
   private execFileText(cmd: string, args: string[], timeoutMs = 10000): Promise<string> {
     return new Promise<string>((resolve, reject) => {
@@ -787,9 +825,14 @@ export class GatewayManager {
     return exe;
   }
 
-  async resolvePlaywrightNode(): Promise<{ ok: true; path: string; source: 'env' | 'system' | 'downloaded' } | { ok: false; message: string }> {
+  async resolvePlaywrightNode(): Promise<{ ok: true; path: string; source: 'env' | 'bundled' | 'system' | 'downloaded' } | { ok: false; message: string }> {
     const envPath = process.env.PLAYWRIGHT_NODEJS_PATH;
     if (envPath && fs.existsSync(envPath)) { return { ok: true, path: envPath, source: 'env' }; }
+    // v0.8.30: ưu tiên node đóng gói sẵn trong vsix khi có — nấc này phải
+    // đứng trước node hệ thống và luồng tải, nếu không vsix có node sẵn
+    // mà extension vẫn đi tải trùng về thư mục dữ liệu.
+    const bundled = await this.bundledNodePath();
+    if (bundled) { return { ok: true, path: bundled, source: 'bundled' }; }
     const system = await this.findSystemNode();
     if (system) { return { ok: true, path: system, source: 'system' }; }
     const downloaded = await this.downloadedNodePath();
