@@ -115,6 +115,85 @@
   var newSessionBtnEl = document.getElementById('newSessionBtn');
   var renameSessionBtnEl = document.getElementById('renameSessionBtn');
   var deleteSessionBtnEl = document.getElementById('deleteSessionBtn');
+  // Tay kéo chiều cao ô nhập (v0.8.27, theo mẫu #sidebarResizer):
+  // #composerResizer ở mép trên cụm soạn thảo, full chiều ngang, kéo
+  // bằng pointer — kéo LÊN mở rộng, kéo XUỐNG thu nhỏ (hướng trực
+  // quan của ô chat, ngược với grip góc dưới-phải của textarea vốn
+  // kéo lên là thu nhỏ vì nó kéo mép dưới). Chiều cao bám theo chuột
+  // theo thời gian thực, thả chuột thì lưu bền qua extension
+  // (globalState, theo mẫu sessionListWidth), nhấp đúp về mặc định.
+  // Clamp: tối thiểu 64px (~3 dòng, khớp chiều cao mặc định rows=3
+  // đo được là 63px), tối đa 60% chiều cao cột chat để không nuốt
+  // hết vùng tin nhắn (#messages flex:1 tự co lại tương ứng).
+  var composerResizerEl = document.getElementById('composerResizer');
+  var chatColumnEl = document.getElementById('chatColumn');
+  var composerResizing = false;
+  var lastAppliedComposerHeight = null;
+  // __COMPOSER_HEIGHT_FN_START__
+  function composerMinHeight() { return 64; }
+  function composerMaxHeight() {
+    var h = chatColumnEl ? chatColumnEl.clientHeight : 0;
+    var max = h ? Math.floor(h * 0.6) : 400;
+    return Math.max(composerMinHeight(), max);
+  }
+  // Kẹp thuần về [min, max] — dùng cho giá trị kéo (kéo quá đà thì
+  // dừng ở min/max, KHÔNG về 0). Ý nghĩa "0 = về mặc định" chỉ nằm
+  // ở applyComposerHeight (giá trị host gửi / nhấp đúp), không nằm ở
+  // đây: trước đây clamp trả 0 khi px <= 0 nên kéo xuống quá đà đặt
+  // style.height = '0px' làm ô nhập xẹp còn ~16px thay vì dừng ở 64px.
+  function clampComposerHeight(px) {
+    if (typeof px !== 'number' || !isFinite(px)) { return composerMinHeight(); }
+    var h = Math.floor(px);
+    if (h < composerMinHeight()) { h = composerMinHeight(); }
+    if (h > composerMaxHeight()) { h = composerMaxHeight(); }
+    return h;
+  }
+  function applyComposerHeight(px) {
+    if (!inputEl) { return 0; }
+    // 0 (hoặc không hợp lệ) = về mặc định rows=3: xóa inline height.
+    if (typeof px !== 'number' || !isFinite(px) || px <= 0) {
+      inputEl.style.height = '';
+      lastAppliedComposerHeight = 0;
+      return 0;
+    }
+    var h = clampComposerHeight(px);
+    inputEl.style.height = h + 'px';
+    lastAppliedComposerHeight = h;
+    return h;
+  }
+  // __COMPOSER_HEIGHT_FN_END__
+  if (composerResizerEl && inputEl) {
+    composerResizerEl.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      composerResizing = true;
+      var startY = e.clientY;
+      var startH = inputEl.getBoundingClientRect().height;
+      document.body.classList.add('composer-resizing');
+      try { composerResizerEl.setPointerCapture(e.pointerId); } catch (err) { /* trình duyệt cũ không có capture thì vẫn kéo bằng listener */ }
+      function onMove(ev) {
+        // Kéo LÊN (clientY giảm) = mở rộng; kéo XUỐNG = thu nhỏ.
+        var next = clampComposerHeight(startH + (startY - ev.clientY));
+        inputEl.style.height = next + 'px';
+      }
+      function onUp() {
+        composerResizerEl.removeEventListener('pointermove', onMove);
+        composerResizerEl.removeEventListener('pointerup', onUp);
+        composerResizerEl.removeEventListener('pointercancel', onUp);
+        document.body.classList.remove('composer-resizing');
+        composerResizing = false;
+        var finalH = clampComposerHeight(inputEl.getBoundingClientRect().height);
+        lastAppliedComposerHeight = finalH;
+        vscode.postMessage({ type: 'setComposerHeight', height: finalH });
+      }
+      composerResizerEl.addEventListener('pointermove', onMove);
+      composerResizerEl.addEventListener('pointerup', onUp);
+      composerResizerEl.addEventListener('pointercancel', onUp);
+    });
+    composerResizerEl.addEventListener('dblclick', function () {
+      applyComposerHeight(0);
+      vscode.postMessage({ type: 'setComposerHeight', height: 0 });
+    });
+  }
   // Hiệu ứng loading cho nút bấm (v0.8.13): bấm thì disable nút, thêm
   // class loading (spinner CSS + mờ đi), đổi text thành dạng đang xử
   // lý (text gốc + "…"); nút chỉ có icon (text rỗng hoặc 1 ký tự) thì
@@ -568,6 +647,14 @@
       // Khôi phục chiều rộng cột đã lưu (v0.8.10); đang kéo thì không
       // áp để khỏi giật lại chiều rộng giữa chừng.
       if (typeof m.sessionListWidth === 'number' && !sidebarResizing) { applySidebarWidth(m.sessionListWidth); }
+      // Khôi phục chiều cao ô nhập đã lưu (v0.8.27): chỉ áp khi giá
+      // trị host gửi KHÁC giá trị đã áp lần trước và không đang kéo
+      // tay kéo. Quy tắc "khác mới áp" giữ chiều cao user vừa kéo
+      // bằng grip native (grip native không lưu nên host vẫn giữ giá
+      // trị cũ — áp lại sẽ giật về), đồng thời vẫn khôi phục sau tải
+      // lại webview (lần đầu lastAppliedComposerHeight là null) và
+      // vẫn đồng bộ khi bề mặt khác đổi chiều cao (giá trị mới khác).
+      if (typeof m.composerHeight === 'number' && !composerResizing && m.composerHeight !== lastAppliedComposerHeight) { applyComposerHeight(m.composerHeight); }
       sessionListEl.innerHTML = '';
       var sessions = m.sessions || [];
       if (sessions.length === 0) {
@@ -609,6 +696,29 @@
         badge.className = 'status-badge status-' + (s.accountStatus || 'stopped');
         badge.textContent = s.accountStatus === 'running' ? 'Đang chạy' : s.accountStatus === 'loggedout' ? 'Đã logout' : 'Đã dừng';
         item.appendChild(badge);
+        // Chỉ báo run (v0.8.27): xoay tròn khi đang thực hiện, dấu
+        // tích khi run gần nhất đã hoàn thành, dấu cảnh báo khi run
+        // gần nhất lỗi — KHÔNG dùng tích cho lỗi. Trạng thái khác
+        // (stopped/loggedout) thì không có chỉ báo này. Span xoay
+        // để rỗng, hình xoay vẽ bằng CSS animation (muse-spin).
+        if (s.runStatus === 'running') {
+          var runSpin = document.createElement('span');
+          runSpin.className = 'run-indicator run-running';
+          runSpin.title = 'Đang thực hiện';
+          item.appendChild(runSpin);
+        } else if (s.runStatus === 'done') {
+          var runDone = document.createElement('span');
+          runDone.className = 'run-indicator run-done';
+          runDone.textContent = '✓';
+          runDone.title = 'Đã hoàn thành';
+          item.appendChild(runDone);
+        } else if (s.runStatus === 'error') {
+          var runErr = document.createElement('span');
+          runErr.className = 'run-indicator run-error';
+          runErr.textContent = '⚠';
+          runErr.title = 'Lỗi khi thực hiện';
+          item.appendChild(runErr);
+        }
         // Mở tab mới (v0.8.0, việc 3): span (không phải button lồng
         // trong button) để mở session này trong một tab editor riêng,
         // kéo sang nhóm bên cạnh để xem song song. stopPropagation để

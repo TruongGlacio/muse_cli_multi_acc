@@ -35,6 +35,16 @@ export interface ChatSession {
   // session (...s) nên cờ này lưu cùng globalState như các trường khác;
   // parseSessions dưới đây đọc lại nó nên không mất khi tải lại.
   titleEditedManually?: boolean;
+  // v0.8.27: kết quả run GẦN NHẤT của session (để danh sách hiện dấu
+  // tích khi xong, dấu lỗi khi lỗi). Chỉ run() đặt/xóa: run mới bắt đầu
+  // thì xóa (tích cũ không phải thành tích vĩnh viễn), run kết thúc
+  // thành công thì 'done', kết thúc lỗi thì 'error', bị dừng thì không
+  // đặt gì (giữ trạng thái trước đó). persist() sao chép cả session
+  // nên trường này lưu cùng globalState; parseSessions đọc lại nó nên
+  // tích của run đã xong vẫn còn sau khi extension host khởi động lại,
+  // trong khi trạng thái 'running' sống (RunManager) thì mất theo
+  // restart và về 'stopped' một cách trung thực.
+  lastRunOutcome?: 'done' | 'error';
 }
 
 export interface StoreChange {
@@ -63,7 +73,7 @@ export class SessionStore {
           .filter((m) => typeof m.role === 'string' && typeof m.content === 'string')
           .map((m) => ({ role: m.role as string, content: m.content as string }))
           .slice(-40);
-        out.push({ id: s.id, title: typeof s.title === 'string' && s.title ? s.title : 'Hội thoại', conversationId: s.conversationId, messages, createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(), updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : Date.now(), workspacePath: typeof s.workspacePath === 'string' ? s.workspacePath : undefined, accountId: typeof s.accountId === 'string' && s.accountId ? s.accountId : undefined, accountLabel: typeof s.accountLabel === 'string' && s.accountLabel ? s.accountLabel : undefined, accountStatusAtSave: typeof s.accountStatusAtSave === 'string' ? s.accountStatusAtSave : undefined, threadUrl: typeof s.threadUrl === 'string' && s.threadUrl ? s.threadUrl : undefined, importedFromWeb: s.importedFromWeb === true, titleEditedManually: s.titleEditedManually === true });
+        out.push({ id: s.id, title: typeof s.title === 'string' && s.title ? s.title : 'Hội thoại', conversationId: s.conversationId, messages, createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(), updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : Date.now(), workspacePath: typeof s.workspacePath === 'string' ? s.workspacePath : undefined, accountId: typeof s.accountId === 'string' && s.accountId ? s.accountId : undefined, accountLabel: typeof s.accountLabel === 'string' && s.accountLabel ? s.accountLabel : undefined, accountStatusAtSave: typeof s.accountStatusAtSave === 'string' ? s.accountStatusAtSave : undefined, threadUrl: typeof s.threadUrl === 'string' && s.threadUrl ? s.threadUrl : undefined, importedFromWeb: s.importedFromWeb === true, titleEditedManually: s.titleEditedManually === true, lastRunOutcome: s.lastRunOutcome === 'done' || s.lastRunOutcome === 'error' ? s.lastRunOutcome : undefined });
       }
       return out;
     };

@@ -11,6 +11,7 @@ import { generateImages, editImage, createVideo, downloadMedia, dataUrlOfImageFi
 import { ComputerHelper, COMPUTER_TOOLS, approveComputerAction, describeComputerCall } from './computer';
 import { MuseSettingsPanel } from './settings';
 import { SessionStore, ChatSession, ChatMsg, StoreChange } from './sessions';
+import { RunManager, computeRunStatus } from './runManager';
 
 // Muse cho VS Code, v0.6.0.
 // V0.6.0 thêm đồng bộ hội thoại từ web, mức 1: chỉ liệt kê thread từ
@@ -49,6 +50,36 @@ interface PendingAttachment { name: string; size: number; kind: 'image' | 'text'
 // tay / kéo thả): filename + mime + data URL, đúng dạng gateway
 // parse ở Prompt.ContentToText (type "file").
 interface ToolFilePart { filename: string; mime: string; dataUrl: string; }
+
+// Trạng thái của MỘT lượt chạy agent (v0.8.27). Trước 0.8.27, các
+// trường này nằm rải trên provider (lastStreamed/lastToolImages/
+// lastToolFiles/lastComputerImage/turnFileCount) nên hai run chạy cùng
+// lúc trên cùng một surface (sidebar gửi session A rồi chuyển sang gửi
+// session B) sẽ ghi đè lẫn nhau. Từ 0.8.27, mỗi run có RunCtx riêng,
+// truyền qua chatOnce/execute — surface chỉ giữ đính kèm chờ gửi
+// (pendingAttachments, thuộc về lần bấm Gửi của chính surface đó).
+interface RunCtx {
+  lastStreamed: boolean;
+  lastToolImages: string[];
+  lastToolFiles: ToolFilePart[];
+  lastComputerImage?: string;
+  turnFileCount: number;
+}
+
+// Sink hiển thị của một run (v0.8.27): thay cho this.post() trong vòng
+// lặp run(). post() chuyển tiếp sự kiện tới MỌI bề mặt đang hiển thị
+// đúng session đó (sidebar/panel cùng nhìn một RunManager nên mở cùng
+// session ở 2 nơi đều thấy cùng tiến trình) và ghi vào live snapshot
+// của slot để bề mặt mở session giữa chừng replay được. done() ngoài
+// các bề mặt đang hiển thị còn gửi cho surface gốc (để nút Gửi của nó
+// hết loading dù user đã chuyển surface đó sang session khác — done
+// chỉ clear loading, không vẽ bubble nên không làm bẩn session khác).
+// Riêng 'attachmentsCleared' KHÔNG qua sink: chip đính kèm thuộc về
+// surface gốc, xóa ở bề mặt khác sẽ là sai.
+interface RunSink {
+  post: (type: string, payload: Record<string, unknown>) => void;
+  done: () => void;
+}
 
 // Danh sách đuôi dùng chung cho mọi đường đính kèm (v0.8.12): hộp chọn
 // file, kéo thả theo đường dẫn và kéo thả theo nội dung trong bộ nhớ đều
@@ -460,16 +491,20 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   private readonly context: vscode.ExtensionContext;
   private readonly gateway: GatewayManager;
   // Store dùng chung (v0.8.0): danh sách session là của chung, còn
-  // currentSessionId/history/conversationId/running/abort/attachments
-  // dưới đây là RIÊNG từng bề mặt — đây chính là điểm sửa của việc 3:
-  // gửi tin ở panel A không được đổi session, chặn hay ghi đè history
-  // của panel B, vì B có bộ trạng thái riêng của nó.
+  // currentSessionId/history/conversationId/attachments dưới đây là
+  // RIÊNG từng bề mặt — đây chính là điểm sửa của việc 3: gửi tin ở
+  // panel A không được đổi session, chặn hay ghi đè history của panel
+  // B, vì B có bộ trạng thái riêng của nó.
+  // Riêng trạng thái CHẠY thì KHÔNG còn ở bề mặt (v0.8.27): nó sống
+  // trong RunManager dùng chung (runManager), key theo sessionId, nên
+  // chuyển bề mặt sang session khác không hủy run cũ, và mở cùng
+  // session ở 2 nơi đều thấy cùng tiến trình.
   private readonly store: SessionStore;
+  private readonly runManager: RunManager;
   private removeLogListener?: () => void;
   private removeStoreListener?: () => void;
+  private removeRunListener?: () => void;
   private pendingPreset?: string;
-  private running = false;
-  private abort?: AbortController;
   private history: ChatMsg[] = [];
   // Session mà mảng history hiện tại thuộc về. Khi session đang mở bị
   // xóa ở bề mặt khác, syncCurrentSession KHÔNG được ghi history cũ
@@ -481,32 +516,34 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   private pendingAttachments: PendingAttachment[] = [];
   private processes: BackgroundProcesses;
   private computer: ComputerHelper;
-  private lastComputerImage?: string;
-  // v0.8.18: ảnh do tool media vừa trả (read_image: 1 ảnh,
-  // read_video_frames: tối đa 4 khung). Vòng lặp run() reset trước
-  // mỗi call và kèm đúng các ảnh này vào message TOOL_RESULT của
-  // chính call đó; các tool khác để rỗng nên message vẫn text thuần.
-  private lastToolImages: string[] = [];
-  // v0.8.20: file do tool send_file vừa trả (1 file/call) và ngân
-  // sách file của lượt chat hiện tại (file đính kèm tay + file tool
-  // cộng lại, tối đa 10 file/lượt). Vòng lặp run() reset cả hai
-  // trước mỗi call / mỗi lượt như lastToolImages.
-  private lastToolFiles: ToolFilePart[] = [];
-  private turnFileCount = 0;
-  private lastStreamed = false;
+  // v0.8.27: lastComputerImage/lastToolImages/lastToolFiles/
+  // turnFileCount/lastStreamed KHÔNG còn là trường provider nữa — đã
+  // chuyển thành RunCtx của từng lượt (xem RunCtx), để hai run cùng
+  // lúc không ghi đè lẫn nhau.
   // Cache tài khoản mới nhất để tính trạng thái session và backfill.
   // Chỉ chứa các trường an toàn từ Account.Public() (không cookie).
   private cachedAccounts: Array<{ id: string; label: string; enabled: boolean; status: string; email: string | null; username: string | null }> = [];
   private accountsCacheLoaded = false;
 
-  constructor(context: vscode.ExtensionContext, gateway: GatewayManager, store?: SessionStore, options?: { initialSessionId?: string; isSidebar?: boolean }) {
+  constructor(context: vscode.ExtensionContext, gateway: GatewayManager, store?: SessionStore, options?: { initialSessionId?: string; isSidebar?: boolean; runManager?: RunManager }) {
     this.context = context;
     this.gateway = gateway;
     this.isSidebar = options?.isSidebar === true;
     this.processes = new BackgroundProcesses();
     this.computer = new ComputerHelper(context);
     this.store = store ?? new SessionStore(context, workspaceRoot);
+    // v0.8.27: mọi bề mặt dùng chung MỘT RunManager (tạo ở activate,
+    // truyền vào đây + openSessionInPanel). Không có runManager truyền
+    // vào thì tự tạo một cái để không vỡ đường gọi cũ — nhưng đường
+    // đó không còn được dùng, vì activate luôn truyền chung.
+    this.runManager = options?.runManager ?? new RunManager();
     MuseChatProvider.surfaces.add(this);
+    // Fan-out trạng thái run (v0.8.27): slot bắt đầu/kết thúc thì mọi
+    // bề mặt gửi lại danh sách để spinner/tích cập nhật trực tiếp cả
+    // khi user đang xem session khác. Gỡ ở disposeSurface.
+    this.removeRunListener = this.runManager.addStatusListener(() => {
+      if (!this.disposed) { this.postSessions(); }
+    });
     // Log fan-out (v0.8.0): mỗi bề mặt đăng ký listener riêng thay vì
     // gán gateway.onLog (gán sẽ ghi đè và làm các bề mặt khác mất log).
     this.removeLogListener = gateway.addLogListener((line: string) => {
@@ -533,17 +570,22 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // đã tự cập nhật rồi; các bề mặt khác:
   // - Session đang mở đã mất -> chuyển sang session mới nhất còn lại
   //   (hoặc tạo session trống nếu không còn session nào), KHÔNG kẹt ở
-  //   session đã xóa; nếu đang chạy trên session đó thì hủy lượt chạy
-  //   (abort) để finally của run() không ghi đè session thay thế.
+  //   session đã xóa; nếu session đó đang có run thì hủy run đó để
+  //   finally của run() không ghi đè session thay thế (run đã bị xóa
+  //   thì finally cũng không hồi sinh nó, xem run()).
   // - Session đang mở vẫn còn nhưng messages đã đổi ở bề mặt khác
-  //   (cùng session mở ở hai panel, hoặc session bị làm trống) và bề
-  //   mặt này không chạy -> đọc lại messages + gửi lại lịch sử hiển thị.
+  //   (cùng session mở ở hai panel, hoặc session bị làm trống) và
+  //   session đó KHÔNG có run đang sống -> đọc lại messages + gửi lại
+  //   lịch sử hiển thị. Session có run đang sống thì KHÔNG render lại
+  //   lịch sử từ store: sink của run đã đẩy tiến trình trực tiếp tới
+  //   bề mặt, render lại sẽ xóa bubble trực tiếp (historyCleared) và
+  //   chỉ còn các turn đã hoàn tất.
   // - Còn lại: chỉ gửi lại danh sách (tiêu đề/trạng thái đổi).
   private onStoreChanged(change: StoreChange, source?: unknown): void {
     if (this.disposed || source === this) { return; }
     const current = this.store.find(this.currentSessionId);
     if (!current) {
-      if (this.running) { this.abort?.abort(); }
+      if (this.currentSessionId) { this.runManager.abort(this.currentSessionId); }
       const fallback = [...this.store.sessions].sort((a, b) => b.updatedAt - a.updatedAt)[0];
       if (fallback) {
         this.currentSessionId = fallback.id;
@@ -571,7 +613,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         this.post('historyCleared', {});
         this.post('status', { text: change.purgedAccountIds.length > 0 ? 'Không còn hội thoại nào sau khi xóa tài khoản. Bấm "Hội thoại mới" để bắt đầu.' : 'Không còn hội thoại nào. Bấm "Hội thoại mới" để bắt đầu.' });
       }
-    } else if (!this.running && (current.messages !== this.history || current.messages.length !== this.history.length)) {
+    } else if (!this.runManager.isRunning(current.id) && (current.messages !== this.history || current.messages.length !== this.history.length)) {
       this.history = current.messages;
       this.historySessionId = current.id;
       this.conversationId = current.conversationId;
@@ -584,16 +626,17 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   }
 
   // Mở một session trong tab editor riêng (v0.8.0, việc 3). Panel là
-  // một MuseChatProvider mới với cùng store, trạng thái riêng; đóng
-  // panel chỉ dispose bề mặt, KHÔNG xóa session. Mở cùng session ở
-  // hai panel được phép: hai panel cùng đọc/ghi messages của session
-  // đó (lần gửi sau thấy tin của lần trước sau khi làm mới, nhờ
-  // onStoreChanged), và race khi cả hai cùng chạy trên cùng session
-  // là trách nhiệm của user — xem README.
+  // một MuseChatProvider mới với cùng store và CÙNG RunManager, trạng
+  // thái hiển thị riêng; đóng panel chỉ dispose bề mặt, KHÔNG xóa
+  // session. Mở cùng session ở hai panel được phép: hai panel cùng
+  // nhìn một run qua sink của RunManager nên đều thấy cùng tiến trình
+  // trực tiếp; gửi từ 2 nơi vào cùng session thì bên gửi sau bị từ
+  // chối vì session bận (slot của RunManager), không còn race chạy
+  // chồng như trước 0.8.27.
   async openSessionInPanel(sessionId?: string): Promise<void> {
     const target = (sessionId ? this.store.find(sessionId) : undefined) ?? this.currentSession();
     if (!target) { this.postSessions(); return; }
-    const surface = new MuseChatProvider(this.context, this.gateway, this.store, { initialSessionId: target.id });
+    const surface = new MuseChatProvider(this.context, this.gateway, this.store, { initialSessionId: target.id, runManager: this.runManager });
     const panel = vscode.window.createWebviewPanel('muse.chatPanel', `Muse: ${target.title}`, vscode.ViewColumn.Beside, {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')],
@@ -619,6 +662,9 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         messages: this.history.map((h) => ({ role: h.role, text: typeof h.content === 'string' ? h.content : '' })),
       });
     }
+    // Panel mở session đang có run sống thì vẽ thêm tiến trình trực
+    // tiếp của nó (v0.8.27, như switchSession).
+    this.replayLiveRun(this.currentSessionId);
     if (this.currentSession()?.importedFromWeb) {
       this.post('importedBanner', { text: 'Hội thoại này được đồng bộ từ web muse.ai. Lịch sử cũ nằm trên thread web, tin nhắn tiếp theo sẽ nối tiếp thread đó.' });
     }
@@ -636,6 +682,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     try { this.syncCurrentSession(); this.store.persist(); } catch { /* đóng panel không được vỡ vì lỗi lưu */ }
     this.removeLogListener?.();
     this.removeStoreListener?.();
+    this.removeRunListener?.();
     MuseChatProvider.surfaces.delete(this);
     this.panel = undefined;
     this.view = undefined;
@@ -688,7 +735,9 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   }
 
   // Trạng thái session, đúng 3 giá trị user yêu cầu (v0.5.0):
-  // - Đang chạy: session hiện tại đang có yêu cầu chạy (running=true).
+  // - Đang chạy: session ĐÓ đang có run sống trong RunManager (v0.8.27:
+  //   không còn "session hiện tại của bề mặt này + cờ running" — session
+  //   nào đang chạy cũng hiện Đang chạy ở mọi bề mặt).
   // - Đã logout: session có accountId đã lưu nhưng account đó không còn
   //   trong pool HOẶC trạng thái Invalid (hết hạn). Cache chưa tải thì
   //   không kết luận logout, để Đã dừng (tránh báo sai).
@@ -696,7 +745,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   //   có account đang active/cooling/disabled. Cooling/disabled chỉ ghi
   //   chú trong accountDetail, không thành trạng thái thứ 4.
   private sessionStatus(session: ChatSession): { status: 'running' | 'stopped' | 'loggedout'; detail: string } {
-    if (session.id === this.currentSessionId && this.running) { return { status: 'running', detail: '' }; }
+    if (this.runManager.isRunning(session.id)) { return { status: 'running', detail: '' }; }
     if (session.accountId && this.accountsCacheLoaded) {
       const acc = this.cachedAccounts.find((a) => a.id === session.accountId);
       if (!acc || acc.status.toLowerCase() === 'invalid') { return { status: 'loggedout', detail: '' }; }
@@ -739,6 +788,25 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     const next = Math.min(480, Math.max(160, Math.floor(width)));
     if (next === this.sessionListWidth()) { this.postSessions(); return; }
     await this.context.globalState.update('muse.sessionListWidth', next);
+    MuseChatProvider.refreshSessionLists();
+  }
+
+  // Chiều cao ô nhập đã lưu (v0.8.27, theo mẫu sessionListWidth):
+  // lưu globalState (theo user qua mọi workspace), 0 = mặc định
+  // rows=3. Chỉ là thiết lập giao diện, không lưu vào session hay
+  // tài khoản. Clamp cứng trên 2000px ở host; clamp dưới 64px và
+  // trên 60% cột chat do webview kẹp thêm lúc áp vì chỉ webview mới
+  // biết chiều cao cột chat.
+  private composerHeight(): number {
+    const raw = this.context.globalState.get<unknown>('muse.composerHeight', 0);
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) { return 0; }
+    return Math.min(2000, Math.floor(raw));
+  }
+
+  private async setComposerHeight(height: number): Promise<void> {
+    const next = (typeof height === 'number' && Number.isFinite(height) && height > 0) ? Math.min(2000, Math.floor(height)) : 0;
+    if (next === this.composerHeight()) { this.postSessions(); return; }
+    await this.context.globalState.update('muse.composerHeight', next);
     MuseChatProvider.refreshSessionLists();
   }
 
@@ -819,6 +887,8 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           accountDisplay: this.accountDisplayFor(s),
           accountStatus: st.status,
           accountDetail: st.detail,
+          // v0.8.27: chỉ báo run (xoay tròn/tích/lỗi) — xem runStatusFor.
+          runStatus: this.runStatusFor(s),
           threadUrl: s.threadUrl || '',
           importedFromWeb: s.importedFromWeb === true,
         };
@@ -827,10 +897,71 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       accountFilter: filter,
       accountFilterOptions: this.accountFilterOptions(),
       sessionListWidth: this.sessionListWidth(),
+      composerHeight: this.composerHeight(),
       totalSessionCount: this.store.sessions.length,
-      currentSession: current ? { id: current.id, title: current.title, accountDisplay: this.accountDisplayFor(current), accountStatus: this.sessionStatus(current).status } : null,
+      currentSession: current ? { id: current.id, title: current.title, accountDisplay: this.accountDisplayFor(current), accountStatus: this.sessionStatus(current).status, runStatus: this.runStatusFor(current) } : null,
     });
     this.updatePanelTitle();
+  }
+
+  // Chỉ báo run của một session trong danh sách (v0.8.27, hàm thuần
+  // qua computeRunStatus): run đang sống → 'running' (xoay tròn);
+  // không thì kết quả run gần nhất đã lưu ('done' → tích, 'error' →
+  // dấu lỗi); còn lại giữ trạng thái tài khoản cũ (stopped/loggedout).
+  private runStatusFor(s: ChatSession): 'running' | 'done' | 'error' | 'stopped' | 'loggedout' {
+    return computeRunStatus(this.runManager.isRunning(s.id), s.lastRunOutcome, this.sessionStatus(s).status);
+  }
+
+  // Sink hiển thị của một run (v0.8.27, xem RunSink): chuyển tiếp tới
+  // mọi bề mặt đang hiển thị đúng session + ghi live snapshot để
+  // replay. done() còn gửi cho surface gốc để nút Gửi của nó hết
+  // loading dù surface đó đã chuyển sang session khác.
+  private createRunSink(sessionId: string): RunSink {
+    const origin = this;
+    return {
+      post: (type: string, payload: Record<string, unknown>): void => {
+        MuseChatProvider.postToSession(sessionId, type, payload);
+        origin.runManager.recordLive(sessionId, type, payload);
+      },
+      done: (): void => {
+        // Chỉ gửi riêng cho origin khi nó đã chuyển đi nơi khác (lúc
+        // đó postToSession không tới nó); nếu origin vẫn mở đúng
+        // session thì postToSession đã gồm nó — tránh 'done' 2 lần.
+        if (!origin.disposed && origin.currentSessionId !== sessionId) { origin.post('done', {}); }
+        MuseChatProvider.postToSession(sessionId, 'done', {});
+      },
+    };
+  }
+
+  // Chuyển tiếp một message tới mọi bề mặt đang hiển thị session này
+  // (sidebar/panel). Bề mặt đã chuyển đi nơi khác không nhận — sự kiện
+  // của session A không được vẽ vào khung chat session B.
+  private static postToSession(sessionId: string, type: string, payload: Record<string, unknown>): void {
+    for (const surface of [...MuseChatProvider.surfaces]) {
+      if (!surface.disposed && surface.currentSessionId === sessionId) {
+        surface.post(type, payload);
+      }
+    }
+  }
+
+  // Replay tiến trình trực tiếp của run đang sống khi bề mặt vừa mở/
+  // chuyển tới session đó (v0.8.27): sau lịch sử đã lưu (chỉ có các
+  // turn đã hoàn tất), vẽ thêm bubble trực tiếp của lượt đang chạy +
+  // phần stream đang dở + dòng trạng thái mới nhất. Không có run sống
+  // thì không làm gì (lịch sử tĩnh đã đủ).
+  private replayLiveRun(sessionId: string): void {
+    const snap = this.runManager.snapshot(sessionId);
+    if (!snap) { return; }
+    for (const b of snap.bubbles) {
+      if (b.kind === 'message') { this.post('message', { role: b.role || 'assistant', text: b.text || '', details: b.details || '' }); }
+      else if (b.kind === 'tool') { this.post('tool', { name: b.name || '', detail: b.detail || '' }); }
+      else if (b.kind === 'toolResult') { this.post('toolResult', { name: b.name || '', detail: b.detail || '' }); }
+    }
+    if (snap.streaming) {
+      this.post('streamStart', {});
+      if (snap.streamText) { this.post('streamDelta', { text: snap.streamText }); }
+    }
+    if (snap.status) { this.post('status', { text: snap.status }); }
   }
 
   // Sau khi gộp trùng ở panel Cài đặt: session nào có accountId nằm
@@ -1140,8 +1271,11 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // v0.8.27: chuyển session KHÔNG còn chặn khi đang chạy — chuyển chỉ
+  // đổi bề mặt đang hiển thị, run của session cũ vẫn chạy trong
+  // RunManager cho tới kết quả, không bị hủy giữa chừng. Mở lại session
+  // đang chạy thì replayLiveRun vẽ thêm tiến trình trực tiếp của nó.
   async switchSession(id: string): Promise<void> {
-    if (this.running) { this.post('error', { text: 'Đang có một yêu cầu chạy. Bấm Dừng rồi mới đổi hội thoại.' }); return; }
     const target = this.store.sessions.find((s) => s.id === id);
     if (!target || target.id === this.currentSessionId) { return; }
     // v0.8.2, việc 3: session chưa có accountId thì thử backfill bằng
@@ -1169,6 +1303,9 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     if (this.history.length > 0) {
       this.post('history', { messages: this.history.map((h) => ({ role: h.role, text: typeof h.content === 'string' ? h.content : '' })) });
     }
+    // Session đích đang có run sống thì vẽ thêm tiến trình trực tiếp
+    // của nó (không chỉ lịch sử tĩnh đã lưu).
+    this.replayLiveRun(target.id);
     this.postSessions();
     this.post('status', { text: `Đã chuyển sang hội thoại: ${target.title}` });
     if (target.importedFromWeb) {
@@ -1198,7 +1335,8 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     // v0.8.13: các đường thoát sớm cũng postSessions để nút Hội thoại
     // mới ở webview không kẹt loading (tín hiệu hoàn tất của nhóm
     // thao tác session là message 'sessions').
-    if (this.running) { this.post('error', { text: 'Đang có một yêu cầu chạy. Bấm Dừng rồi mới tạo hội thoại mới.' }); this.postSessions(); return false; }
+    // v0.8.27: tạo mới KHÔNG còn chặn khi đang chạy — các run cũ vẫn
+    // chạy trong RunManager, bề mặt này chỉ chuyển sang session mới.
     let accounts: Array<{ id: string; label: string; enabled: boolean; status: string; email: string | null; username: string | null }>;
     try {
       accounts = await this.fetchAccountsCached();
@@ -1290,13 +1428,17 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   async deleteSessionById(id: string): Promise<void> {
     const session = this.store.find(id);
     if (!session) { this.postSessions(); return; }
-    if (this.running && id === this.currentSessionId) { this.abort?.abort(); }
     let msg = `Xóa hội thoại "${session.title}"? Lịch sử của hội thoại này sẽ mất.`;
     if (session.threadUrl) {
       msg += ' Chỉ xóa trong extension và mapping gateway; thread gốc vẫn còn trên web muse.ai trừ khi bạn xóa tay trên web, và đồng bộ sau sẽ không tự nhập lại thread này nữa (muốn nhập lại thì dùng lệnh "Muse: Cho phép nhập lại các hội thoại đã xóa").';
     }
     const answer = await vscode.window.showWarningMessage(msg, 'Xóa', 'Hủy');
     if (answer !== 'Xóa') { this.postSessions(); return; }
+    // v0.8.27: session đang có run thì abort run đó TRƯỚC khi xóa (sau
+    // khi user đã xác nhận, không abort trước để bấm Hủy không giết
+    // run oan). finally của run chịu được session đã mất: nó kiểm tra
+    // store.find trước khi ghi, không hồi sinh session đã xóa.
+    this.runManager.abort(id);
     // Tombstone trước khi xóa khỏi danh sách (điểm c).
     if (session.threadUrl) { this.addDeletedThreadUrl(session.threadUrl); }
     // Xóa mapping gateway (điểm b): best-effort, lỗi thì vẫn xóa
@@ -1617,10 +1759,9 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private saveHistory(): void {
-    this.saveSessions();
-  }
-
+  // v0.8.27: saveHistory() cũ (saveSessions qua bề mặt) đã xóa — run()
+  // ghi thẳng vào session đích và finishRun persist, không còn lưu
+  // lịch sử qua bề mặt đang hiển thị nữa.
   clearHistory(): void {
     // v0.8.2: danh sách rỗng thì không có gì để xóa lịch sử.
     if (!this.currentSession()) { this.post('historyCleared', {}); this.postSessions(); return; }
@@ -1670,9 +1811,9 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // nhận tin nên run/switch/delete đều tác động đúng bề mặt đó.
   // Điểm mới duy nhất so với sidebar cũ: 'openInNewTab' mở session
   // trong một WebviewPanel riêng (xem openSessionInPanel).
-  private onWebviewMessage(m: { type?: string; text?: string; id?: string; width?: number; uris?: unknown; files?: unknown }): void {
+  private onWebviewMessage(m: { type?: string; text?: string; id?: string; width?: number; height?: number; uris?: unknown; files?: unknown }): void {
     if (m.type === 'send' && m.text) { void this.run(m.text); }
-    else if (m.type === 'stop') { this.abort?.abort(); }
+    else if (m.type === 'stop') { this.stop(); }
     else if (m.type === 'openSettings') { this.openSettings(); }
     else if (m.type === 'attach') { void this.attachFile(); }
     else if (m.type === 'dropUris') {
@@ -1722,6 +1863,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     else if (m.type === 'switchSession' && m.id) { void this.switchSession(m.id); }
     else if (m.type === 'setAccountFilter' && typeof m.id === 'string') { void this.setAccountFilter(m.id); }
     else if (m.type === 'setSessionListWidth' && typeof m.width === 'number') { void this.setSessionListWidth(m.width); }
+    else if (m.type === 'setComposerHeight' && typeof m.height === 'number') { void this.setComposerHeight(m.height); }
     else if (m.type === 'openInNewTab' && m.id) { void this.openSessionInPanel(m.id); }
     else if (m.type === 'renameSession') { void this.renameSession(); }
     else if (m.type === 'deleteSession') { void this.deleteSession(); }
@@ -1748,6 +1890,9 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         messages: this.history.map((h) => ({ role: h.role, text: typeof h.content === 'string' ? h.content : '' })),
       });
     }
+    // Sidebar mở lại mà session đang mở có run sống thì vẽ thêm tiến
+    // trình trực tiếp của nó (v0.8.27, như switchSession).
+    this.replayLiveRun(this.currentSessionId);
     if (this.currentSession()?.importedFromWeb) {
       this.post('importedBanner', { text: 'Hội thoại này được đồng bộ từ web muse.ai. Lịch sử cũ nằm trên thread web, tin nhắn tiếp theo sẽ nối tiếp thread đó.' });
     }
@@ -1766,7 +1911,12 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     else { this.pendingPreset = text; }
   }
 
-  stop(): void { this.abort?.abort(); }
+  // v0.8.27: Dừng chỉ hủy run của session ĐANG HIỂN THỊ trên bề mặt
+  // này, không đụng run của session khác (mỗi session một slot riêng
+  // trong RunManager). Không có run thì im lặng, không báo lỗi giả.
+  stop(): void {
+    if (this.currentSessionId) { this.runManager.abort(this.currentSessionId); }
+  }
 
   // Đính kèm tệp vào lượt chat tiếp theo. Gateway chat chỉ nhận text và
   // ảnh (part text / image_url, xem Prompt.ContentToText trong Models.cs),
@@ -1924,9 +2074,11 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // tài khoản vẫn dùng được; 'unknown' nếu không đọc được pool (lỗi
   // mạng, 401 gateway ngoài có admin key riêng) — trường hợp này KHÔNG
   // chặn, để tương thích ngược. 'loggedout'/'cooling'/'disabled' thì chặn.
-  private async checkSessionAccount(gwConf: { baseUrl: string; apiKey: string }): Promise<'ok' | 'unknown' | 'loggedout' | 'cooling' | 'disabled'> {
-    const session = this.currentSession();
-    if (!session || !session.accountId) { return 'ok'; }
+  // v0.8.27: kiểm tra theo session đích truyền vào (không còn
+  // currentSession() của bề mặt, vì bề mặt có thể đã chuyển đi nơi
+  // khác trong lúc run chạy).
+  private async checkSessionAccount(gwConf: { baseUrl: string; apiKey: string }, session: ChatSession): Promise<'ok' | 'unknown' | 'loggedout' | 'cooling' | 'disabled'> {
+    if (!session.accountId) { return 'ok'; }
     let accounts: Array<{ id: string; enabled: boolean; status: string }>;
     try {
       accounts = await fetchGatewayAccounts(gwConf.baseUrl, gwConf.apiKey);
@@ -1941,10 +2093,21 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   }
 
   // ---------------- Vòng lặp agent: gọi gateway, parse tool, thực thi ----------------
+  // Vòng lặp agent, vận hành trên SESSION ĐÍCH (v0.8.27), không còn
+  // trên "session đang hiển thị" của bề mặt gọi nó. run() là điểm vào
+  // từ nút Gửi của một bề mặt: nó xác định session đích (session đang
+  // mở của bề mặt đó, hoặc tạo mới khi rỗng), giành slot của session
+  // đó trong RunManager rồi chạy toàn bộ vòng lặp trên session đó.
+  // Bề mặt có chuyển đi nơi khác giữa chừng thì run vẫn chạy tới kết
+  // quả (slot + AbortController sống trong RunManager, tin nhắn ghi
+  // vào messages của session đích, hiển thị qua sink tới mọi bề mặt
+  // đang mở đúng session đó). 'done' cuối lượt do finally gửi (qua
+  // sink.done) nên mọi đường thoát sớm trong phần giữ slot KHÔNG tự
+  // post 'done' nữa — tránh double 'done' và tránh quên 'done'.
   async run(userText: string): Promise<void> {
-    // v0.8.13: hai đường thoát sớm này cũng post 'done' như các đường
-    // khác của run(), để nút Gửi ở webview không kẹt loading.
-    if (this.running) { this.post('error', { text: 'Đang có một yêu cầu chạy. Bấm Dừng rồi gửi lại.' }); this.post('done', {}); return; }
+    // v0.8.13: các đường thoát sớm TRƯỚC khi giành slot cũng post
+    // 'done' như các đường khác của run(), để nút Gửi ở webview không
+    // kẹt loading.
     const root = workspaceRoot();
     if (!root) {
       this.post('error', { text: 'Hãy mở một thư mục dự án trong VS Code trước (File > Open Folder), rồi gửi lại yêu cầu.' });
@@ -1952,66 +2115,112 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       return;
     }
     const conf = cfg();
-    this.running = true;
-    this.abort = new AbortController();
-    const signal = this.abort.signal;
     // v0.8.2, việc 2d: gửi tin khi danh sách rỗng thì tự tạo session
     // mới (qua đúng luồng chọn tài khoản của newSession) rồi mới gửi.
     // User hủy chọn tài khoản thì dừng, không gửi tin mù tài khoản.
-    if (!this.currentSession()) {
+    let session = this.currentSession();
+    if (!session) {
       const created = await this.newSession();
       if (!created) {
-        this.running = false;
+        this.post('done', {});
+        return;
+      }
+      session = this.currentSession();
+      if (!session) {
         this.post('done', {});
         return;
       }
     }
+    // Giành slot của session đích. Session đã có run thì lượt này bị
+    // từ chối RIÊNG session đó (không đụng run đang chạy, không đụng
+    // run của session khác) — đây là điểm thay cho cờ running cũ.
+    const targetId = session.id;
+    const slot = this.runManager.tryStart(targetId, session.accountId || '');
+    if (!slot) {
+      this.post('error', { text: 'Hội thoại này đang có một yêu cầu chạy. Chờ nó xong rồi gửi tiếp.' });
+      this.post('done', {});
+      return;
+    }
+    // Run mới bắt đầu thì xóa tích cũ của run gần nhất: tích chỉ phản
+    // ánh run gần nhất, và 'running' thắng 'done' trong runStatusFor
+    // nên từ đây danh sách hiện xoay tròn cho session này.
+    if (session.lastRunOutcome) {
+      session.lastRunOutcome = undefined;
+      this.store.persist();
+    }
+    const signal = slot.abort.signal;
+    const sink = this.createRunSink(targetId);
+    // Trạng thái của riêng lượt này (thay cho các trường provider cũ
+    // đã gây race khi cùng surface gửi 2 session — xem RunCtx).
+    const ctx: RunCtx = { lastStreamed: false, lastToolImages: [], lastToolFiles: [], lastComputerImage: undefined, turnFileCount: 0 };
+    // Lịch sử của session đích (tham chiếu sống tới session.messages
+    // trong store): vòng lặp đọc/ghi trực tiếp lên nó, không qua
+    // this.history của bề mặt (bề mặt có thể đã chuyển đi nơi khác).
+    const history = session.messages;
+    let outcome: 'done' | 'error' | 'stopped' = 'error';
+    // Helper kết thúc run (v0.8.27): mọi đường thoát sau khi giành slot
+    // đều qua đây — gateway lỗi, gate chặn, vòng lặp xong/lỗi/dừng.
+    // Chỉ persist khi outcome đổi lastRunOutcome (done/error); turn
+    // dừng (stopped) không ghi gì thêm, đúng như trước đây finally cũ
+    // chỉ tắt cờ mà không lưu. Chỉ bump updatedAt khi done (tin nhắn
+    // mới đã ghi vào session); lỗi thì không đẩy session lên đầu danh
+    // sách. Session đã bị xóa giữa chừng thì bỏ qua ghi (không hồi
+    // sinh), nhưng vẫn finish slot + sink.done để nút Gửi hết loading.
+    const finishRun = (o: 'done' | 'error' | 'stopped'): void => {
+      const alive = this.store.find(targetId);
+      if (alive && (o === 'done' || o === 'error')) {
+        alive.lastRunOutcome = o;
+        if (o === 'done') { alive.updatedAt = Date.now(); }
+        this.store.persist();
+      }
+      this.runManager.finish(targetId);
+      sink.done();
+    };
     // Trước vòng lặp agent: đảm bảo gateway đang chạy và lấy đúng
     // baseUrl/apiKey hiện tại (gateway chết thì tự khởi động lại; gateway
     // kèm theo dùng key do extension quản lý, không bắt buộc muse.apiKey).
     // Lỗi ở đây đã chứa hướng dẫn cụ thể nên hiển thị nguyên văn.
     let gwConf = conf;
     try {
-      this.post('status', { text: 'Đang kiểm tra gateway…' });
+      sink.post('status', { text: 'Đang kiểm tra gateway…' });
       const gw = await this.gateway.ensureStarted();
       gwConf = { ...conf, baseUrl: gw.baseUrl, apiKey: gw.apiKey };
-      this.post('status', { text: gw.mode === 'bundled' ? 'Gateway kèm theo đã sẵn sàng.' : 'Đã kết nối gateway sẵn có.' });
+      sink.post('status', { text: gw.mode === 'bundled' ? 'Gateway kèm theo đã sẵn sàng.' : 'Đã kết nối gateway sẵn có.' });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Panel Nhật ký (v0.6.0): lỗi gateway cũng vào buffer để xem
       // ngay trong khung chat, không chỉ trong Output channel.
       try { this.gateway.appendLogLine(`Lỗi gateway: ${msg}`); } catch { /* không chặn bubble lỗi */ }
-      this.post('error', { text: `Lỗi gateway: ${msg}` });
-      this.running = false;
-      this.post('done', {});
+      sink.post('error', { text: `Lỗi gateway: ${msg}` });
+      finishRun('error');
       return;
     }
-    // Gate đăng nhập lại: nếu tài khoản của session hiện tại đã hết hạn
+    // Gate đăng nhập lại: nếu tài khoản của session đích đã hết hạn
     // hoặc logout thì KHÔNG gửi chat, hiện bubble yêu cầu đăng nhập lại
     // với nút Mở Cài đặt. Không tự gửi lại sau khi đăng nhập lại; user
     // tự gửi lại tin nhắn. Cooling/disabled chặn với lý do riêng.
     {
-      const gate = await this.checkSessionAccount(gwConf);
+      const gate = await this.checkSessionAccount(gwConf, session);
       if (gate !== 'ok' && gate !== 'unknown') {
-        const session = this.currentSession();
-        const label = session ? (session.accountLabel || session.accountId || 'tài khoản của hội thoại này') : 'tài khoản của hội thoại này';
+        const label = session.accountLabel || session.accountId || 'tài khoản của hội thoại này';
         const text = gate === 'loggedout'
           ? `Hội thoại này dùng tài khoản ${label} đã hết hạn hoặc đã đăng xuất. Tin nhắn này chưa được gửi. Hãy đăng nhập lại trong Cài đặt rồi gửi lại tin nhắn.`
           : gate === 'cooling'
             ? `Tài khoản ${label} của hội thoại này đang cooling. Tin nhắn này chưa được gửi. Bạn có thể chờ hết cooldown hoặc vào Cài đặt để xóa cooldown rồi gửi lại.`
             : `Tài khoản ${label} của hội thoại này đang tắt. Tin nhắn này chưa được gửi. Hãy vào Cài đặt để bật lại tài khoản rồi gửi lại.`;
-        this.post('loginRequired', { text });
-        this.running = false;
-        this.postSessions();
-        this.post('done', {});
+        sink.post('loginRequired', { text });
+        finishRun('error');
         return;
       }
     }
     try {
+      // Đính kèm chờ gửi thuộc về bề mặt gốc (nơi user bấm Gửi): chỉ
+      // xóa chip ở bề mặt đó, KHÔNG qua sink (sink sẽ xóa nhầm chip
+      // ở bề mặt khác đang mở cùng session).
       const attachments = this.pendingAttachments;
       this.pendingAttachments = [];
       if (attachments.length > 0) { this.post('attachmentsCleared', {}); }
-      this.post('message', { role: 'user', text: attachments.length > 0 ? `${userText}\n[Đã đính kèm: ${attachments.map((a) => `${a.name} (${a.kindLabel})`).join(', ')}]` : userText });
+      sink.post('message', { role: 'user', text: attachments.length > 0 ? `${userText}\n[Đã đính kèm: ${attachments.map((a) => `${a.name} (${a.kindLabel})`).join(', ')}]` : userText });
       const textBlocks = [userText,
         ...attachments.filter((a) => a.kind === 'text').map((a) => `[Nội dung tệp đính kèm: ${a.name}]\n${a.text}`),
         ...attachments.filter((a) => a.note).map((a) => a.note as string),
@@ -2027,13 +2236,17 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       // v0.8.20: ngân sách file của lượt này bắt đầu từ số file
       // đính kèm tay (ảnh/văn bản không tính), tool send_file
       // cộng thêm và bị chặn khi đủ 10.
-      this.turnFileCount = attachments.filter((a) => a.kind === 'file' && a.dataUrl).length;
-      const request: ChatMsg[] = [{ role: 'system', content: conf.localTools ? SYSTEM_PROMPT : SYSTEM_PROMPT_CHAT_ONLY }, ...this.history, { role: 'user', content: userContent }];
+      ctx.turnFileCount = attachments.filter((a) => a.kind === 'file' && a.dataUrl).length;
+      const request: ChatMsg[] = [{ role: 'system', content: conf.localTools ? SYSTEM_PROMPT : SYSTEM_PROMPT_CHAT_ONLY }, ...history, { role: 'user', content: userContent }];
       let malformed = 0;
       for (let step = 0; step < conf.maxSteps; step++) {
-        if (signal.aborted) { this.post('status', { text: 'Đã dừng.' }); break; }
-        this.post('status', { text: `Đang suy nghĩ… (bước ${step + 1}/${conf.maxSteps})` });
-        const reply = await this.chatOnce(gwConf, request, signal);
+        if (signal.aborted) { sink.post('status', { text: 'Đã dừng.' }); break; }
+        sink.post('status', { text: `Đang suy nghĩ… (bước ${step + 1}/${conf.maxSteps})` });
+        // v0.8.27: gateway stream đi qua hàng đợi theo tài khoản của
+        // RunManager (tối đa một stream mỗi accountId tại một thời
+        // điểm, xem runManager.ts) — lượt chờ vẫn mang trạng thái
+        // running, không chết vì PoolAcquireTimeout của gateway.
+        const reply = await this.chatOnceQueued(gwConf, request, signal, session, sink, ctx);
         const calls = parseToolCalls(reply);
         request.push({ role: 'assistant', content: reply });
         if (calls.length === 0) {
@@ -2045,38 +2258,38 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           // mục "Chi tiết" mà user bấm mới mở ra.
           const planner = plannerReply(reply);
           const finalText = planner.display || '(Muse không trả lời gì.)';
-          if (this.lastStreamed) { this.post('streamFinal', { text: finalText, details: planner.raw || '' }); }
-          else if (planner.raw) { this.post('message', { role: 'assistant', text: finalText, details: planner.raw }); }
-          else { this.post('message', { role: 'assistant', text: finalText }); }
-          this.post('status', { text: 'Xong.' });
+          if (ctx.lastStreamed) { sink.post('streamFinal', { text: finalText, details: planner.raw || '' }); }
+          else if (planner.raw) { sink.post('message', { role: 'assistant', text: finalText, details: planner.raw }); }
+          else { sink.post('message', { role: 'assistant', text: finalText }); }
+          sink.post('status', { text: 'Xong.' });
           // Đặt tên session tự động từ tin đầu tiên nếu session vẫn đang
           // mang tên mặc định, để danh sách session đọc được ngay.
-          if (this.history.length === 0) {
-            const session = this.currentSession();
-            if (session && (session.title === 'Hội thoại mới' || session.title === 'Hội thoại 1')) {
+          if (history.length === 0) {
+            if (session.title === 'Hội thoại mới' || session.title === 'Hội thoại 1') {
               session.title = userText.trim().slice(0, 40) || session.title;
-              this.postSessions();
             }
           }
-          this.history.push({ role: 'user', content: userText }, { role: 'assistant', content: finalText });
-          if (this.history.length > 40) { this.history.splice(0, this.history.length - 40); }
-          this.saveHistory();
+          // Ghi thẳng vào messages của session đích (tham chiếu sống
+          // trong store): bề mặt đang mở session này có this.history
+          // trỏ cùng mảng nên thấy ngay, không cần đồng bộ ngược.
+          history.push({ role: 'user', content: userText }, { role: 'assistant', content: finalText });
+          if (history.length > 40) { history.splice(0, history.length - 40); }
           // v0.8.2, việc 3: sau lần chat đầu tiên thành công, session
           // chưa có accountId thì thử backfill bằng by-hint (mapping
           // gateway vừa được BeginChat lưu) để dòng tài khoản hiện
           // đúng tài khoản thật đã dùng. Lỗi thì giữ nguyên, không vỡ.
           try {
-            const cur = this.currentSession();
-            if (cur && !cur.accountId) { await this.backfillOneSessionByHint(cur); }
+            if (!session.accountId) { await this.backfillOneSessionByHint(session); }
           } catch { /* giữ nguyên "Chưa xác định" */ }
+          outcome = 'done';
           return;
         }
         const bad = calls.find((c) => c.name === '__parse_error__');
         if (bad) {
           malformed++;
           const err = str(bad.args.error, 'Định dạng tool sai.');
-          this.post('status', { text: 'Muse gửi tool sai định dạng, đang yêu cầu gửi lại…' });
-          if (malformed >= 3) { this.post('error', { text: `Dừng sau 3 phản hồi sai định dạng: ${err} Không thực thi thao tác nào từ các phản hồi lỗi.` }); return; }
+          sink.post('status', { text: 'Muse gửi tool sai định dạng, đang yêu cầu gửi lại…' });
+          if (malformed >= 3) { sink.post('error', { text: `Dừng sau 3 phản hồi sai định dạng: ${err} Không thực thi thao tác nào từ các phản hồi lỗi.` }); return; }
           request.push({ role: 'user', content: `APP_PROTOCOL_REPAIR: ${err} Chỉ gửi lại MỘT thao tác nhỏ trong một code fence \`\`\`json. Không lặp lại lô đã bị từ chối.` });
           continue;
         }
@@ -2084,16 +2297,16 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
         // tool thì TỪ CHỐI thực thi toàn bộ lô, báo rõ cho user, không
         // thực thi rồi mới báo. (Phòng thủ thêm ở đầu execute().)
         if (!conf.localTools) {
-          this.post('error', { text: 'Tool cục bộ đang tắt (muse.localTools = false) nên Muse không chạy tool nào trong workspace. Hãy bật lại bằng lệnh "Muse: Bật/Tắt tool cục bộ" nếu muốn agent đọc/sửa/chạy file, rồi gửi lại yêu cầu.' });
+          sink.post('error', { text: 'Tool cục bộ đang tắt (muse.localTools = false) nên Muse không chạy tool nào trong workspace. Hãy bật lại bằng lệnh "Muse: Bật/Tắt tool cục bộ" nếu muốn agent đọc/sửa/chạy file, rồi gửi lại yêu cầu.' });
           return;
         }
         for (const call of calls) {
           if (signal.aborted) { break; }
-          this.post('tool', { name: call.name, detail: describe(call) });
-          this.lastComputerImage = undefined;
-          this.lastToolImages = [];
-          this.lastToolFiles = [];
-          const result = await this.execute(call, root, conf, signal);
+          sink.post('tool', { name: call.name, detail: describe(call) });
+          ctx.lastComputerImage = undefined;
+          ctx.lastToolImages = [];
+          ctx.lastToolFiles = [];
+          const result = await this.execute(call, root, conf, signal, ctx);
           // v0.8.18, tổng quát hóa: tool nào trả về ảnh thì message
           // TOOL_RESULT của chính call đó kèm đúng các image_url tương
           // ứng (read_image: 1 ảnh, read_video_frames: tối đa 4 khung);
@@ -2101,14 +2314,21 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           // khác không có ảnh nên message vẫn text thuần như trước.
           // v0.8.20: tương tự cho file (send_file: 1 file/call) qua
           // file part, không phải image_url hay text.
-          const resultImages = this.lastToolImages.length > 0
-            ? this.lastToolImages
-            : (call.name.startsWith('computer_') && this.lastComputerImage ? [this.lastComputerImage] : []);
-          request.push({ role: 'user', content: toolResultContent(call.name, result, resultImages, this.lastToolFiles) });
-          this.post('toolResult', { name: call.name, detail: truncate(result, 500) });
+          const resultImages = ctx.lastToolImages.length > 0
+            ? ctx.lastToolImages
+            : (call.name.startsWith('computer_') && ctx.lastComputerImage ? [ctx.lastComputerImage] : []);
+          request.push({ role: 'user', content: toolResultContent(call.name, result, resultImages, ctx.lastToolFiles) });
+          sink.post('toolResult', { name: call.name, detail: truncate(result, 500) });
         }
       }
-      this.post('error', { text: `Đã hết ${conf.maxSteps} bước tối đa mà yêu cầu chưa hoàn tất. Các bước đã thành công vẫn được giữ lại; hãy gửi tiếp yêu cầu nhỏ hơn.` });
+      // Hết vòng lặp mà chưa return: phân biệt dừng tay với hết bước.
+      // (Sửa quirk cũ: trước đây break do abort cũng rơi xuống đây và
+      // hiện nhầm lỗi hết bước; từ 0.8.27, abort chỉ báo 'Đã dừng.')
+      if (signal.aborted) {
+        outcome = 'stopped';
+      } else {
+        sink.post('error', { text: `Đã hết ${conf.maxSteps} bước tối đa mà yêu cầu chưa hoàn tất. Các bước đã thành công vẫn được giữ lại; hãy gửi tiếp yêu cầu nhỏ hơn.` });
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Panel Nhật ký (v0.6.0): lỗi chat vào buffer để panel có lỗi ngay
@@ -2119,25 +2339,29 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       if (!signal.aborted) {
         try { this.gateway.appendLogLine(`Lỗi chat: ${msg}`); } catch { /* không chặn bubble lỗi */ }
       }
-      if (signal.aborted) { this.post('status', { text: 'Đã dừng.' }); }
-      else if (msg.includes('no_account_available')) {
+      if (signal.aborted) {
+        sink.post('status', { text: 'Đã dừng.' });
+        outcome = 'stopped';
+      } else if (msg.includes('no_account_available')) {
         // Lỗi 503 này nghĩa là pool gateway chưa có tài khoản khả dụng,
         // không phải lỗi key/cổng. Webview hiện nút hành động được thay vì
         // chỉ mã lỗi; việc nhập đăng nhập vẫn phải làm trên máy người dùng.
-        this.post('accountError', { text: 'Gateway đã chạy nhưng chưa có tài khoản Muse nào khả dụng (lỗi no_account_available). Bạn chưa nhập đăng nhập vào gateway kèm theo, hoặc tài khoản đang cooling/invalid. Bấm một nút dưới đây, rồi gửi lại câu hỏi.' });
+        sink.post('accountError', { text: 'Gateway đã chạy nhưng chưa có tài khoản Muse nào khả dụng (lỗi no_account_available). Bạn chưa nhập đăng nhập vào gateway kèm theo, hoặc tài khoản đang cooling/invalid. Bấm một nút dưới đây, rồi gửi lại câu hỏi.' });
       } else if (msg.includes('upstream_response_unavailable') || msg.includes('stopped responding without a completed reply')) {
         // Lỗi 502 này khác 503/429: Muse web đã bắt đầu trả lời rồi dừng,
         // nhưng gateway không xác định được một phản hồi hoàn tất gắn với
         // yêu cầu này nên dừng chờ. Hội thoại được giữ nguyên, gateway
         // KHÔNG tự gửi lại. Đừng tạo session mới hay xóa lịch sử vì sẽ
         // mất ngữ cảnh; gửi tiếp một tin ngắn trong cùng session này.
-        this.post('error', { text: 'Muse web đã bắt đầu trả lời rồi dừng mà gateway không xác định được phản hồi hoàn tất (lỗi 502 upstream_response_unavailable). Đây không phải hết lượt hay hết tài khoản. Hội thoại hiện tại vẫn được giữ nguyên và gateway không tự gửi lại, nên bạn đừng tạo hội thoại mới hay xóa lịch sử. Hãy gửi tiếp một tin ngắn trong cùng hội thoại này, ví dụ: "Bạn vừa dừng mà chưa trả lời xong, hãy trả lời lại ngắn gọn." Nếu lỗi lặp lại nhiều lần, kiểm tra Output > Muse Gateway (dòng local_reply_poll) và thử lại sau ít phút.' });
+        sink.post('error', { text: 'Muse web đã bắt đầu trả lời rồi dừng mà gateway không xác định được phản hồi hoàn tất (lỗi 502 upstream_response_unavailable). Đây không phải hết lượt hay hết tài khoản. Hội thoại hiện tại vẫn được giữ nguyên và gateway không tự gửi lại, nên bạn đừng tạo hội thoại mới hay xóa lịch sử. Hãy gửi tiếp một tin ngắn trong cùng hội thoại này, ví dụ: "Bạn vừa dừng mà chưa trả lời xong, hãy trả lời lại ngắn gọn." Nếu lỗi lặp lại nhiều lần, kiểm tra Output > Muse Gateway (dòng local_reply_poll) và thử lại sau ít phút.' });
       } else {
-        this.post('error', { text: `Lỗi: ${msg}` });
+        sink.post('error', { text: `Lỗi: ${msg}` });
       }
     } finally {
-      this.running = false;
-      this.post('done', {});
+      // Run kết thúc ở bất kỳ đường nào trong try này (return thành
+      // công, lỗi, dừng) đều qua finishRun: ghi outcome, finish slot
+      // (fan-out postSessions hiện tích/lỗi), sink.done.
+      finishRun(outcome);
     }
   }
 
@@ -2147,19 +2371,21 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   // tích lũy toàn bộ văn bản để parse tool như cũ, đồng thời đẩy từng
   // delta ra webview để hiện dần. Nếu gateway trả về không phải SSE
   // (ví dụ lỗi JSON), rơi về đường parse JSON không-stream.
-  private async chatOnce(conf: ReturnType<typeof cfg>, messages: ChatMsg[], signal: AbortSignal): Promise<string> {
+  // v0.8.27: session/sink/ctx của lượt chạy truyền vào (không còn
+  // currentSession()/conversationId/lastStreamed của bề mặt — bề mặt
+  // có thể đã chuyển đi nơi khác trong lúc lượt này chạy).
+  private async chatOnce(conf: ReturnType<typeof cfg>, messages: ChatMsg[], signal: AbortSignal, session: ChatSession, sink: RunSink, ctx: RunCtx): Promise<string> {
     const url = `${conf.baseUrl.replace(/\/v1$/, '')}/v1/chat/completions`;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (conf.apiKey) { headers.Authorization = `Bearer ${conf.apiKey}`; }
-    this.lastStreamed = false;
+    ctx.lastStreamed = false;
     // v0.8.2, việc 3: gửi account_id của session đã chọn để gateway
     // mới ép đúng tài khoản đó (gateway cũ bỏ qua trường lạ này).
     // Việc 4: gửi _muse_local_tools đúng theo setting, KHÔNG cứng true
     // nữa — false nghĩa là gateway cũng không bắt model trả tool.
-    const sessionForChat = this.currentSession();
     const resp = await fetch(url, {
       method: 'POST', headers, signal,
-      body: JSON.stringify({ model: conf.model, messages, temperature: 0.2, stream: true, _muse_local_tools: conf.localTools, account_id: sessionForChat?.accountId || undefined, user: this.conversationId }),
+      body: JSON.stringify({ model: conf.model, messages, temperature: 0.2, stream: true, _muse_local_tools: conf.localTools, account_id: session.accountId || undefined, user: session.conversationId }),
     });
     const contentType = resp.headers.get('content-type') || '';
     if (!resp.ok) {
@@ -2184,7 +2410,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
       }
       return typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? '');
     }
-    this.post('streamStart', {});
+    sink.post('streamStart', {});
     let full = '';
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -2209,8 +2435,8 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
               const delta = chunk.choices?.[0]?.delta?.content;
               if (delta) {
                 full += delta;
-                this.lastStreamed = true;
-                this.post('streamDelta', { text: delta });
+                ctx.lastStreamed = true;
+                sink.post('streamDelta', { text: delta });
               }
             } catch { /* bỏ qua chunk SSE lỗi, giữ phần đã nhận */ }
           }
@@ -2222,14 +2448,27 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // Vỏ hàng đợi của chatOnce (v0.8.27): mỗi lần gọi gateway đi qua
+  // RunManager.runExclusive theo accountId của session đích — tối đa
+  // một gateway stream mỗi tài khoản tại một thời điểm. Lượt chờ bị
+  // abort thì không gọi gateway (runExclusive tự reject), lỗi lượt
+  // trước không chặn lượt sau. Mức gọi từng lần (không giữ slot tài
+  // khoản suốt lượt) nên các session cùng tài khoản xen kẽ từng bước
+  // một cách công bằng, không deadlock.
+  private async chatOnceQueued(conf: ReturnType<typeof cfg>, messages: ChatMsg[], signal: AbortSignal, session: ChatSession, sink: RunSink, ctx: RunCtx): Promise<string> {
+    return this.runManager.runExclusive(session.accountId || '', signal, () => this.chatOnce(conf, messages, signal, session, sink, ctx));
+  }
+
   // ---------------- Thực thi tool trong workspace ----------------
-  private async execute(call: ToolCall, root: string, conf: ReturnType<typeof cfg>, signal: AbortSignal): Promise<string> {
+  // v0.8.27: kết quả media/file của tool ghi vào ctx của lượt này
+  // (không còn trường provider) để run khác không đọc nhầm.
+  private async execute(call: ToolCall, root: string, conf: ReturnType<typeof cfg>, signal: AbortSignal, ctx: RunCtx): Promise<string> {
     // v0.8.2, việc 4: phòng thủ tầng execute — tool tắt thì không
     // tool nào chạy, kể cả tool máy tính, dù đường gọi nào tới đây.
     if (!conf.localTools) { return 'Tool cục bộ đang tắt (muse.localTools = false) nên không thực thi tool này.'; }
     try {
       if (signal.aborted) { return 'Đã dừng trước khi thực thi.'; }
-      if (COMPUTER_TOOLS.includes(call.name)) { return this.executeComputer(call, conf); }
+      if (COMPUTER_TOOLS.includes(call.name)) { return this.executeComputer(call, conf, ctx); }
       switch (call.name) {
         case 'list_files': {
           // v0.8.2, việc 4: TÔN TRỌNG limit/offset agent gửi (mặc định
@@ -2323,7 +2562,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           if (extError) { return `Lỗi: ${extError}, không nhận '${path.extname(rel) || '(không có đuôi)'}': ${rel}`; }
           const target = this.resolve(root, rel);
           const dataUrl = dataUrlOfImageFile(target);
-          this.lastToolImages = [dataUrl];
+          ctx.lastToolImages = [dataUrl];
           return `Đã gửi ảnh ${rel} kèm theo message này (định dạng ${path.extname(rel).toLowerCase()}, ${fs.statSync(target).size} byte). Hãy xem ảnh đính kèm để kiểm tra, không suy đoán nội dung ảnh từ tên file.`;
         }
         case 'read_video_frames': {
@@ -2345,7 +2584,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           if (frames.length === 0) {
             return `Không trích được khung hình nào từ video ${rel} (máy này có thể không có ffmpeg, hoặc video lỗi). Video gốc KHÔNG được gửi lên; hãy mô tả nội dung video hoặc đính kèm ảnh chụp khung hình thay thế.`;
           }
-          this.lastToolImages = frames;
+          ctx.lastToolImages = frames;
           return `Đã gửi ${frames.length} khung hình mẫu trích từ video ${rel} tại các mốc giây ${done.join(', ')} kèm theo message này. Đây CHỈ là các khung hình mẫu, KHÔNG phải toàn bộ video — đừng kết luận về những đoạn không có trong khung hình.`;
         }
         case 'send_file': {
@@ -2374,13 +2613,13 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
           }
           const st = fs.statSync(target);
           if (!st.isFile()) { return `Lỗi: send_file chỉ gửi được tệp, không phải thư mục: ${displayRel}`; }
-          const limitError = checkFileAttachmentLimit(st.size, this.turnFileCount);
+          const limitError = checkFileAttachmentLimit(st.size, ctx.turnFileCount);
           if (limitError) { return `Lỗi: ${limitError}`; }
           const buf = fs.readFileSync(target);
           const mime = mimeForFile(displayRel);
           const filename = path.basename(target);
-          this.lastToolFiles = [{ filename, mime, dataUrl: `data:${mime};base64,${buf.toString('base64')}` }];
-          this.turnFileCount++;
+          ctx.lastToolFiles = [{ filename, mime, dataUrl: `data:${mime};base64,${buf.toString('base64')}` }];
+          ctx.turnFileCount++;
           const videoNote = VIDEO_EXTS.includes(path.extname(displayRel).toLowerCase())
             ? ' Lưu ý: web đã nhận file không đồng nghĩa bạn xem được nội dung video — nếu bạn không truy cập được video thì hãy nói rõ và đề nghị dùng khung hình mẫu thay thế.'
             : '';
@@ -2468,7 +2707,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
   }
 
   // ---------------- Điều khiển màn hình Windows thử nghiệm ----------------
-  private async executeComputer(call: ToolCall, conf: ReturnType<typeof cfg>): Promise<string> {
+  private async executeComputer(call: ToolCall, conf: ReturnType<typeof cfg>, ctx: RunCtx): Promise<string> {
     const reason = this.computer.unavailableReason(conf.computerHelperPath, conf.allowComputerControl);
     if (reason) { return reason; }
     if (call.name === 'computer_list_windows') {
@@ -2491,7 +2730,7 @@ class MuseChatProvider implements vscode.WebviewViewProvider {
     }
     try {
       const res = await this.computer.call(conf.computerHelperPath, call.name, call.args);
-      if (res.imageDataUrl) { this.lastComputerImage = res.imageDataUrl; }
+      if (res.imageDataUrl) { ctx.lastComputerImage = res.imageDataUrl; }
       return res.text;
     } catch (e) {
       return `Lỗi: ${e instanceof Error ? e.message : String(e)}`;
@@ -2817,7 +3056,12 @@ export function activate(context: vscode.ExtensionContext): void {
   const gateway = new GatewayManager(context, output, gatewayConfig, updateStatusBar);
   sharedGateway = gateway;
   updateStatusBar('stopped', 'Chưa khởi động');
-  const provider = new MuseChatProvider(context, gateway, undefined, { isSidebar: true });
+  // v0.8.27: store + RunManager tạo MỘT LẦN ở đây, truyền chung cho
+  // sidebar và mọi panel (openSessionInPanel) — trạng thái chạy sống
+  // ở RunManager nên chuyển bề mặt không hủy run cũ.
+  const store = new SessionStore(context, workspaceRoot);
+  const runManager = new RunManager();
+  const provider = new MuseChatProvider(context, gateway, store, { isSidebar: true, runManager });
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(MuseChatProvider.viewId, provider));
   const preset = (text: string) => provider.focusAndPreset(text);
   context.subscriptions.push(
